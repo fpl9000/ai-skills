@@ -2,8 +2,10 @@
 
 A collection of useful AI skills in standard skill file layout.
 
-This repo contains the following skills:
+This repo contains the following skills.  Each `.skill` package file has a matching directory
+containing the files in the skill package (e.g., the files for `myskill.skill` are in directory
+`myskill`).
 
-* ...
+* **transcript-saver.skill**: A skill to save an HTML transcript of a conversation.
 
 * ...
