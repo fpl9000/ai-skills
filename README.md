@@ -1,6 +1,7 @@
 # ai-skills
 
-A collection of useful AI skills in standard skill file layout.
+A collection of useful AI skills in standard skill file layout.  See https://agentskills.io for the
+official skills specification and documentation.
 
 This repo contains the following skills.  Each `.skill` package file has a matching directory
 containing the files in the skill package (e.g., the files for `myskill.skill` are in directory
