@@ -1,6 +1,6 @@
 ---
 name: bluesky
-description: Read from and post to Bluesky social network using the AT Protocol. Use this skill when the user wants to interact with Bluesky including posting text/images/links, reading their timeline, searching posts, viewing profiles, following/unfollowing users, or checking notifications. All scripts use PEP 723 inline metadata for dependencies and run via `uv run`. Requires BLUESKY_HANDLE and BLUESKY_PASSWORD environment variables.
+description: Read from and post to Bluesky social network using the AT Protocol. Use this skill when the user wants to interact with Bluesky including posting text/images/links, replying to posts, reading their timeline, searching posts, viewing profiles, following/unfollowing users, checking notifications, or viewing reply threads. All scripts use PEP 723 inline metadata for dependencies and run via `uv run`. Requires BLUESKY_HANDLE and BLUESKY_PASSWORD environment variables.
 ---
 
 # Bluesky Skill
@@ -9,23 +9,27 @@ Interact with Bluesky social network via the AT Protocol Python SDK (`atproto`).
 
 ## Prerequisites
 
+**Tool Dependency**:
+- `uv` - The scripts in this skill require the [uv](https://docs.astral.sh/uv/) package manager/runner. Most cloud-based AI coding agents (like Claude) have `uv` pre-installed. For local agents, install it via `curl -LsSf https://astral.sh/uv/install.sh | sh` or see the [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/).
+
 **Environment Variables** (must be set before running any script):
 - `BLUESKY_HANDLE` - Your Bluesky handle (e.g., `yourname.bsky.social`)
 - `BLUESKY_PASSWORD` - Your Bluesky App Password (create in Settings > App Passwords)
 
 **Important**: Use an App Password, not your main account password. App Passwords can be revoked individually if compromised.
 
-### Domains Accessed by the Scripts
+## Network Access
 
-The scripts in this skill access the following domains:
+This skill requires network access to the following domains:
 
-- bsky.social
-- bsky.app
-- bsky.network
-- public.api.bsky.app
-- *.bsky.network
+| Domain | Purpose |
+|--------|---------|
+| `bsky.social` | Main Bluesky PDS (Personal Data Server) for authentication and API requests |
+| `bsky.network` | Bluesky network infrastructure |
+| `*.bsky.network` | Bluesky CDN and relay services |
+| `public.api.bsky.app` | Public API endpoint for unauthenticated queries |
 
-If this skill is used in the AI's cloud-based remote environemnt, these domains may need to be enabled in the AIs network egress settings.  This is definitely the case for Claude, and may be for others as well.
+**Important**: If your AI agent has network restrictions, you may need to whitelist these domains in the agent's settings for this skill to function. For example, in Claude's computer use settings, add these domains to the allowed network list.
 
 ## Available Scripts
 
@@ -54,6 +58,66 @@ uv run scripts/post.py --text "Read this" \
     --link-title "Article Title" \
     --link-description "Description text"
 ```
+
+### View Replies (`scripts/replies.py`)
+
+Fetch and display the reply thread for a specific post.
+
+```bash
+# View replies using a web URL (most common)
+uv run scripts/replies.py https://bsky.app/profile/someone.bsky.social/post/abc123
+
+# View replies using an AT Protocol URI
+uv run scripts/replies.py "at://did:plc:xxx/app.bsky.feed.post/abc123"
+
+# Limit reply depth (e.g., only direct replies)
+uv run scripts/replies.py --depth 1 https://bsky.app/profile/someone/post/abc123
+
+# Output as JSON for processing
+uv run scripts/replies.py --json https://bsky.app/profile/someone/post/abc123
+
+# Skip parent posts, show only target post and its replies
+uv run scripts/replies.py --no-parents https://bsky.app/profile/someone/post/abc123
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `post` | Post identifier: either a `bsky.app` URL or an AT Protocol URI (required) |
+| `--depth`, `-d` | Maximum depth of replies to fetch (default: no limit) |
+| `--json`, `-j` | Output as JSON instead of human-readable format |
+| `--no-parents` | Don't show parent posts (only target post and replies) |
+
+### Post a Reply (`scripts/reply.py`)
+
+Reply to an existing Bluesky post. The script automatically handles AT Protocol threading (root and parent references).
+
+```bash
+# Reply to a post using its web URL
+uv run scripts/reply.py --to https://bsky.app/profile/someone.bsky.social/post/abc123 \
+    --text "Great post!"
+
+# Reply using an AT Protocol URI
+uv run scripts/reply.py --to "at://did:plc:xxx/app.bsky.feed.post/abc123" \
+    --text "I agree with this!"
+
+# Short form arguments
+uv run scripts/reply.py -p https://bsky.app/profile/someone/post/abc123 -t "Thanks!"
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `--to`, `-p` | Post to reply to: either a `bsky.app` URL or an AT Protocol URI (required) |
+| `--text`, `-t` | The reply text content, max 300 characters (required) |
+
+**How it works:** The script fetches the target post's thread to determine:
+1. The **parent** (the post you're replying to)
+2. The **root** (the original post that started the thread)
+
+Both references are required by AT Protocol to maintain proper thread structure.
 
 ### Read Timeline (`scripts/read_timeline.py`)
 
@@ -201,3 +265,4 @@ Scripts exit with non-zero status on errors. Common issues:
 - Invalid handle: Verify the handle exists on Bluesky
 - Rate limits: The API has rate limits; space out bulk operations
 - Image format: Only JPEG, PNG, and WebP are supported
+- Network blocked: Ensure required domains are whitelisted (see [Network Access](#network-access))
