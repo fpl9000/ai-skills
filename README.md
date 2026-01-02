@@ -9,4 +9,6 @@ containing the files in the skill package (e.g., the files for `myskill.skill` a
 
 * **drawio.skill**: A skill to generate a draw.io diagram from a text description.
 
+* **bluesky.skill*: A skill to post, read, search, and reply on BlueSky.
+
 * **transcript-saver.skill**: A skill to save an HTML transcript of a conversation.
