@@ -7,7 +7,7 @@ This repo contains the following skills.  Each `.skill` package file has a match
 containing the files in the skill package (e.g., the files for `myskill.skill` are in directory
 `myskill`).
 
-* [**bluesky.skill**](bluesky.skill): A skill to post, read, search, and reply on BlueSky.
+* [**bluesky.skill**](bluesky.skill): A skill to post, read, search, reply, read notifications, and read threads on BlueSky.
 
 * [**drawio.skill**](drawio.skill): A skill to generate a draw.io diagram from a text description.
 
