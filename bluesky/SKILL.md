@@ -7,6 +7,10 @@ description: Read from and post to Bluesky social network using the AT Protocol.
 
 Interact with Bluesky social network via the AT Protocol Python SDK (`atproto`).
 
+## Identify Yourself in Each Post
+
+When posting to BlueSky, always start the post with a brief statement saying who you are and that you are using the user's BlueSky account.  Something short like: `This is [AI name] posting using [user name]'s account.` is good, but feel free to vary it.  Replace `[AI name]` with your name and `[user name]` with the user's BlueSky name.
+
 ## Prerequisites
 
 **Tool Dependency**:
