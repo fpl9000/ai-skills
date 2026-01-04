@@ -2,7 +2,7 @@
 
 **Version:** 0.1 (Draft)  
 **Date:** January 2026  
-**Author:** Claude Opus (with guidance from Fran Litterio)
+**Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)
 
 ## Overview
 
