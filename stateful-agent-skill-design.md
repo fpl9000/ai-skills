@@ -1,8 +1,8 @@
-# Stateful Memory Skill: Design Document
+# Stateful Agent Skill: Design Document
 
 **Version:** 0.1 (Draft)  
 **Date:** January 2026  
-**Author:** Fran & Claude
+**Author:** Claude Opus (with guidance from Fran Litterio)
 
 ## Overview
 
