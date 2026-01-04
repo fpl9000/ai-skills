@@ -3,41 +3,39 @@ name: bluesky
 description: Read from and post to Bluesky social network using the AT Protocol. Use this skill when the user wants to interact with Bluesky including posting text/images/links, replying to posts, reading their timeline, searching posts, viewing profiles, following/unfollowing users, checking notifications, or viewing reply threads. All scripts use PEP 723 inline metadata for dependencies and run via `uv run`. Requires BLUESKY_HANDLE and BLUESKY_PASSWORD environment variables.
 ---
 
-# Bluesky Skill
+# Skill Overview
 
-Interact with Bluesky social network via the AT Protocol Python SDK (`atproto`).
+This skill provides access to the Bluesky social network via a set of Python scripts.
 
 ## Identify Yourself in Each Post
 
-When posting to BlueSky, always start the post with a brief statement saying who you are and that you are using the user's BlueSky account.  Something short like: `This is [AI name] posting using [user name]'s account.` is good, but feel free to vary it.  Replace `[AI name]` with your name and `[user name]` with the user's BlueSky name.
+When posting to BlueSky, always start the post with a brief statement saying who you are and that you are using the user's BlueSky account.  Something short like: `This is [AI name] posting using [user name]'s account.` is good, but feel free to vary it.  Replace `[AI name]` with your name and `[user name]` with the user's BlueSky full name or first name for brevity.
 
 ## Prerequisites
 
 **Tool Dependency**:
-- `uv` - The scripts in this skill require the [uv](https://docs.astral.sh/uv/) package manager/runner. Most cloud-based AI coding agents (like Claude) have `uv` pre-installed. For local agents, install it via `curl -LsSf https://astral.sh/uv/install.sh | sh` or see the [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/).
+- `uv` - The scripts in this skill require the [uv](https://docs.astral.sh/uv/) package manager/runner. Most cloud-based AI agents have `uv` pre-installed (or they can install it). Local agents should install it via `curl -LsSf https://astral.sh/uv/install.sh | sh` or see the [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/).
 
 **Environment Variables** (must be set before running any script):
-- `BLUESKY_HANDLE` - Your Bluesky handle (e.g., `yourname.bsky.social`)
-- `BLUESKY_PASSWORD` - Your Bluesky App Password (create in Settings > App Passwords)
+- `BLUESKY_HANDLE` - The user's Bluesky handle (e.g., `username.bsky.social`)
+- `BLUESKY_PASSWORD` - The user's Bluesky password
 
-**Important**: Use an App Password, not your main account password. App Passwords can be revoked individually if compromised.
+**Important**: The user should configure a BlueSky App Password (create in Settings > App Passwords) instead of using their main account password. App Passwords can be revoked individually if compromised.
 
 ## Network Access
 
-This skill requires network access to the following domains:
+**Important**: The scripts in this skill require network access to the following domains:
 
-| Domain | Purpose |
-|--------|---------|
-| `bsky.social` | Main Bluesky PDS (Personal Data Server) for authentication and API requests |
-| `bsky.network` | Bluesky network infrastructure |
-| `*.bsky.network` | Bluesky CDN and relay services |
-| `public.api.bsky.app` | Public API endpoint for unauthenticated queries |
+- `bsky.social`
+- `bsky.network`
+- `*.bsky.network`
+- `public.api.bsky.app`
 
-**Important**: If your AI agent has network restrictions, you may need to whitelist these domains in the agent's settings for this skill to function. For example, in Claude's computer use settings, add these domains to the allowed network list.
+If you (the AI agent) have network restrictions, the user may need to whitelist the above domains in the agent's settings for this skill to function. This is known to be necessary with Claude, and may be necessary with others.
 
 ## Available Scripts
 
-All scripts include PEP 723 inline metadata declaring their dependencies. Just run with `uv run`—no manual dependency installation or `--with` flags needed.
+All scripts include PEP 723 inline metadata declaring their dependencies. Just run with `uv run` — no manual dependency installation or `--with` flags needed.
 
 ### Post to Bluesky (`scripts/post.py`)
 
