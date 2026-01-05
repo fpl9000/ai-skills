@@ -123,7 +123,7 @@ Both references are required by AT Protocol to maintain proper thread structure.
 
 ### Read Timeline (`scripts/read_timeline.py`)
 
-View posts from accounts you follow.
+View posts from accounts the user follows.
 
 ```bash
 # Default (25 posts)
@@ -162,7 +162,7 @@ uv run scripts/search.py "query" --json
 View profile information for any user.
 
 ```bash
-# Your own profile
+# The user's profile
 uv run scripts/profile.py
 
 # Another user
@@ -174,7 +174,7 @@ uv run scripts/profile.py --json
 
 ### Follow/Unfollow (`scripts/follow.py`)
 
-Manage your social connections.
+Manage the user's social connections.
 
 ```bash
 # Follow a user
@@ -183,10 +183,10 @@ uv run scripts/follow.py someone.bsky.social
 # Unfollow a user
 uv run scripts/follow.py --unfollow someone.bsky.social
 
-# List who you follow
+# List who the user follows
 uv run scripts/follow.py --list
 
-# List your followers
+# List the user's followers
 uv run scripts/follow.py --list --followers
 
 # List another user's follows
@@ -195,7 +195,7 @@ uv run scripts/follow.py --list someone.bsky.social
 
 ### Notifications (`scripts/notifications.py`)
 
-View and manage your notifications.
+View and manage the user's notifications.
 
 ```bash
 # View notifications
@@ -220,11 +220,11 @@ uv run scripts/notifications.py --json
 
 ```bash
 # Set for current session
-export BLUESKY_HANDLE="yourname.bsky.social"
-export BLUESKY_PASSWORD="your-app-password"
+export BLUESKY_HANDLE="username.bsky.social"
+export BLUESKY_PASSWORD="app-password"
 
 # Or inline with command
-BLUESKY_HANDLE="yourname.bsky.social" BLUESKY_PASSWORD="pass" uv run scripts/post.py --text "Hello"
+BLUESKY_HANDLE="username.bsky.social" BLUESKY_PASSWORD="pass" uv run scripts/post.py --text "Hello"
 ```
 
 ### JSON Output for Processing
@@ -254,7 +254,7 @@ uv run scripts/read_timeline.py --cursor "$CURSOR" --json > page2.json
 
 ## Key Concepts
 
-- **Handle**: Your username (e.g., `user.bsky.social`)
+- **Handle**: The user's username (e.g., `user.bsky.social`)
 - **DID**: Decentralized Identifier—permanent unique ID (handles can change, DIDs don't)
 - **URI**: Resource identifier for posts/records (format: `at://did/collection/rkey`)
 - **CID**: Content hash identifier for specific versions of records
