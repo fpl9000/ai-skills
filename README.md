@@ -9,6 +9,8 @@ containing the files in the skill package (e.g., the files for `myskill.skill` a
 
 * [**bluesky.skill**](bluesky.skill): A skill to post, read, search, reply, read notifications, and read threads on BlueSky.
 
+* [**ups-tracking.skill**](ups-tracking.skill): A skill to track UPS packages.
+
 * [**drawio.skill**](drawio.skill): A skill to generate a draw.io diagram from a text description.
 
 * [**transcript-saver.skill**](transcript-saver.skill): A skill by Simon Willison to save an HTML transcript of a conversation.
