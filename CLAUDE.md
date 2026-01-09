@@ -4,11 +4,18 @@ A collection of freely-distributed AI skills following the [agentskills.io](http
 
 ## Project Structure
 
+- Skills in this repo must conform to the skills specification at https://agentskills.io/specification — read that page for full details
 - Each skill has a directory (e.g., `bluesky/`) containing source files
 - Each skill is packaged as a `.skill` file (ZIP archive) with matching name (e.g., `bluesky.skill`)
-- Skills contain:
+  - Packaging is as simple as executing command`zip -r SKILLDIR.skill SKILLDIR` from the root of this repo, where SKILLDIR is the name of the skill's source directory
+- A skill directory contains the following required file:
   - `SKILL.md` - Metadata and documentation in frontmatter + markdown
-  - `scripts/` - Executable scripts (typically Python with PEP 723 inline metadata)
+- A skill directory can contain the following optional directories:
+  - `scripts/` - Contains executable scripts (typically Python with PEP 723 inline metadata)
+  - `references/` - Contains additional documentation (in markdown format) that agents can read when needed
+  - `assets/` - Contains static resources, such as templates (document templates, configuration templates), images (diagrams, examples), data files (lookup tables, schemas)
+  - No other directories should appear
+  - The `assets/` directory is a good place to put files that don't have a better location
 
 ## Skill Design Guidelines
 
