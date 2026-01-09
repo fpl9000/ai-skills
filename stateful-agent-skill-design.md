@@ -1,8 +1,48 @@
 # Stateful Agent Skill: Design Document
 
-**Version:** 0.1 (Draft)  
+**Version:** 0.2 (Draft)
 **Date:** January 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)
+
+# Contents
+
+- [Overview](#overview)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+  - [Inspirations](#inspirations)
+- [Architecture](#architecture)
+  - [Three-Tier Memory Model](#three-tier-memory-model)
+  - [Dual-Format Storage](#dual-format-storage)
+  - [Why Markdown as Canonical](#why-markdown-as-canonical)
+- [Persistence Layer](#persistence-layer)
+  - [Pluggable Backends](#pluggable-backends)
+  - [Environment Detection](#environment-detection)
+  - [Configuration Discovery](#configuration-discovery)
+- [Configuration](#configuration)
+  - [Default Configuration](#default-configuration)
+  - [Configuration Storage](#configuration-storage)
+  - [Interactive Configuration](#interactive-configuration)
+- [Memory Schema](#memory-schema)
+  - [SQLite Schema](#sqlite-schema)
+  - [Markdown Schema](#markdown-schema)
+  - [Markdown Format](#markdown-format)
+- [Cloud Persistence Strategies](#cloud-persistence-strategies)
+  - [Manual Mode (Default)](#manual-mode-default)
+  - [GitHub Backend](#github-backend)
+  - [Google Drive Backend](#google-drive-backend)
+  - [Checkpoint Strategy](#checkpoint-strategy)
+- [Concurrency Considerations](#concurrency-considerations)
+  - [Local Agents](#local-agents)
+  - [Cloud Agents](#cloud-agents)
+- [Skill File Structure](#skill-file-structure)
+- [SKILL.md Outline](#skillmd-outline)
+- [Open Questions](#open-questions)
+  - [Memory Consolidation](#memory-consolidation)
+  - [Memory Categories](#memory-categories)
+  - [Cross-Session Learning](#cross-session-learning)
+  - [Conflict Resolution](#conflict-resolution)
+- [Future Enhancements](#future-enhancements)
+- [References](#references)
 
 ## Overview
 
@@ -27,7 +67,6 @@ This document describes the design of an AI skill that transforms a conversation
 - [claude_life_assistant](https://github.com/lout33/claude_life_assistant) — Simple two-file approach demonstrating the core concept
 - [Strix](https://timkellogg.me/blog/2025/12/30/memory-arch) — Tim Kellogg's three-tier hierarchical memory architecture
 
----
 
 ## Architecture
 
@@ -114,8 +153,6 @@ Persistence Backend
 
 The parse overhead is acceptable because loading happens once per session, and local agents can cache the SQLite file (rebuilding only when markdown is newer).
 
----
-
 ## Persistence Layer
 
 ### Pluggable Backends
@@ -174,8 +211,6 @@ discover_config():
 ```
 
 If no configuration exists, the skill generates environment-appropriate defaults.
-
----
 
 ## Configuration
 
@@ -258,8 +293,6 @@ Users can modify configuration through conversation:
 > 2. Create a Personal Access Token with 'repo' scope
 > 3. Set GITHUB_TOKEN in your environment"
 
----
-
 ## Memory Schema
 
 ### SQLite Schema
@@ -322,15 +355,11 @@ Each block includes current value and append-only history:
 **History:**
 - 2025-01-03T00:46:00Z: Fran
 
----
-
 ## user_location
 **Current:** Massachusetts
 
 **History:**
 - 2025-01-03T00:46:00Z: Massachusetts
-
----
 
 ## primary_language
 **Current:** Go
@@ -346,8 +375,6 @@ This format is:
 - Git-friendly (diffs show exactly what changed and when)
 - Editable (user can correct mistakes, add context)
 - Parseable (structured enough for reliable import)
-
----
 
 ## Session Lifecycle
 
@@ -464,8 +491,6 @@ Cloud agents require:
 - Reminder to download before session end
 - Optional: GitHub or Google Drive backend eliminates manual steps
 
----
-
 ## Cloud Persistence Strategies
 
 ### Manual Mode (Default)
@@ -507,8 +532,6 @@ Regardless of backend, the skill implements defensive checkpointing:
 - Checkpoints go to `/mnt/user-data/outputs/` with timestamps
 - Even if user forgets final download, they lose at most a few updates
 
----
-
 ## Concurrency Considerations
 
 ### Local Agents
@@ -537,8 +560,6 @@ Mitigation strategies:
 - Markdown format allows manual conflict resolution
 - Git-based backends preserve both versions in history
 
----
-
 ## Skill File Structure
 
 ```
@@ -562,8 +583,6 @@ Mitigation strategies:
     ├── config.yaml.local       # Default config for local environments
     └── config.yaml.cloud       # Default config for cloud environments
 ```
-
----
 
 ## SKILL.md Outline
 
@@ -598,31 +617,31 @@ The skill's instruction file should cover:
    - How to handle memory corrections
    - Configuration wizard for backend setup
 
----
-
 ## Open Questions
 
 ### Memory Consolidation
 
-As memories accumulate, how should old content be consolidated?
+1. As memories accumulate, how should old content be consolidated?
 
-- Automatic summarization after N entries?
-- User-triggered "consolidate memories" command?
-- Tiered aging (recent → summarized → archived)?
+   - Automatic summarization after N entries?
+   - User-triggered "consolidate memories" command?
+   - Tiered aging (recent → summarized → archived)?
 
 ### Memory Categories
 
-The current design proposes: facts, patterns, episodes, projects, insights. Are these the right categories? Should users be able to define custom categories?
+1. The current design proposes: facts, patterns, episodes, projects, insights. Are these the right categories? Should users be able to define custom categories?
+
+1. ...
 
 ### Cross-Session Learning
 
-Can the agent observe patterns in its own memory evolution? Tim's Strix does this via journal analysis. Should this skill include similar self-reflection capabilities?
+1. Can the agent observe patterns in its own memory evolution? Tim's Strix does this via journal analysis. Should this skill include similar self-reflection capabilities?
+
+1. If multiple conversation happen concurrently, how will the persistence layer synchronize writes without data loss/corruption?
 
 ### Conflict Resolution
 
 When markdown files are edited externally and conflict with SQLite state, what's the resolution strategy? Current proposal: markdown always wins (it's canonical), but this deserves more thought.
-
----
 
 ## Future Enhancements
 
@@ -630,8 +649,6 @@ When markdown files are edited externally and conflict with SQLite state, what's
 - **Selective Loading**: Smarter retrieval of content blocks based on conversation context
 - **Memory Sharing**: Export subsets of memories for sharing between agents or users
 - **Encryption**: Optional encryption for sensitive memories (especially on shared backends)
-
----
 
 ## References
 
