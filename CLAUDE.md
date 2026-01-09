@@ -1,11 +1,10 @@
 # AI Skills Project
 
-A collection of freely-distributed AI skills following the [agentskills.io](https://agentskills.io) specification.
+A collection of freely-distributed AI skills. Skills in this repo must conform to the skills specification at https://agentskills.io/specification — read that page for full details.
 
 ## Project Structure
 
-- Skills in this repo must conform to the skills specification at https://agentskills.io/specification — read that page for full details
-- Each skill has a directory (e.g., `bluesky/`) containing source files
+- Each skill has a corresponding directory (e.g., `bluesky/`) containing source files
 - Each skill is packaged as a `.skill` file (ZIP archive) with matching name (e.g., `bluesky.skill`)
   - Packaging is as simple as executing command`zip -r SKILLDIR.skill SKILLDIR` from the root of this repo, where SKILLDIR is the name of the skill's source directory
 - A skill directory contains the following required file:
