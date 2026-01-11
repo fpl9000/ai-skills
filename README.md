@@ -7,7 +7,7 @@ This repo contains the following skills.  Each `.skill` package file has a match
 containing the files in the skill package (e.g., the files for `myskill.skill` are in directory
 `myskill`).
 
-* [**load-skill.skill**](load-skill.skill): A skill to load and install other skill files.
+* [**load-skill.skill**](load-skill.skill): A skill to load and install other skill files.  Usage: `/load-skill SKILLFILE`
 
 * [**bluesky.skill**](bluesky.skill): A skill to post, read, search, reply, read notifications, and read threads on BlueSky.
 
