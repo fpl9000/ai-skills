@@ -16,7 +16,7 @@ A collection of freely-distributed AI skills. Skills in this repo must conform t
   - No other directories should appear
   - The `assets/` directory is a good place to put files that don't have a better location
 
-## Skill Design Guidelines
+## Skill Creation Guidelines
 
 When creating new skills for this repository, follow these principles:
 
@@ -25,8 +25,8 @@ When creating new skills for this repository, follow these principles:
 **Avoid requiring user authentication or API credentials whenever possible.**
 
 - Freely-distributed skills should work out-of-the-box without friction
-- Don't require users to create accounts, obtain API keys, or configure credentials
-- Prefer web scraping, public APIs without auth, or other zero-config approaches
+- Don't require users to create accounts, obtain API keys, or configure credentials, unless absolutely necessary, such as in a skill that interacts with a Web site on the user's behalf
+- Prefer web scraping, public APIs without authentication, or other zero-config approaches
 - Only require authentication when absolutely necessary for the functionality
 
 **Rationale**: Creating barriers to entry (account registration, API keys) reduces accessibility and adoption. Users should be able to download a skill and use it immediately.
