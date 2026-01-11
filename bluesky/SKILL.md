@@ -241,7 +241,8 @@ uv run scripts/search.py "topic" --json | jq '.count'
 
 ### Pagination
 
-Scripts that return lists support cursor-based pagination:
+Scripts that return lists support cursor-based pagination. Use this to scroll through the user's
+timeline and other sequences of posts:
 
 ```bash
 # First page
