@@ -5,7 +5,9 @@ description: Load, activate, and optionally install an AI skill from a .skill fi
 
 # Load Skill
 
-This skill loads and activates another skill from a `.skill` file.
+This skill loads and activates another skill from a `.skill` file.  Here's a screenshot of it being used in Claude Code, but it will work similarly in other AI agents.
+
+![Screenshot of load-skill in action](screenshot.png)
 
 ## Usage
 
