@@ -1,13 +1,11 @@
 ---
 name: load-skill
-description: Load, activate, and optionally install an AI skill from a .skill file. Use this skill when the user wants to load, activate, or use a skill file. Invoke as `/load-skill [ --install | -i ] SKILLFILE` where SKILLFILE is the path to a .skill file.
+description: Load, activate, and optionally install an AI skill from a .skill file. Use this skill when the user wants to load, activate, or use a skill file. The user can invoke this skill with slash command `/load-skill [ --install | -i ] SKILLFILE`, where SKILLFILE is the path to a .skill file.
 ---
 
 # Load Skill
 
-This skill loads and activates another skill from a `.skill` file.  Here's a screenshot of it being used in Claude Code, but it will work similarly in other AI agents.
-
-![Screenshot of load-skill in action](assets/screenshot.png)
+This skill loads, activates, and optionally installs another skill from a `.skill` file.  Here's a screenshot of it being used in Claude Code, but it will work similarly in other AI agents.
 
 ## Usage
 
