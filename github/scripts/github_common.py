@@ -282,6 +282,7 @@ def handle_api_error(response: requests.Response, context: str = "") -> None:
     elif response.status_code == 404:
         print(f"Error: {context or 'Resource'} not found (404)", file=sys.stderr)
         print(f"Message: {error_msg}", file=sys.stderr)
+        print("Hint: Check that the repository, branch, or path exists and your token has access", file=sys.stderr)
         sys.exit(1)
         
     elif response.status_code == 409:
