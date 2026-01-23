@@ -37,7 +37,7 @@ This skill uses a shared common module (`github_common.py`) to centralize:
 - Repository string parsing
 - Error handling and retry logic with exponential backoff
 
-All scripts import from `github_common.py`, which makes maintenance easier, ensures consistent behavior across all operations, and allows API versioning updates to be made in a single location.
+All scripts import from `github_common.py`, which makes maintenance easier and ensures consistent behavior across all operations.
 
 ## API Versioning
 
@@ -135,6 +135,13 @@ uv run scripts/file_write.py owner/repo \
     --path remote/script.py \
     --from-file local/script.py \
     --message "Upload script"
+
+# Create an executable script (with --mode)
+uv run scripts/file_write.py owner/repo \
+    --path scripts/build.sh \
+    --from-file build.sh \
+    --message "Add build script" \
+    --mode 755
 ```
 
 | Argument | Description |
@@ -146,7 +153,53 @@ uv run scripts/file_write.py owner/repo \
 | `--message`, `-m` | Commit message (required) |
 | `--sha` | SHA of file being replaced (required for updates) |
 | `--branch`, `-b` | Branch to commit to |
+| `--mode` | File mode (e.g., 755 for executable). Creates a second commit to set mode. |
 | `--json`, `-j` | Output as JSON |
+
+**Note on `--mode`:** The GitHub Contents API doesn't support setting file modes directly. When `--mode` is specified, the script first creates/updates the file, then makes a second commit to set the mode using the Git Data API. Common modes: `755` (executable), `644` (regular file).
+
+---
+
+### Change File Mode (`scripts/file_chmod.py`)
+
+Change file permissions (mode) for existing files. Useful for making scripts executable or reverting to regular file mode.
+
+```bash
+# Make a single file executable
+uv run scripts/file_chmod.py owner/repo --path script.py --mode 755
+
+# Make multiple files executable in one commit
+uv run scripts/file_chmod.py owner/repo \
+    --path scripts/build.sh \
+    --path scripts/deploy.sh \
+    --path scripts/test.py \
+    --mode 755
+
+# Remove executable bit
+uv run scripts/file_chmod.py owner/repo --path script.py --mode 644
+
+# On a specific branch with custom message
+uv run scripts/file_chmod.py owner/repo \
+    --path scripts/run.py \
+    --mode 755 \
+    --branch develop \
+    --message "Make run.py executable"
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `--path`, `-p` | Path to file (required, can be repeated for multiple files) |
+| `--mode`, `-m` | Target mode (required, e.g., 755 or 644) |
+| `--branch`, `-b` | Branch to commit to (default: main) |
+| `--message` | Commit message (auto-generated if not provided) |
+| `--json`, `-j` | Output as JSON |
+
+**Common modes:**
+- `755` - Executable file (rwxr-xr-x)
+- `644` - Regular file (rw-r--r--)
+
+**How it works:** This script uses the Git Data API to modify file modes, which requires creating a new tree object and commit. Multiple files can be changed in a single commit for efficiency. Files that already have the target mode are skipped with a warning.
 
 ---
 
