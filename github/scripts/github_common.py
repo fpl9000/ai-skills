@@ -282,7 +282,6 @@ def handle_api_error(response: requests.Response, context: str = "") -> None:
     elif response.status_code == 404:
         print(f"Error: {context or 'Resource'} not found (404)", file=sys.stderr)
         print(f"Message: {error_msg}", file=sys.stderr)
-        print("Hint: Check that the repository, branch, or path exists and your token has access", file=sys.stderr)
         sys.exit(1)
         
     elif response.status_code == 409:
@@ -388,6 +387,370 @@ def get_ref_sha(token: str, owner: str, repo: str, ref: str) -> str:
     print(f"Error: Reference '{ref}' not found", file=sys.stderr)
     print("It should be a branch name, tag, or commit SHA", file=sys.stderr)
     sys.exit(1)
+
+
+# =============================================================================
+# Git Data API Functions (for tree manipulation / file modes)
+# =============================================================================
+
+def get_branch_head_sha(token: str, owner: str, repo: str, branch: str) -> str:
+    """
+    Get the commit SHA that a branch currently points to.
+    
+    This is the first step in the Git Data API workflow for modifying
+    file modes, as we need to know the current commit to build on.
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        branch: Branch name (e.g., 'main', 'develop')
+        
+    Returns:
+        The 40-character commit SHA the branch points to
+        
+    Exits:
+        Exits with code 1 if the branch is not found
+    """
+    headers = get_headers(token)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/ref/heads/{branch}"
+    
+    response = make_request_with_retry('get', url, headers)
+    
+    if response.status_code == 404:
+        print(f"Error: Branch '{branch}' not found in {owner}/{repo}", file=sys.stderr)
+        sys.exit(1)
+    
+    handle_api_error(response, f"Branch {branch}")
+    
+    return response.json()["object"]["sha"]
+
+
+def get_commit_tree_sha(token: str, owner: str, repo: str, commit_sha: str) -> str:
+    """
+    Get the tree SHA from a commit.
+    
+    Every Git commit points to a tree object that represents the state
+    of all files at that point. We need the tree SHA to read or modify
+    the file structure.
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        commit_sha: The commit SHA to get the tree from
+        
+    Returns:
+        The 40-character tree SHA
+        
+    Exits:
+        Exits with code 1 if the commit is not found
+    """
+    headers = get_headers(token)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/commits/{commit_sha}"
+    
+    response = make_request_with_retry('get', url, headers)
+    
+    if response.status_code == 404:
+        print(f"Error: Commit '{commit_sha[:8]}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    handle_api_error(response, f"Commit {commit_sha[:8]}")
+    
+    return response.json()["tree"]["sha"]
+
+
+def get_tree_recursive(
+    token: str,
+    owner: str,
+    repo: str,
+    tree_sha: str
+) -> list[dict]:
+    """
+    Get all entries in a tree recursively.
+    
+    Returns the full tree structure including all nested directories
+    and files. Each entry includes path, mode, type, sha, and size.
+    
+    Git tree entry modes:
+    - 100644: Regular file (non-executable)
+    - 100755: Executable file
+    - 120000: Symbolic link
+    - 040000: Subdirectory (tree)
+    - 160000: Submodule (commit reference)
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        tree_sha: The tree SHA to retrieve
+        
+    Returns:
+        List of tree entry dictionaries with keys:
+        - path: File path relative to repo root
+        - mode: Git mode string (e.g., "100644")
+        - type: "blob" for files, "tree" for directories
+        - sha: SHA of the blob/tree
+        - size: File size in bytes (only for blobs)
+        
+    Exits:
+        Exits with code 1 if the tree is not found or truncated
+    """
+    headers = get_headers(token)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1"
+    
+    response = make_request_with_retry('get', url, headers)
+    
+    if response.status_code == 404:
+        print(f"Error: Tree '{tree_sha[:8]}' not found", file=sys.stderr)
+        sys.exit(1)
+    
+    handle_api_error(response, f"Tree {tree_sha[:8]}")
+    
+    data = response.json()
+    
+    # Check if tree was truncated (very large repos)
+    if data.get("truncated", False):
+        print("Warning: Tree was truncated due to size", file=sys.stderr)
+        print("Some files may not be included in the listing", file=sys.stderr)
+    
+    return data.get("tree", [])
+
+
+def create_tree_with_changes(
+    token: str,
+    owner: str,
+    repo: str,
+    base_tree_sha: str,
+    changes: list[dict]
+) -> str:
+    """
+    Create a new tree with specified changes.
+    
+    This creates a new tree object based on an existing tree, with
+    modifications applied. The changes can include mode changes,
+    content changes, or file deletions.
+    
+    Each change dict should have:
+    - path: File path (required)
+    - mode: New mode string, e.g., "100755" (required for mode changes)
+    - type: "blob" for files (required)
+    - sha: Blob SHA (use existing SHA for mode-only changes, or
+           null/omit to delete the file)
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        base_tree_sha: SHA of the tree to base changes on
+        changes: List of change dictionaries
+        
+    Returns:
+        SHA of the newly created tree
+        
+    Exits:
+        Exits with code 1 on API error
+    """
+    headers = get_headers(token)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/trees"
+    
+    body = {
+        "base_tree": base_tree_sha,
+        "tree": changes,
+    }
+    
+    response = make_request_with_retry('post', url, headers, json=body)
+    
+    if response.status_code == 404:
+        print(f"Error: Repository {owner}/{repo} not found", file=sys.stderr)
+        sys.exit(1)
+    
+    if response.status_code == 422:
+        error_data = response.json()
+        error_msg = error_data.get("message", "Validation failed")
+        print(f"Error creating tree: {error_msg}", file=sys.stderr)
+        
+        # Check for specific path errors
+        errors = error_data.get("errors", [])
+        for err in errors:
+            if isinstance(err, dict):
+                print(f"  - {err}", file=sys.stderr)
+        sys.exit(1)
+    
+    handle_api_error(response, "Tree creation")
+    
+    return response.json()["sha"]
+
+
+def create_commit(
+    token: str,
+    owner: str,
+    repo: str,
+    tree_sha: str,
+    parent_sha: str,
+    message: str
+) -> str:
+    """
+    Create a new commit pointing to a tree.
+    
+    This creates a commit object with the specified tree and parent.
+    The commit is not yet attached to any branch - use update_branch_ref
+    to make a branch point to this commit.
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        tree_sha: SHA of the tree this commit points to
+        parent_sha: SHA of the parent commit
+        message: Commit message
+        
+    Returns:
+        SHA of the newly created commit
+        
+    Exits:
+        Exits with code 1 on API error
+    """
+    headers = get_headers(token)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/commits"
+    
+    body = {
+        "message": message,
+        "tree": tree_sha,
+        "parents": [parent_sha],
+    }
+    
+    response = make_request_with_retry('post', url, headers, json=body)
+    
+    handle_api_error(response, "Commit creation")
+    
+    return response.json()["sha"]
+
+
+def update_branch_ref(
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    commit_sha: str,
+    force: bool = False
+) -> None:
+    """
+    Update a branch to point to a new commit.
+    
+    This is the final step in a Git Data API workflow - after creating
+    a new tree and commit, we update the branch reference to point to
+    the new commit.
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        branch: Branch name to update
+        commit_sha: SHA of the commit the branch should point to
+        force: If True, force update even if not fast-forward
+        
+    Exits:
+        Exits with code 1 on API error
+    """
+    headers = get_headers(token)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/refs/heads/{branch}"
+    
+    body = {
+        "sha": commit_sha,
+        "force": force,
+    }
+    
+    response = make_request_with_retry('patch', url, headers, json=body)
+    
+    if response.status_code == 422:
+        error_msg = response.json().get("message", "Update failed")
+        print(f"Error updating branch: {error_msg}", file=sys.stderr)
+        if "fast-forward" in error_msg.lower():
+            print("The branch has been modified since you read it", file=sys.stderr)
+            print("Use --force to overwrite (dangerous!)", file=sys.stderr)
+        sys.exit(1)
+    
+    handle_api_error(response, f"Branch update for {branch}")
+
+
+def user_mode_to_git_mode(user_mode: str) -> str:
+    """
+    Convert user-friendly mode (e.g., '755') to Git mode (e.g., '100755').
+    
+    Git stores file modes with a type prefix:
+    - 100644: Regular file (non-executable)
+    - 100755: Executable file
+    - 120000: Symbolic link
+    - 040000: Subdirectory
+    - 160000: Submodule
+    
+    This function handles the common case of regular files (100xxx).
+    For special modes (symlinks, etc.), the user should provide the
+    full 6-digit mode.
+    
+    Args:
+        user_mode: Mode string, either 3-digit (e.g., '755', '644')
+                   or full 6-digit (e.g., '100755', '120000')
+                   
+    Returns:
+        Full 6-digit Git mode string
+        
+    Raises:
+        ValueError: If the mode format is invalid
+    """
+    # Remove any leading zeros for consistent handling
+    user_mode = user_mode.lstrip('0') or '0'
+    
+    # If it's already a full mode (starts with 1, 0, or 16 for submodules)
+    if len(user_mode) == 6 and user_mode[0] in ('1', '0'):
+        return user_mode
+    
+    # Handle 3-digit modes (common case)
+    if len(user_mode) <= 3:
+        # Pad to 3 digits
+        mode_3digit = user_mode.zfill(3)
+        
+        # Validate it's a valid permission octal
+        try:
+            mode_int = int(mode_3digit, 8)
+            if mode_int < 0 or mode_int > 0o777:
+                raise ValueError(f"Invalid mode: {user_mode}")
+        except ValueError:
+            raise ValueError(f"Invalid octal mode: {user_mode}")
+        
+        # Prepend regular file prefix
+        return f"100{mode_3digit}"
+    
+    raise ValueError(
+        f"Invalid mode format: {user_mode}. "
+        "Use 3-digit (e.g., '755') or 6-digit (e.g., '100755')"
+    )
+
+
+def git_mode_to_display(git_mode: str) -> str:
+    """
+    Convert Git mode to human-readable display format.
+    
+    Args:
+        git_mode: Full 6-digit Git mode (e.g., '100755')
+        
+    Returns:
+        Human-readable string (e.g., '755 (executable)')
+    """
+    mode_map = {
+        "100644": "644 (regular file)",
+        "100755": "755 (executable)",
+        "120000": "symlink",
+        "040000": "directory",
+        "160000": "submodule",
+    }
+    
+    if git_mode in mode_map:
+        return mode_map[git_mode]
+    
+    # Unknown mode - just show it
+    return git_mode
 
 
 # =============================================================================
