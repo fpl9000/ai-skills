@@ -11,7 +11,8 @@ GitHub Repository Tree Viewer
 Get the full file tree of a GitHub repository (recursive listing).
 
 This is more efficient than multiple calls to the contents API when you
-need to see the entire structure of a repository.
+need to see the entire structure of a repository. Uses the Git Trees API
+which returns all files in a single request.
 
 Usage:
     uv run scripts/repo_tree.py owner/repo
@@ -25,146 +26,107 @@ Environment Variables Required:
 
 import argparse
 import json
-import os
 import sys
 
-import requests
+# Import shared utilities from the common module
+from github_common import (
+    API_BASE,
+    get_token,
+    get_headers,
+    parse_repo,
+    make_request_with_retry,
+    handle_api_error,
+    get_default_branch,
+    get_ref_sha,
+    format_size,
+)
 
 
-# GitHub API base URL
-API_BASE = "https://api.github.com"
+# =============================================================================
+# API Functions
+# =============================================================================
 
-
-def get_token():
+def get_tree(
+    token: str,
+    owner: str,
+    repo: str,
+    tree_sha: str,
+    recursive: bool = True
+) -> dict:
     """
-    Retrieve GitHub token from environment variable.
+    Get the git tree for a repository.
     
-    Returns the token if set, exits with error if missing.
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    
-    if not token:
-        print("Error: GITHUB_TOKEN environment variable not set", file=sys.stderr)
-        print("Create a token at: https://github.com/settings/tokens", file=sys.stderr)
-        sys.exit(1)
-    
-    return token
-
-
-def get_headers(token: str) -> dict:
-    """
-    Build HTTP headers for GitHub API requests.
-    
-    Args:
-        token: GitHub Personal Access Token
-        
-    Returns:
-        Dictionary of headers including authorization
-    """
-    return {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-skill-script",
-    }
-
-
-def parse_repo(repo_string: str) -> tuple:
-    """
-    Parse owner/repo string into components.
-    
-    Args:
-        repo_string: Repository in "owner/repo" format
-        
-    Returns:
-        Tuple of (owner, repo)
-    """
-    parts = repo_string.split("/")
-    if len(parts) != 2:
-        print(f"Error: Invalid repository format '{repo_string}'", file=sys.stderr)
-        print("Expected format: owner/repo (e.g., octocat/hello-world)", file=sys.stderr)
-        sys.exit(1)
-    
-    return parts[0], parts[1]
-
-
-def get_default_branch(token: str, owner: str, repo: str) -> str:
-    """
-    Get the default branch of a repository.
+    The Git Trees API is more efficient than the Contents API for getting
+    a full repository structure, as it returns all items in a single request.
     
     Args:
         token: GitHub Personal Access Token
         owner: Repository owner
         repo: Repository name
+        tree_sha: SHA of the tree (usually from a commit)
+        recursive: Whether to get all nested items (default: True)
         
     Returns:
-        Default branch name (e.g., "main" or "master")
-    """
-    headers = get_headers(token)
-    url = f"{API_BASE}/repos/{owner}/{repo}"
-    
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code != 200:
-        error_msg = response.json().get("message", "Unknown error")
-        print(f"Error: GitHub API returned {response.status_code}", file=sys.stderr)
-        print(f"Message: {error_msg}", file=sys.stderr)
-        sys.exit(1)
-    
-    return response.json().get("default_branch", "main")
-
-
-def get_tree(token: str, owner: str, repo: str, 
-             ref: str = None, recursive: bool = True) -> dict:
-    """
-    Get the file tree of a repository.
-    
-    Args:
-        token: GitHub Personal Access Token
-        owner: Repository owner
-        repo: Repository name
-        ref: Git ref (branch, tag, or commit SHA)
-        recursive: Whether to get the full recursive tree
-        
-    Returns:
-        Dictionary containing tree data
+        Tree dictionary with 'sha', 'tree' (list of items), and 'truncated'
     """
     headers = get_headers(token)
     
-    # If no ref specified, get the default branch
-    if not ref:
-        ref = get_default_branch(token, owner, repo)
+    url = f"{API_BASE}/repos/{owner}/{repo}/git/trees/{tree_sha}"
     
-    # Build URL for tree endpoint
-    url = f"{API_BASE}/repos/{owner}/{repo}/git/trees/{ref}"
-    
-    # Add recursive parameter
+    # Request recursive listing to get all files
     params = {}
     if recursive:
         params["recursive"] = "1"
     
-    # Make the API request
-    response = requests.get(url, headers=headers, params=params)
+    response = make_request_with_retry('get', url, headers, params=params)
     
-    # Handle errors
-    if response.status_code == 404:
-        print(f"Error: Ref '{ref}' not found in {owner}/{repo}", file=sys.stderr)
-        sys.exit(1)
-    elif response.status_code != 200:
-        error_msg = response.json().get("message", "Unknown error")
-        print(f"Error: GitHub API returned {response.status_code}", file=sys.stderr)
-        print(f"Message: {error_msg}", file=sys.stderr)
-        sys.exit(1)
+    handle_api_error(response, f"Tree {tree_sha[:8]}")
     
     return response.json()
 
+
+def get_tree_for_ref(
+    token: str,
+    owner: str,
+    repo: str,
+    ref: str = None
+) -> dict:
+    """
+    Get the tree for a specific git reference (branch, tag, or commit).
+    
+    This resolves the ref to a commit SHA, then fetches the associated tree.
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        ref: Git reference (branch, tag, commit SHA, or None for default)
+        
+    Returns:
+        Tree dictionary from the API
+    """
+    # If no ref specified, use the default branch
+    if not ref:
+        ref = get_default_branch(token, owner, repo)
+    
+    # Get the commit SHA for the ref
+    commit_sha = get_ref_sha(token, owner, repo, ref)
+    
+    # Get the tree for that commit
+    return get_tree(token, owner, repo, commit_sha, recursive=True)
+
+
+# =============================================================================
+# Display Formatting Functions
+# =============================================================================
 
 def filter_tree_by_path(tree_items: list, path_prefix: str) -> list:
     """
     Filter tree items to only those under a specific path.
     
     Args:
-        tree_items: List of tree items from GitHub API
-        path_prefix: Path prefix to filter by
+        tree_items: List of tree items from the API
+        path_prefix: Path prefix to filter by (e.g., "src/")
         
     Returns:
         Filtered list of tree items
@@ -172,92 +134,99 @@ def filter_tree_by_path(tree_items: list, path_prefix: str) -> list:
     if not path_prefix:
         return tree_items
     
-    # Normalize the path prefix (remove leading/trailing slashes)
-    path_prefix = path_prefix.strip("/")
+    # Normalize path prefix (ensure trailing slash for directories)
+    path_prefix = path_prefix.rstrip("/") + "/"
     
-    filtered = []
-    for item in tree_items:
-        item_path = item.get("path", "")
-        if item_path.startswith(path_prefix):
-            filtered.append(item)
-    
-    return filtered
+    return [
+        item for item in tree_items
+        if item["path"].startswith(path_prefix) or item["path"] == path_prefix.rstrip("/")
+    ]
 
 
-def format_tree_for_display(tree_data: dict, path_filter: str = None) -> str:
+def format_tree_for_display(tree: dict, path_filter: str = None) -> str:
     """
-    Format the repository tree for human-readable display.
+    Format a repository tree for human-readable display.
+    
+    Creates a hierarchical view similar to the 'tree' command, with
+    file sizes and emoji indicators.
     
     Args:
-        tree_data: Tree data from GitHub API
-        path_filter: Optional path prefix to filter results
+        tree: Tree dictionary from the API
+        path_filter: Optional path prefix to filter items
         
     Returns:
-        Formatted string with tree structure
+        Formatted string with the tree structure
     """
-    tree_items = tree_data.get("tree", [])
-    sha = tree_data.get("sha", "")[:8]
-    truncated = tree_data.get("truncated", False)
-    
-    # Filter by path if specified
-    if path_filter:
-        tree_items = filter_tree_by_path(tree_items, path_filter)
-    
-    if not tree_items:
-        if path_filter:
-            return f"No items found under path: {path_filter}"
-        return "Empty repository"
-    
     lines = []
     
     # Header
+    sha = tree.get("sha", "")[:8]
     lines.append(f"🌲 Repository tree (SHA: {sha})")
+    
     if path_filter:
         lines.append(f"   Filtered to: {path_filter}")
+    
+    tree_items = tree.get("tree", [])
+    
+    # Apply path filter if specified
+    if path_filter:
+        tree_items = filter_tree_by_path(tree_items, path_filter)
+    
     lines.append(f"   {len(tree_items)} items")
-    if truncated:
-        lines.append("   ⚠️  Tree was truncated (repository has many files)")
     lines.append("")
     
-    # Build a tree structure
     # Sort items: directories first at each level, then alphabetically
-    # We'll display with indentation based on path depth
+    # Group by first path component for better display
+    sorted_items = sorted(
+        tree_items,
+        key=lambda x: (
+            # Put directories before files at same level
+            0 if x["type"] == "tree" else 1,
+            # Then sort alphabetically
+            x["path"].lower()
+        )
+    )
     
-    for item in sorted(tree_items, key=lambda x: (x.get("type") != "tree", x.get("path", "").lower())):
-        path = item.get("path", "")
-        item_type = item.get("type", "blob")
-        size = item.get("size", 0)
+    # Display each item with appropriate indentation based on path depth
+    for item in sorted_items:
+        path = item["path"]
+        item_type = item["type"]
         
         # Calculate indentation based on path depth
         depth = path.count("/")
-        indent = "   " + "  " * depth
+        indent = "   " + "    " * depth
         
-        # Get just the filename (last component of path)
-        name = path.split("/")[-1] if "/" in path else path
+        # Get just the name (last component of path)
+        name = path.split("/")[-1]
         
         if item_type == "tree":
+            # Directory
             lines.append(f"{indent}📁 {name}/")
         elif item_type == "blob":
-            # Format size
-            if size >= 1024 * 1024:
-                size_str = f"{size / (1024 * 1024):.1f} MB"
-            elif size >= 1024:
-                size_str = f"{size / 1024:.1f} KB"
-            else:
-                size_str = f"{size} B"
-            lines.append(f"{indent}📄 {name:<40} {size_str:>10}")
-        elif item_type == "commit":
-            # Submodule
-            lines.append(f"{indent}📦 {name} (submodule)")
+            # File - show size
+            size = format_size(item.get("size", 0))
+            lines.append(f"{indent}📄 {name:<40} {size:>10}")
         else:
-            lines.append(f"{indent}❓ {name} ({item_type})")
+            # Other (submodule, symlink, etc.)
+            lines.append(f"{indent}🔗 {name} ({item_type})")
+    
+    # Note if tree was truncated (very large repos)
+    if tree.get("truncated"):
+        lines.append("")
+        lines.append("⚠️  Tree was truncated due to size. Use --path to filter.")
     
     return "\n".join(lines)
 
 
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 def main():
     """
     Main entry point for the tree viewer.
+    
+    Parses command-line arguments and displays the repository tree.
     """
     parser = argparse.ArgumentParser(
         description="Get the full file tree of a GitHub repository",
@@ -273,7 +242,7 @@ Examples:
   # Filter to specific directory
   uv run scripts/repo_tree.py owner/repo --path src/
 
-  # Output as JSON
+  # JSON output
   uv run scripts/repo_tree.py owner/repo --json
         """
     )
@@ -284,7 +253,7 @@ Examples:
         help="Repository in owner/repo format"
     )
     
-    # Optional: ref (branch, tag, or commit)
+    # Optional: git reference
     parser.add_argument(
         "--ref", "-r",
         help="Git ref (branch, tag, or commit SHA)"
@@ -305,21 +274,21 @@ Examples:
     
     args = parser.parse_args()
     
-    # Parse repository
+    # Parse repository and get token
     owner, repo = parse_repo(args.repo)
-    
-    # Get token and fetch tree
     token = get_token()
-    tree_data = get_tree(token, owner, repo, args.ref)
     
-    # Output results
+    # Fetch tree
+    tree = get_tree_for_ref(token, owner, repo, args.ref)
+    
+    # Output based on format
     if args.json:
-        # Apply path filter to JSON output too
+        # If filtering, apply filter to JSON output too
         if args.path:
-            tree_data["tree"] = filter_tree_by_path(tree_data.get("tree", []), args.path)
-        print(json.dumps(tree_data, indent=2))
+            tree["tree"] = filter_tree_by_path(tree["tree"], args.path)
+        print(json.dumps(tree, indent=2))
     else:
-        print(format_tree_for_display(tree_data, args.path))
+        print(format_tree_for_display(tree, args.path))
 
 
 if __name__ == "__main__":
