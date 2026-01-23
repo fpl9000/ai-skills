@@ -37,7 +37,7 @@ This skill uses a shared common module (`github_common.py`) to centralize:
 - Repository string parsing
 - Error handling and retry logic with exponential backoff
 
-All scripts import from `github_common.py`, which makes maintenance easier and ensures consistent behavior across all operations.
+All scripts import from `github_common.py`, which makes maintenance easier, ensures consistent behavior across all operations, and allows API versioning updates to be made in a single location.
 
 ## API Versioning
 
