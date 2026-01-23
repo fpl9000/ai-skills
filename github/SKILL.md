@@ -1,6 +1,6 @@
 ---
 name: github
-description: Access GitHub repositories via the GitHub REST API. Use this skill when the user wants to interact with GitHub including reading files, creating/updating files, listing repos, managing branches, viewing commits, or working with issues and pull requests. All scripts use PEP 723 inline metadata for dependencies and run via `uv run`. Requires GITHUB_TOKEN environment variable (a Personal Access Token with appropriate scopes).
+description: Access GitHub repositories via the GitHub REST API. Use this skill when the user wants to interact with GitHub including reading files, creating/updating files, listing repos, managing branches, viewing commits, working with issues, or managing pull requests. All scripts use PEP 723 inline metadata for dependencies and run via `uv run`. Requires GITHUB_TOKEN environment variable (a Personal Access Token with appropriate scopes).
 ---
 
 # Skill Overview
@@ -29,44 +29,47 @@ This skill provides access to GitHub repositories via a set of Python scripts th
 
 If you (the AI agent) have network restrictions, the user may need to whitelist this domain in the agent's settings for this skill to function.
 
+## Architecture
+
+This skill uses a shared common module (`github_common.py`) to centralize:
+- Authentication and token management
+- HTTP header construction with explicit API versioning
+- Repository string parsing
+- Error handling and retry logic with exponential backoff
+
+All scripts import from `github_common.py`, which makes maintenance easier and ensures consistent behavior across all operations.
+
+## API Versioning
+
+This skill uses explicit GitHub API versioning for long-term stability:
+- API Version: `2022-11-28`
+- Header: `X-GitHub-Api-Version: 2022-11-28`
+
+This ensures consistent behavior even if GitHub releases new API versions with breaking changes.
+
 ## Available Scripts
 
 All scripts include PEP 723 inline metadata declaring their dependencies. Just run with `uv run` — no manual dependency installation needed.
 
 ---
 
+## Repository Operations
+
 ### List Repositories (`scripts/repo_list.py`)
 
-List repositories for a user or organization.
-
 ```bash
-# List your own repos (authenticated user)
-uv run scripts/repo_list.py
-
-# List repos for a specific user
-uv run scripts/repo_list.py --user octocat
-
-# List repos for an organization
-uv run scripts/repo_list.py --org github
-
-# Filter by type and sort
-uv run scripts/repo_list.py --type public --sort updated
-
-# JSON output
-uv run scripts/repo_list.py --json
-
-# Pagination
-uv run scripts/repo_list.py --per-page 50 --page 2
+uv run scripts/repo_list.py                          # List your repos
+uv run scripts/repo_list.py --user octocat           # List user's repos
+uv run scripts/repo_list.py --org github             # List org's repos
+uv run scripts/repo_list.py --type public --sort updated --json
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
 | `--user` | List repos for this user |
 | `--org` | List repos for this organization |
-| `--type` | Filter by type: all, public, private, forks, sources, member (default: all) |
-| `--sort` | Sort by: created, updated, pushed, full_name (default: updated) |
+| `--type` | Filter: all, public, private, forks, sources, member |
+| `--sort` | Sort by: created, updated, pushed, full_name |
 | `--per-page` | Results per page (max 100, default: 30) |
 | `--page` | Page number (default: 1) |
 | `--json`, `-j` | Output as JSON |
@@ -75,26 +78,12 @@ uv run scripts/repo_list.py --per-page 50 --page 2
 
 ### Get Repository Contents (`scripts/repo_contents.py`)
 
-Get file or directory contents from a repository.
-
 ```bash
-# Get root directory listing
-uv run scripts/repo_contents.py owner/repo
-
-# Get a specific file
-uv run scripts/repo_contents.py owner/repo --path README.md
-
-# Get a directory listing
-uv run scripts/repo_contents.py owner/repo --path src/
-
-# Get contents from a specific branch
-uv run scripts/repo_contents.py owner/repo --path config.json --ref develop
-
-# JSON output (includes metadata like SHA, size, etc.)
-uv run scripts/repo_contents.py owner/repo --path README.md --json
+uv run scripts/repo_contents.py owner/repo                    # Root listing
+uv run scripts/repo_contents.py owner/repo --path README.md   # Get file
+uv run scripts/repo_contents.py owner/repo --path src/        # List directory
+uv run scripts/repo_contents.py owner/repo --path config.json --ref develop --json
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -107,23 +96,12 @@ uv run scripts/repo_contents.py owner/repo --path README.md --json
 
 ### Get Repository Tree (`scripts/repo_tree.py`)
 
-Get the full file tree of a repository (recursive listing).
-
 ```bash
-# Get full tree of default branch
-uv run scripts/repo_tree.py owner/repo
-
-# Get tree from specific branch
-uv run scripts/repo_tree.py owner/repo --ref develop
-
-# Filter to specific directory
-uv run scripts/repo_tree.py owner/repo --path src/
-
-# JSON output
+uv run scripts/repo_tree.py owner/repo               # Full tree
+uv run scripts/repo_tree.py owner/repo --ref develop # Specific branch
+uv run scripts/repo_tree.py owner/repo --path src/   # Filter by path
 uv run scripts/repo_tree.py owner/repo --json
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -134,39 +112,30 @@ uv run scripts/repo_tree.py owner/repo --json
 
 ---
 
+## File Operations
+
 ### Create or Update File (`scripts/file_write.py`)
 
-Create a new file or update an existing file in a repository.
-
 ```bash
-# Create a new file
+# Create new file
 uv run scripts/file_write.py owner/repo \
-    --path docs/new-file.md \
-    --content "# New Document\n\nContent here." \
-    --message "Add new document"
+    --path docs/README.md \
+    --content "# Documentation" \
+    --message "Add docs"
 
-# Update an existing file (SHA required - get it from repo_contents.py --json)
+# Update existing file (SHA required)
 uv run scripts/file_write.py owner/repo \
     --path README.md \
-    --content "# Updated README\n\nNew content." \
+    --content "# Updated" \
     --message "Update README" \
     --sha abc123...
 
-# Create file on a specific branch
+# From local file
 uv run scripts/file_write.py owner/repo \
-    --path config.json \
-    --content '{"key": "value"}' \
-    --message "Add config" \
-    --branch develop
-
-# Read content from a local file
-uv run scripts/file_write.py owner/repo \
-    --path remote/path.py \
-    --from-file local/path.py \
+    --path remote/script.py \
+    --from-file local/script.py \
     --message "Upload script"
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -176,33 +145,19 @@ uv run scripts/file_write.py owner/repo \
 | `--from-file`, `-f` | Read content from this local file |
 | `--message`, `-m` | Commit message (required) |
 | `--sha` | SHA of file being replaced (required for updates) |
-| `--branch`, `-b` | Branch to commit to (default: repo's default branch) |
-| `--json`, `-j` | Output commit details as JSON |
-
-**Note**: Either `--content` or `--from-file` must be provided.
+| `--branch`, `-b` | Branch to commit to |
+| `--json`, `-j` | Output as JSON |
 
 ---
 
 ### Delete File (`scripts/file_delete.py`)
 
-Delete a file from a repository.
-
 ```bash
-# Delete a file (SHA required - get it from repo_contents.py --json)
 uv run scripts/file_delete.py owner/repo \
-    --path docs/old-file.md \
+    --path docs/old.md \
     --sha abc123... \
-    --message "Remove old document"
-
-# Delete from specific branch
-uv run scripts/file_delete.py owner/repo \
-    --path temp.txt \
-    --sha abc123... \
-    --message "Clean up temp file" \
-    --branch develop
+    --message "Remove old doc"
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -210,27 +165,19 @@ uv run scripts/file_delete.py owner/repo \
 | `--path`, `-p` | Path to the file to delete (required) |
 | `--sha` | SHA of the file to delete (required) |
 | `--message`, `-m` | Commit message (required) |
-| `--branch`, `-b` | Branch to delete from (default: repo's default branch) |
-| `--json`, `-j` | Output commit details as JSON |
+| `--branch`, `-b` | Branch to delete from |
+| `--json`, `-j` | Output as JSON |
 
 ---
 
+## Branch Operations
+
 ### List Branches (`scripts/branch_list.py`)
 
-List branches in a repository.
-
 ```bash
-# List all branches
 uv run scripts/branch_list.py owner/repo
-
-# JSON output
 uv run scripts/branch_list.py owner/repo --json
-
-# Pagination
-uv run scripts/branch_list.py owner/repo --per-page 100
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -243,65 +190,57 @@ uv run scripts/branch_list.py owner/repo --per-page 100
 
 ### Create Branch (`scripts/branch_create.py`)
 
-Create a new branch in a repository.
-
 ```bash
-# Create branch from default branch
 uv run scripts/branch_create.py owner/repo --name feature/new-feature
-
-# Create branch from specific source branch
-uv run scripts/branch_create.py owner/repo \
-    --name hotfix/bug-123 \
-    --from develop
-
-# Create branch from specific commit SHA
-uv run scripts/branch_create.py owner/repo \
-    --name release/v1.0 \
-    --from abc123def456...
+uv run scripts/branch_create.py owner/repo --name hotfix/123 --from develop
+uv run scripts/branch_create.py owner/repo --name release/v1.0 --from abc123...
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
 | `repo` | Repository in owner/repo format (required) |
 | `--name`, `-n` | Name for the new branch (required) |
-| `--from`, `-f` | Source branch or commit SHA (default: repo's default branch) |
+| `--from`, `-f` | Source branch or commit SHA |
 | `--json`, `-j` | Output as JSON |
 
 ---
 
-### List Commits (`scripts/commit_list.py`)
-
-List commits in a repository.
+### Delete Branch (`scripts/branch_delete.py`)
 
 ```bash
-# List recent commits on default branch
-uv run scripts/commit_list.py owner/repo
-
-# List commits on specific branch
-uv run scripts/commit_list.py owner/repo --branch develop
-
-# List commits for a specific path
-uv run scripts/commit_list.py owner/repo --path src/main.py
-
-# List commits by author
-uv run scripts/commit_list.py owner/repo --author octocat
-
-# JSON output
-uv run scripts/commit_list.py owner/repo --json
+uv run scripts/branch_delete.py owner/repo --name feature/old-branch
+uv run scripts/branch_delete.py owner/repo --name merged-branch --force
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
 | `repo` | Repository in owner/repo format (required) |
-| `--branch`, `-b` | Branch name (default: repo's default branch) |
-| `--path`, `-p` | Only commits containing this file path |
+| `--name`, `-n` | Branch name to delete (required) |
+| `--force`, `-f` | Skip confirmation prompt |
+| `--json`, `-j` | Output as JSON |
+
+---
+
+## Commit Operations
+
+### List Commits (`scripts/commit_list.py`)
+
+```bash
+uv run scripts/commit_list.py owner/repo
+uv run scripts/commit_list.py owner/repo --branch develop
+uv run scripts/commit_list.py owner/repo --path src/main.py
+uv run scripts/commit_list.py owner/repo --author octocat
+uv run scripts/commit_list.py owner/repo --since 2024-01-01 --json
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `--branch`, `-b` | Branch name |
+| `--path`, `-p` | Filter to commits affecting this path |
 | `--author`, `-a` | Filter by author username or email |
-| `--since` | Only commits after this date (ISO 8601 format) |
-| `--until` | Only commits before this date (ISO 8601 format) |
+| `--since` | Only commits after this date (ISO 8601) |
+| `--until` | Only commits before this date (ISO 8601) |
 | `--per-page` | Results per page (max 100, default: 30) |
 | `--page` | Page number (default: 1) |
 | `--json`, `-j` | Output as JSON |
@@ -310,17 +249,10 @@ uv run scripts/commit_list.py owner/repo --json
 
 ### Get Commit Details (`scripts/commit_get.py`)
 
-Get details for a specific commit.
-
 ```bash
-# Get commit by SHA
 uv run scripts/commit_get.py owner/repo abc123def456
-
-# JSON output (includes full diff stats)
 uv run scripts/commit_get.py owner/repo abc123def456 --json
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -330,62 +262,38 @@ uv run scripts/commit_get.py owner/repo abc123def456 --json
 
 ---
 
+## Issue Operations
+
 ### List Issues (`scripts/issue_list.py`)
 
-List issues in a repository.
-
 ```bash
-# List open issues
 uv run scripts/issue_list.py owner/repo
-
-# List all issues (including closed)
 uv run scripts/issue_list.py owner/repo --state all
-
-# Filter by labels
-uv run scripts/issue_list.py owner/repo --labels "bug,high-priority"
-
-# Filter by assignee
-uv run scripts/issue_list.py owner/repo --assignee octocat
-
-# JSON output
-uv run scripts/issue_list.py owner/repo --json
+uv run scripts/issue_list.py owner/repo --labels "bug,urgent"
+uv run scripts/issue_list.py owner/repo --assignee octocat --json
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
 | `repo` | Repository in owner/repo format (required) |
-| `--state` | Filter by state: open, closed, all (default: open) |
+| `--state` | Filter: open, closed, all (default: open) |
 | `--labels` | Comma-separated list of label names |
 | `--assignee` | Filter by assignee username |
-| `--sort` | Sort by: created, updated, comments (default: created) |
-| `--direction` | Sort direction: asc, desc (default: desc) |
-| `--per-page` | Results per page (max 100, default: 30) |
-| `--page` | Page number (default: 1) |
+| `--sort` | Sort by: created, updated, comments |
+| `--direction` | Sort direction: asc, desc |
+| `--per-page` | Results per page (max 100) |
+| `--page` | Page number |
 | `--json`, `-j` | Output as JSON |
 
 ---
 
 ### Create Issue (`scripts/issue_create.py`)
 
-Create a new issue in a repository.
-
 ```bash
-# Create simple issue
-uv run scripts/issue_create.py owner/repo \
-    --title "Bug: Something is broken" \
-    --body "Description of the bug..."
-
-# Create issue with labels and assignee
-uv run scripts/issue_create.py owner/repo \
-    --title "Feature request" \
-    --body "Please add this feature" \
-    --labels "enhancement,help-wanted" \
-    --assignees "octocat,contributor"
+uv run scripts/issue_create.py owner/repo --title "Bug report" --body "Description..."
+uv run scripts/issue_create.py owner/repo --title "Feature" --labels "enhancement"
+uv run scripts/issue_create.py owner/repo --title "Task" --assignees "user1,user2"
 ```
-
-**Arguments:**
 
 | Argument | Description |
 |----------|-------------|
@@ -393,8 +301,114 @@ uv run scripts/issue_create.py owner/repo \
 | `--title`, `-t` | Issue title (required) |
 | `--body`, `-b` | Issue body/description |
 | `--labels` | Comma-separated list of label names |
-| `--assignees` | Comma-separated list of usernames to assign |
+| `--assignees` | Comma-separated list of usernames |
 | `--milestone` | Milestone number |
+| `--json`, `-j` | Output as JSON |
+
+---
+
+### Update Issue (`scripts/issue_update.py`)
+
+```bash
+uv run scripts/issue_update.py owner/repo 123 --title "New title"
+uv run scripts/issue_update.py owner/repo 123 --state closed
+uv run scripts/issue_update.py owner/repo 123 --state closed --reason not_planned
+uv run scripts/issue_update.py owner/repo 123 --labels "bug,urgent"
+uv run scripts/issue_update.py owner/repo 123 --assignees "user1,user2"
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `issue_number` | Issue number to update (required) |
+| `--title`, `-t` | New title |
+| `--body`, `-b` | New body/description |
+| `--state`, `-s` | New state: open, closed |
+| `--reason` | Close reason: completed, not_planned |
+| `--labels` | Comma-separated labels (replaces existing) |
+| `--assignees` | Comma-separated usernames (replaces existing) |
+| `--milestone` | Milestone number (0 to clear) |
+| `--json`, `-j` | Output as JSON |
+
+---
+
+## Pull Request Operations
+
+### List Pull Requests (`scripts/pr_list.py`)
+
+```bash
+uv run scripts/pr_list.py owner/repo
+uv run scripts/pr_list.py owner/repo --state all
+uv run scripts/pr_list.py owner/repo --base main
+uv run scripts/pr_list.py owner/repo --sort updated --json
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `--state` | Filter: open, closed, all (default: open) |
+| `--base` | Filter by base branch |
+| `--head` | Filter by head branch |
+| `--sort` | Sort by: created, updated, popularity, long-running |
+| `--direction` | Sort direction: asc, desc |
+| `--per-page` | Results per page (max 100) |
+| `--page` | Page number |
+| `--json`, `-j` | Output as JSON |
+
+---
+
+### Create Pull Request (`scripts/pr_create.py`)
+
+```bash
+uv run scripts/pr_create.py owner/repo --title "Add feature" --head feature-branch
+uv run scripts/pr_create.py owner/repo --title "Fix bug" --head fix-123 --base develop
+uv run scripts/pr_create.py owner/repo --title "WIP" --head wip-branch --draft
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `--title`, `-t` | PR title (required) |
+| `--head`, `-h` | Branch containing changes (required) |
+| `--base`, `-b` | Branch to merge into (default: default branch) |
+| `--body` | PR description |
+| `--draft`, `-d` | Create as draft PR |
+| `--json`, `-j` | Output as JSON |
+
+---
+
+### Get Pull Request Details (`scripts/pr_get.py`)
+
+```bash
+uv run scripts/pr_get.py owner/repo 123
+uv run scripts/pr_get.py owner/repo 123 --json
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `pr_number` | Pull request number (required) |
+| `--json`, `-j` | Output as JSON |
+
+---
+
+### Merge Pull Request (`scripts/pr_merge.py`)
+
+```bash
+uv run scripts/pr_merge.py owner/repo 123
+uv run scripts/pr_merge.py owner/repo 123 --method squash
+uv run scripts/pr_merge.py owner/repo 123 --method rebase
+uv run scripts/pr_merge.py owner/repo 123 --method squash --title "Feature (#123)"
+```
+
+| Argument | Description |
+|----------|-------------|
+| `repo` | Repository in owner/repo format (required) |
+| `pr_number` | Pull request number (required) |
+| `--method`, `-m` | Merge method: merge, squash, rebase |
+| `--title`, `-t` | Custom commit title |
+| `--message` | Custom commit message body |
+| `--sha` | Expected head SHA (for safety) |
 | `--json`, `-j` | Output as JSON |
 
 ---
@@ -413,7 +427,7 @@ GITHUB_TOKEN="ghp_xxx" uv run scripts/repo_list.py
 
 ### Updating a File (Full Workflow)
 
-To update a file, you need its current SHA. Here's the workflow:
+To update a file, you need its current SHA:
 
 ```bash
 # 1. Get the current file with its SHA
@@ -430,6 +444,32 @@ uv run scripts/file_write.py owner/repo \
     --sha "$SHA"
 ```
 
+### Creating and Merging a PR (Full Workflow)
+
+```bash
+# 1. Create a branch
+uv run scripts/branch_create.py owner/repo --name feature/my-feature
+
+# 2. Make changes (push commits via git or file_write.py)
+uv run scripts/file_write.py owner/repo \
+    --path feature.py \
+    --content "# New feature" \
+    --message "Add feature" \
+    --branch feature/my-feature
+
+# 3. Create a PR
+uv run scripts/pr_create.py owner/repo \
+    --title "Add my feature" \
+    --head feature/my-feature \
+    --body "This PR adds..."
+
+# 4. Merge the PR
+uv run scripts/pr_merge.py owner/repo 123 --method squash
+
+# 5. Delete the branch
+uv run scripts/branch_delete.py owner/repo --name feature/my-feature --force
+```
+
 ### JSON Output for Processing
 
 All scripts support `--json` for machine-readable output:
@@ -440,6 +480,9 @@ uv run scripts/repo_list.py --json | jq '.[] | select(.language == "Python")'
 
 # Get commit count
 uv run scripts/commit_list.py owner/repo --json | jq 'length'
+
+# Get all open PR numbers
+uv run scripts/pr_list.py owner/repo --json | jq '.[].number'
 ```
 
 ## Error Handling
@@ -457,6 +500,8 @@ Scripts exit with non-zero status on errors. Common issues:
 The GitHub API has rate limits:
 - Authenticated requests: 5,000 per hour
 - Search API: 30 per minute
+
+The skill includes automatic retry logic with exponential backoff for rate limit errors.
 
 Check your current limits:
 
