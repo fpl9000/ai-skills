@@ -14,11 +14,21 @@ This script uses the GitHub Contents API to:
 - Create new files with a commit
 - Update existing files (requires the file's current SHA)
 - Create files on specific branches
+- Optionally set file mode (e.g., executable) via --mode
 
 Usage:
     uv run scripts/file_write.py owner/repo --path docs/README.md --content "..." --message "Add docs"
     uv run scripts/file_write.py owner/repo --path config.json --from-file local.json --message "Update config"
     uv run scripts/file_write.py owner/repo --path README.md --content "..." --sha abc123 --message "Update"
+    
+    # Create an executable script
+    uv run scripts/file_write.py owner/repo --path scripts/build.sh --from-file build.sh --message "Add build script" --mode 755
+
+Note on --mode:
+    The GitHub Contents API doesn't support setting file modes directly.
+    When --mode is specified, this script creates the file first, then
+    makes a second commit to set the file mode using the Git Data API.
+    This results in two commits but correctly sets the file permissions.
 
 Environment Variables Required:
     GITHUB_TOKEN - Your GitHub Personal Access Token
@@ -36,12 +46,99 @@ from github_common import (
     get_headers,
     parse_repo,
     make_request_with_retry,
+    get_branch_head_sha,
+    get_commit_tree_sha,
+    get_tree_recursive,
+    create_tree_with_changes,
+    create_commit,
+    update_branch_ref,
+    user_mode_to_git_mode,
+    git_mode_to_display,
+    get_default_branch,
 )
 
 
 # =============================================================================
 # API Functions
 # =============================================================================
+
+def set_file_mode(
+    token: str,
+    owner: str,
+    repo: str,
+    path: str,
+    mode: str,
+    branch: str,
+) -> str:
+    """
+    Set the mode of a file using the Git Data API.
+    
+    This is called after creating/updating a file via the Contents API
+    when the user specifies a --mode. The Contents API doesn't support
+    setting modes, so we need a separate Git Data API operation.
+    
+    Args:
+        token: GitHub Personal Access Token
+        owner: Repository owner
+        repo: Repository name
+        path: Path to the file
+        mode: Target mode (user format like '755')
+        branch: Branch the file is on
+        
+    Returns:
+        The new commit SHA if mode was changed, None if already correct
+        
+    Exits:
+        Exits with code 1 on API errors
+    """
+    # Convert user mode to git mode
+    try:
+        git_mode = user_mode_to_git_mode(mode)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Get current state
+    head_sha = get_branch_head_sha(token, owner, repo, branch)
+    tree_sha = get_commit_tree_sha(token, owner, repo, head_sha)
+    tree_entries = get_tree_recursive(token, owner, repo, tree_sha)
+    
+    # Find the file
+    normalized_path = path.strip("/")
+    file_entry = None
+    for entry in tree_entries:
+        if entry["path"] == normalized_path:
+            file_entry = entry
+            break
+    
+    if not file_entry:
+        print(f"Error: File '{path}' not found in tree", file=sys.stderr)
+        sys.exit(1)
+    
+    if file_entry["mode"] == git_mode:
+        # Already has correct mode
+        return None
+    
+    # Create new tree with modified mode
+    tree_changes = [{
+        "path": normalized_path,
+        "mode": git_mode,
+        "type": "blob",
+        "sha": file_entry["sha"],
+    }]
+    
+    new_tree_sha = create_tree_with_changes(token, owner, repo, tree_sha, tree_changes)
+    
+    # Create commit for the mode change
+    mode_display = git_mode[-3:]
+    message = f"Set mode {mode_display} on {path}"
+    new_commit_sha = create_commit(token, owner, repo, new_tree_sha, head_sha, message)
+    
+    # Update branch
+    update_branch_ref(token, owner, repo, branch, new_commit_sha)
+    
+    return new_commit_sha
+
 
 def create_or_update_file(
     token: str,
@@ -250,6 +347,13 @@ Examples:
       --content '{"key": "value"}' \\
       --message "Add config" \\
       --branch develop
+
+  # Create an executable script (with mode)
+  uv run scripts/file_write.py owner/repo \\
+      --path scripts/build.sh \\
+      --from-file build.sh \\
+      --message "Add build script" \\
+      --mode 755
         """
     )
     
@@ -296,6 +400,13 @@ Examples:
         help="Branch to commit to (default: repo's default branch)"
     )
     
+    # Optional: file mode (for creating executable scripts, etc.)
+    parser.add_argument(
+        "--mode",
+        help="File mode to set (e.g., 755 for executable, 644 for regular). "
+             "If specified, a second commit will set the file mode after creation."
+    )
+    
     # Output format
     parser.add_argument(
         "--json", "-j",
@@ -324,20 +435,56 @@ Examples:
     
     # Get token and create/update file
     token = get_token()
+    
+    # Determine branch (need it for mode setting)
+    branch = args.branch
+    if branch is None and args.mode:
+        # We need to know the branch for mode setting
+        branch = get_default_branch(token, owner, repo)
+    
     result, is_create = create_or_update_file(
         token, owner, repo,
         path=args.path,
         content=content,
         message=args.message,
         sha=args.sha,
-        branch=args.branch,
+        branch=branch,
     )
+    
+    # If mode was specified, set it in a second commit
+    mode_commit_sha = None
+    if args.mode:
+        # Determine the branch (use what we passed or get from result)
+        if branch is None:
+            branch = get_default_branch(token, owner, repo)
+        
+        mode_commit_sha = set_file_mode(
+            token, owner, repo,
+            path=args.path,
+            mode=args.mode,
+            branch=branch,
+        )
     
     # Output results
     if args.json:
-        print(json.dumps(result, indent=2))
+        output = result
+        if mode_commit_sha:
+            output["mode_commit"] = mode_commit_sha
+            output["mode_set"] = args.mode
+        print(json.dumps(output, indent=2))
     else:
-        print(format_result_for_display(result, args.path, is_create))
+        display = format_result_for_display(result, args.path, is_create)
+        print(display)
+        
+        # Add mode information if set
+        if mode_commit_sha:
+            try:
+                git_mode = user_mode_to_git_mode(args.mode)
+                mode_display = git_mode_to_display(git_mode)
+            except ValueError:
+                mode_display = args.mode
+            print(f"\n🔧 Mode set to {mode_display}")
+            print(f"   Commit: {mode_commit_sha[:8]}")
 
 
 if __name__ == "__main__":
