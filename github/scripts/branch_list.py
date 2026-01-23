@@ -25,95 +25,36 @@ Environment Variables Required:
 
 import argparse
 import json
-import os
 import sys
 
-import requests
+# Import shared utilities from the common module
+from github_common import (
+    API_BASE,
+    get_token,
+    get_headers,
+    parse_repo,
+    make_request_with_retry,
+    handle_api_error,
+    get_default_branch,
+)
 
 
-# GitHub API base URL
-API_BASE = "https://api.github.com"
+# =============================================================================
+# API Functions
+# =============================================================================
 
-
-def get_token():
-    """
-    Retrieve GitHub token from environment variable.
-    
-    Returns the token if set, exits with error if missing.
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    
-    if not token:
-        print("Error: GITHUB_TOKEN environment variable not set", file=sys.stderr)
-        print("Create a token at: https://github.com/settings/tokens", file=sys.stderr)
-        sys.exit(1)
-    
-    return token
-
-
-def get_headers(token: str) -> dict:
-    """
-    Build HTTP headers for GitHub API requests.
-    
-    Args:
-        token: GitHub Personal Access Token
-        
-    Returns:
-        Dictionary of headers including authorization
-    """
-    return {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-skill-script",
-    }
-
-
-def parse_repo(repo_string: str) -> tuple:
-    """
-    Parse owner/repo string into components.
-    
-    Args:
-        repo_string: Repository in "owner/repo" format
-        
-    Returns:
-        Tuple of (owner, repo)
-    """
-    parts = repo_string.split("/")
-    if len(parts) != 2:
-        print(f"Error: Invalid repository format '{repo_string}'", file=sys.stderr)
-        print("Expected format: owner/repo (e.g., octocat/hello-world)", file=sys.stderr)
-        sys.exit(1)
-    
-    return parts[0], parts[1]
-
-
-def get_default_branch(token: str, owner: str, repo: str) -> str:
-    """
-    Get the default branch of a repository.
-    
-    Args:
-        token: GitHub Personal Access Token
-        owner: Repository owner
-        repo: Repository name
-        
-    Returns:
-        Default branch name
-    """
-    headers = get_headers(token)
-    url = f"{API_BASE}/repos/{owner}/{repo}"
-    
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        return response.json().get("default_branch", "main")
-    
-    return "main"  # Fallback
-
-
-def list_branches(token: str, owner: str, repo: str,
-                  per_page: int = 30, page: int = 1) -> list:
+def list_branches(
+    token: str,
+    owner: str,
+    repo: str,
+    per_page: int = 30,
+    page: int = 1
+) -> list:
     """
     List branches in a GitHub repository.
+    
+    Retrieves all branches with their commit SHAs and protection status.
+    Results are paginated.
     
     Args:
         token: GitHub Personal Access Token
@@ -123,7 +64,7 @@ def list_branches(token: str, owner: str, repo: str,
         page: Page number
         
     Returns:
-        List of branch dictionaries
+        List of branch dictionaries from the API
     """
     headers = get_headers(token)
     
@@ -134,63 +75,64 @@ def list_branches(token: str, owner: str, repo: str,
         "page": page,
     }
     
-    response = requests.get(url, headers=headers, params=params)
+    response = make_request_with_retry('get', url, headers, params=params)
     
-    # Handle errors
-    if response.status_code == 404:
-        print(f"Error: Repository {owner}/{repo} not found", file=sys.stderr)
-        sys.exit(1)
-    elif response.status_code != 200:
-        error_msg = response.json().get("message", "Unknown error")
-        print(f"Error: GitHub API returned {response.status_code}", file=sys.stderr)
-        print(f"Message: {error_msg}", file=sys.stderr)
-        sys.exit(1)
+    handle_api_error(response, f"Branches in {owner}/{repo}")
     
     return response.json()
 
 
-def format_branches_for_display(branches: list, default_branch: str) -> str:
+# =============================================================================
+# Display Formatting Functions
+# =============================================================================
+
+def format_branches_for_display(
+    branches: list,
+    default_branch: str = None
+) -> str:
     """
-    Format branches for human-readable display.
+    Format branch list for human-readable display.
     
     Args:
-        branches: List of branch dictionaries from GitHub API
-        default_branch: Name of the default branch
+        branches: List of branch dictionaries from the API
+        default_branch: Name of the default branch (to mark it)
         
     Returns:
-        Formatted string with branch list
+        Formatted string with branch listing
     """
     if not branches:
         return "No branches found."
     
-    lines = []
-    lines.append(f"Found {len(branches)} branches:\n")
+    lines = [f"Found {len(branches)} branches:\n"]
     
     for branch in branches:
         name = branch.get("name", "Unknown")
         sha = branch.get("commit", {}).get("sha", "")[:8]
         protected = branch.get("protected", False)
         
-        # Build display line
-        # Mark default branch with a star
+        # Build status indicators
+        indicators = []
         if name == default_branch:
-            prefix = "⭐"
-        elif protected:
-            prefix = "🔒"
-        else:
-            prefix = "  "
+            indicators.append("default")
+        if protected:
+            indicators.append("🔒 protected")
         
-        lines.append(f"{prefix} {name:<40} {sha}")
-    
-    lines.append("")
-    lines.append("Legend: ⭐ = default branch, 🔒 = protected")
+        status = f" ({', '.join(indicators)})" if indicators else ""
+        
+        lines.append(f"  🌿 {name:<30} {sha}{status}")
     
     return "\n".join(lines)
 
 
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 def main():
     """
     Main entry point for the branch lister.
+    
+    Parses command-line arguments and displays branch information.
     """
     parser = argparse.ArgumentParser(
         description="List branches in a GitHub repository",
@@ -200,11 +142,11 @@ Examples:
   # List all branches
   uv run scripts/branch_list.py owner/repo
 
-  # Output as JSON
+  # JSON output
   uv run scripts/branch_list.py owner/repo --json
 
   # Pagination
-  uv run scripts/branch_list.py owner/repo --per-page 100 --page 2
+  uv run scripts/branch_list.py owner/repo --per-page 100
         """
     )
     
@@ -214,7 +156,7 @@ Examples:
         help="Repository in owner/repo format"
     )
     
-    # Pagination
+    # Pagination options
     parser.add_argument(
         "--per-page",
         type=int,
@@ -240,15 +182,28 @@ Examples:
     # Parse repository
     owner, repo = parse_repo(args.repo)
     
-    # Get token and fetch branches
+    # Get token
     token = get_token()
-    branches = list_branches(token, owner, repo, args.per_page, args.page)
+    
+    # Get default branch for display purposes
+    default_branch = None
+    if not args.json:
+        try:
+            default_branch = get_default_branch(token, owner, repo)
+        except SystemExit:
+            pass  # Continue without default branch info
+    
+    # List branches
+    branches = list_branches(
+        token, owner, repo,
+        per_page=args.per_page,
+        page=args.page,
+    )
     
     # Output results
     if args.json:
         print(json.dumps(branches, indent=2))
     else:
-        default_branch = get_default_branch(token, owner, repo)
         print(format_branches_for_display(branches, default_branch))
 
 
