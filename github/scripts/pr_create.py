@@ -153,7 +153,7 @@ Examples:
     
     parser.add_argument("repo", help="Repository in owner/repo format")
     parser.add_argument("--title", "-t", required=True, help="PR title")
-    parser.add_argument("--head", "-h", required=True, dest="head_branch",
+    parser.add_argument("--head", required=True, dest="head_branch",
                         help="Branch containing changes (source)")
     parser.add_argument("--base", "-b", help="Branch to merge into (default: repo's default branch)")
     parser.add_argument("--body", help="PR description/body")
