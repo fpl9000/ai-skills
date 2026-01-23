@@ -7,7 +7,7 @@ This repo contains the following skills.  Each `.skill` package file has a match
 containing the files in the skill package (e.g., the files for `myskill.skill` are in directory
 `myskill`).
 
-* [**github.skill**](github.skill): A skill to read from and write to GitHub repositories, including creating issues, pull requests, branches, commits, and files.
+* [**github.skill**](github.skill): A skill to read from and write to GitHub repositories, including creating issues, pull requests, branches, commits, and files.  Use only in cloud environments.  This is not needed in local Claude Code, because it can use `git` and `gh` (assuming they're installed).
 
 * [**load-skill.skill**](load-skill.skill): A skill to load and install other skill files.  Usage: `/load-skill [ --install | -i ] SKILLFILE`.  Without `--install`, the agent will query you for permission to install the skill.
 
