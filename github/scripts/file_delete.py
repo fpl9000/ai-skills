@@ -22,85 +22,48 @@ Environment Variables Required:
 
 import argparse
 import json
-import os
 import sys
 
-import requests
+# Import shared utilities from the common module
+from github_common import (
+    API_BASE,
+    get_token,
+    get_headers,
+    parse_repo,
+    make_request_with_retry,
+)
 
 
-# GitHub API base URL
-API_BASE = "https://api.github.com"
+# =============================================================================
+# API Functions
+# =============================================================================
 
-
-def get_token():
-    """
-    Retrieve GitHub token from environment variable.
-    
-    Returns the token if set, exits with error if missing.
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    
-    if not token:
-        print("Error: GITHUB_TOKEN environment variable not set", file=sys.stderr)
-        print("Create a token at: https://github.com/settings/tokens", file=sys.stderr)
-        sys.exit(1)
-    
-    return token
-
-
-def get_headers(token: str) -> dict:
-    """
-    Build HTTP headers for GitHub API requests.
-    
-    Args:
-        token: GitHub Personal Access Token
-        
-    Returns:
-        Dictionary of headers including authorization
-    """
-    return {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-skill-script",
-    }
-
-
-def parse_repo(repo_string: str) -> tuple:
-    """
-    Parse owner/repo string into components.
-    
-    Args:
-        repo_string: Repository in "owner/repo" format
-        
-    Returns:
-        Tuple of (owner, repo)
-    """
-    parts = repo_string.split("/")
-    if len(parts) != 2:
-        print(f"Error: Invalid repository format '{repo_string}'", file=sys.stderr)
-        print("Expected format: owner/repo (e.g., octocat/hello-world)", file=sys.stderr)
-        sys.exit(1)
-    
-    return parts[0], parts[1]
-
-
-def delete_file(token: str, owner: str, repo: str,
-                path: str, sha: str, message: str,
-                branch: str = None) -> dict:
+def delete_file(
+    token: str,
+    owner: str,
+    repo: str,
+    path: str,
+    sha: str,
+    message: str,
+    branch: str = None
+) -> dict:
     """
     Delete a file from a GitHub repository.
+    
+    The SHA must match the current file's SHA to prevent accidental
+    deletion of files that have been modified since they were read.
     
     Args:
         token: GitHub Personal Access Token
         owner: Repository owner
         repo: Repository name
         path: Path to the file to delete
-        sha: SHA of the file to delete
+        sha: SHA of the file to delete (required)
         message: Commit message
         branch: Branch to delete from (default: repo's default branch)
         
     Returns:
-        Dictionary with commit info from API response
+        API response dictionary with commit info
     """
     headers = get_headers(token)
     
@@ -111,32 +74,37 @@ def delete_file(token: str, owner: str, repo: str,
     # Build request body
     body = {
         "message": message,
-        "sha": sha,
+        "sha": sha,  # SHA is required for deletion
     }
     
     # Add optional branch parameter
     if branch:
         body["branch"] = branch
     
-    # Make the API request (DELETE with JSON body)
-    response = requests.delete(url, headers=headers, json=body)
+    # Make the DELETE request
+    response = make_request_with_retry('delete', url, headers, json=body)
     
-    # Handle errors
+    # Handle specific error cases
     if response.status_code == 404:
         print(f"Error: File '{path}' not found in {owner}/{repo}", file=sys.stderr)
         if branch:
-            print(f"(or branch '{branch}' does not exist)", file=sys.stderr)
+            print(f"(on branch '{branch}')", file=sys.stderr)
         sys.exit(1)
+        
     elif response.status_code == 409:
-        # SHA mismatch
-        print("Error: File SHA does not match (file was modified)", file=sys.stderr)
-        print("Get the current SHA with: uv run scripts/repo_contents.py --json --path <path>", file=sys.stderr)
+        # SHA mismatch - file was modified
+        print("Error: File has been modified since you read it (SHA mismatch)",
+              file=sys.stderr)
+        print("Get the current SHA with: uv run scripts/repo_contents.py --json --path <path>",
+              file=sys.stderr)
         sys.exit(1)
+        
     elif response.status_code == 422:
         error_data = response.json()
         error_msg = error_data.get("message", "Validation failed")
         print(f"Error: {error_msg}", file=sys.stderr)
         sys.exit(1)
+        
     elif response.status_code != 200:
         error_msg = response.json().get("message", "Unknown error")
         print(f"Error: GitHub API returned {response.status_code}", file=sys.stderr)
@@ -146,9 +114,13 @@ def delete_file(token: str, owner: str, repo: str,
     return response.json()
 
 
+# =============================================================================
+# Display Formatting Functions
+# =============================================================================
+
 def format_result_for_display(result: dict, path: str) -> str:
     """
-    Format the API result for human-readable display.
+    Format the deletion result for human-readable display.
     
     Args:
         result: API response dictionary
@@ -170,43 +142,47 @@ def format_result_for_display(result: dict, path: str) -> str:
         message = commit.get("message", "")
         author = commit.get("author", {}).get("name", "Unknown")
         date = commit.get("author", {}).get("date", "")
-        html_url = commit.get("html_url", "")
         
         lines.append(f"📝 Commit: {sha}")
         lines.append(f"   Message: {message}")
         lines.append(f"   Author: {author}")
         if date:
             lines.append(f"   Date: {date}")
-        if html_url:
-            lines.append(f"   View: {html_url}")
     
     return "\n".join(lines)
 
 
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 def main():
     """
     Main entry point for the file deleter.
+    
+    Parses command-line arguments and deletes the specified file.
     """
     parser = argparse.ArgumentParser(
         description="Delete a file from a GitHub repository",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Delete a file (SHA required)
+  # Delete a file (SHA required - get it from repo_contents.py --json)
   uv run scripts/file_delete.py owner/repo \\
       --path docs/old-file.md \\
-      --sha abc123def456... \\
+      --sha abc123... \\
       --message "Remove old document"
 
   # Delete from specific branch
   uv run scripts/file_delete.py owner/repo \\
       --path temp.txt \\
-      --sha abc123def456... \\
+      --sha abc123... \\
       --message "Clean up temp file" \\
       --branch develop
 
-To get a file's SHA:
-  uv run scripts/repo_contents.py owner/repo --path <file> --json | jq -r '.sha'
+  # Get the SHA first, then delete
+  SHA=$(uv run scripts/repo_contents.py owner/repo --path file.txt --json | jq -r '.sha')
+  uv run scripts/file_delete.py owner/repo --path file.txt --sha $SHA --message "Remove file"
         """
     )
     
@@ -216,14 +192,14 @@ To get a file's SHA:
         help="Repository in owner/repo format"
     )
     
-    # Required: path
+    # Required: file path
     parser.add_argument(
         "--path", "-p",
         required=True,
         help="Path to the file to delete"
     )
     
-    # Required: SHA
+    # Required: file SHA
     parser.add_argument(
         "--sha",
         required=True,
@@ -237,7 +213,7 @@ To get a file's SHA:
         help="Commit message"
     )
     
-    # Optional: branch
+    # Optional: target branch
     parser.add_argument(
         "--branch", "-b",
         help="Branch to delete from (default: repo's default branch)"
