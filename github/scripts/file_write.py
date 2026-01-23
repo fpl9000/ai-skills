@@ -27,73 +27,38 @@ Environment Variables Required:
 import argparse
 import base64
 import json
-import os
 import sys
 
-import requests
+# Import shared utilities from the common module
+from github_common import (
+    API_BASE,
+    get_token,
+    get_headers,
+    parse_repo,
+    make_request_with_retry,
+)
 
 
-# GitHub API base URL
-API_BASE = "https://api.github.com"
+# =============================================================================
+# API Functions
+# =============================================================================
 
-
-def get_token():
-    """
-    Retrieve GitHub token from environment variable.
-    
-    Returns the token if set, exits with error if missing.
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    
-    if not token:
-        print("Error: GITHUB_TOKEN environment variable not set", file=sys.stderr)
-        print("Create a token at: https://github.com/settings/tokens", file=sys.stderr)
-        sys.exit(1)
-    
-    return token
-
-
-def get_headers(token: str) -> dict:
-    """
-    Build HTTP headers for GitHub API requests.
-    
-    Args:
-        token: GitHub Personal Access Token
-        
-    Returns:
-        Dictionary of headers including authorization
-    """
-    return {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-skill-script",
-    }
-
-
-def parse_repo(repo_string: str) -> tuple:
-    """
-    Parse owner/repo string into components.
-    
-    Args:
-        repo_string: Repository in "owner/repo" format
-        
-    Returns:
-        Tuple of (owner, repo)
-    """
-    parts = repo_string.split("/")
-    if len(parts) != 2:
-        print(f"Error: Invalid repository format '{repo_string}'", file=sys.stderr)
-        print("Expected format: owner/repo (e.g., octocat/hello-world)", file=sys.stderr)
-        sys.exit(1)
-    
-    return parts[0], parts[1]
-
-
-def create_or_update_file(token: str, owner: str, repo: str,
-                          path: str, content: str, message: str,
-                          sha: str = None, branch: str = None) -> dict:
+def create_or_update_file(
+    token: str,
+    owner: str,
+    repo: str,
+    path: str,
+    content: str,
+    message: str,
+    sha: str = None,
+    branch: str = None
+) -> tuple[dict, bool]:
     """
     Create or update a file in a GitHub repository.
+    
+    The distinction between create and update is determined by whether
+    a SHA is provided. When updating, the SHA must match the current
+    file's SHA to prevent overwriting concurrent changes.
     
     Args:
         token: GitHub Personal Access Token
@@ -106,7 +71,8 @@ def create_or_update_file(token: str, owner: str, repo: str,
         branch: Branch to commit to (default: repo's default branch)
         
     Returns:
-        Dictionary with commit and content info from API response
+        Tuple of (API response dictionary, is_create boolean)
+        is_create is True if this was a new file, False if update
     """
     headers = get_headers(token)
     
@@ -114,7 +80,7 @@ def create_or_update_file(token: str, owner: str, repo: str,
     path = path.lstrip("/")
     url = f"{API_BASE}/repos/{owner}/{repo}/contents/{path}"
     
-    # Encode content as base64
+    # Encode content as base64 (GitHub API requirement)
     content_bytes = content.encode("utf-8")
     content_b64 = base64.b64encode(content_bytes).decode("utf-8")
     
@@ -125,51 +91,80 @@ def create_or_update_file(token: str, owner: str, repo: str,
     }
     
     # Add optional parameters
+    # SHA indicates this is an update (file already exists)
     if sha:
         body["sha"] = sha
     if branch:
         body["branch"] = branch
     
-    # Make the API request
-    response = requests.put(url, headers=headers, json=body)
+    # Determine if this is a create or update based on SHA
+    # This is used for display purposes later
+    is_create = sha is None
     
-    # Handle errors
+    # Make the API request
+    response = make_request_with_retry('put', url, headers, json=body)
+    
+    # Handle specific error cases with helpful messages
     if response.status_code == 404:
         print(f"Error: Repository {owner}/{repo} not found", file=sys.stderr)
         if branch:
             print(f"(or branch '{branch}' does not exist)", file=sys.stderr)
         sys.exit(1)
+        
     elif response.status_code == 409:
-        # SHA mismatch - file was modified
-        print("Error: File has been modified since you read it (SHA mismatch)", file=sys.stderr)
-        print("Get the current SHA with: uv run scripts/repo_contents.py --json --path <path>", file=sys.stderr)
+        # SHA mismatch - file was modified since it was read
+        print("Error: File has been modified since you read it (SHA mismatch)",
+              file=sys.stderr)
+        print("Get the current SHA with: uv run scripts/repo_contents.py --json --path <path>",
+              file=sys.stderr)
         sys.exit(1)
+        
     elif response.status_code == 422:
+        # Validation error - often means SHA is required but not provided
         error_data = response.json()
         error_msg = error_data.get("message", "Validation failed")
         errors = error_data.get("errors", [])
+        
         print(f"Error: {error_msg}", file=sys.stderr)
         for err in errors:
-            print(f"  - {err}", file=sys.stderr)
-        if "sha" in str(errors).lower() or "sha" in error_msg.lower():
-            print("\nHint: You may need to provide --sha for an existing file", file=sys.stderr)
+            if isinstance(err, dict):
+                print(f"  - {err}", file=sys.stderr)
+            else:
+                print(f"  - {err}", file=sys.stderr)
+        
+        # Check if this is a "SHA required" error
+        error_str = str(errors).lower()
+        if "sha" in error_str or "sha" in error_msg.lower():
+            print("\nHint: The file already exists. You need to provide --sha",
+                  file=sys.stderr)
+            print("Get the current SHA with: uv run scripts/repo_contents.py --json --path <path>",
+                  file=sys.stderr)
         sys.exit(1)
+        
     elif response.status_code not in (200, 201):
         error_msg = response.json().get("message", "Unknown error")
         print(f"Error: GitHub API returned {response.status_code}", file=sys.stderr)
         print(f"Message: {error_msg}", file=sys.stderr)
         sys.exit(1)
     
-    return response.json()
+    # Return both the result and whether this was a create operation
+    # Status 201 = created, 200 = updated
+    # But we also track based on SHA presence for more reliable detection
+    return response.json(), is_create
 
 
-def format_result_for_display(result: dict, path: str) -> str:
+# =============================================================================
+# Display Formatting Functions
+# =============================================================================
+
+def format_result_for_display(result: dict, path: str, is_create: bool) -> str:
     """
     Format the API result for human-readable display.
     
     Args:
         result: API response dictionary
         path: File path that was created/updated
+        is_create: True if file was created, False if updated
         
     Returns:
         Formatted string with commit info
@@ -179,9 +174,10 @@ def format_result_for_display(result: dict, path: str) -> str:
     commit = result.get("commit", {})
     content = result.get("content", {})
     
-    # Determine if this was a create or update
-    # (201 status = create, 200 = update, but we only have the response data here)
-    action = "Created" if commit else "Updated"
+    # Use the is_create flag to determine action
+    # This fixes a bug where we previously used the presence of commit
+    # (which is always present for both create and update)
+    action = "Created" if is_create else "Updated"
     
     lines.append(f"✅ {action}: {path}")
     lines.append("")
@@ -199,7 +195,7 @@ def format_result_for_display(result: dict, path: str) -> str:
         if date:
             lines.append(f"   Date: {date}")
     
-    # Content info
+    # Content info (new file metadata)
     if content:
         new_sha = content.get("sha", "")[:8]
         size = content.get("size", 0)
@@ -214,9 +210,15 @@ def format_result_for_display(result: dict, path: str) -> str:
     return "\n".join(lines)
 
 
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 def main():
     """
     Main entry point for the file writer.
+    
+    Parses command-line arguments and creates/updates the file.
     """
     parser = argparse.ArgumentParser(
         description="Create or update a file in a GitHub repository",
@@ -257,14 +259,14 @@ Examples:
         help="Repository in owner/repo format"
     )
     
-    # Required: path
+    # Required: path in repository
     parser.add_argument(
         "--path", "-p",
         required=True,
         help="Path for the file in the repository"
     )
     
-    # Content (one of these required)
+    # Content source (one of these required)
     content_group = parser.add_mutually_exclusive_group(required=True)
     content_group.add_argument(
         "--content", "-c",
@@ -282,13 +284,13 @@ Examples:
         help="Commit message"
     )
     
-    # Optional: SHA (required for updates)
+    # Optional: SHA (required for updates to existing files)
     parser.add_argument(
         "--sha",
         help="SHA of file being replaced (required when updating existing file)"
     )
     
-    # Optional: branch
+    # Optional: target branch
     parser.add_argument(
         "--branch", "-b",
         help="Branch to commit to (default: repo's default branch)"
@@ -322,7 +324,7 @@ Examples:
     
     # Get token and create/update file
     token = get_token()
-    result = create_or_update_file(
+    result, is_create = create_or_update_file(
         token, owner, repo,
         path=args.path,
         content=content,
@@ -335,7 +337,7 @@ Examples:
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(format_result_for_display(result, args.path))
+        print(format_result_for_display(result, args.path, is_create))
 
 
 if __name__ == "__main__":
