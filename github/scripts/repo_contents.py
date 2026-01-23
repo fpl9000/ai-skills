@@ -28,86 +28,52 @@ Environment Variables Required:
 import argparse
 import base64
 import json
-import os
 import sys
 
-import requests
+# Import shared utilities from the common module
+from github_common import (
+    API_BASE,
+    get_token,
+    get_headers,
+    parse_repo,
+    make_request_with_retry,
+    handle_api_error,
+    format_size,
+)
 
 
-# GitHub API base URL
-API_BASE = "https://api.github.com"
+# =============================================================================
+# API Functions
+# =============================================================================
 
-
-def get_token():
-    """
-    Retrieve GitHub token from environment variable.
-    
-    Returns the token if set, exits with error if missing.
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    
-    if not token:
-        print("Error: GITHUB_TOKEN environment variable not set", file=sys.stderr)
-        print("Create a token at: https://github.com/settings/tokens", file=sys.stderr)
-        sys.exit(1)
-    
-    return token
-
-
-def get_headers(token: str) -> dict:
-    """
-    Build HTTP headers for GitHub API requests.
-    
-    Args:
-        token: GitHub Personal Access Token
-        
-    Returns:
-        Dictionary of headers including authorization
-    """
-    return {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "github-skill-script",
-    }
-
-
-def parse_repo(repo_string: str) -> tuple:
-    """
-    Parse owner/repo string into components.
-    
-    Args:
-        repo_string: Repository in "owner/repo" format
-        
-    Returns:
-        Tuple of (owner, repo)
-    """
-    parts = repo_string.split("/")
-    if len(parts) != 2:
-        print(f"Error: Invalid repository format '{repo_string}'", file=sys.stderr)
-        print("Expected format: owner/repo (e.g., octocat/hello-world)", file=sys.stderr)
-        sys.exit(1)
-    
-    return parts[0], parts[1]
-
-
-def get_contents(token: str, owner: str, repo: str, 
-                 path: str = "", ref: str = None) -> dict | list:
+def get_contents(
+    token: str,
+    owner: str,
+    repo: str,
+    path: str = "",
+    ref: str = None
+) -> dict | list:
     """
     Get contents of a file or directory from GitHub.
+    
+    The GitHub Contents API returns different structures depending on
+    whether the path points to a file or directory:
+    - File: Returns a single object with content (base64 encoded)
+    - Directory: Returns a list of objects (no content, just metadata)
     
     Args:
         token: GitHub Personal Access Token
         owner: Repository owner
         repo: Repository name
-        path: Path to file or directory (empty for root)
-        ref: Git ref (branch, tag, or commit SHA)
+        path: Path to file or directory (default: root)
+        ref: Git ref (branch, tag, or commit SHA) - optional
         
     Returns:
-        Dictionary (for file) or list (for directory) of contents
+        Dictionary (file) or list of dictionaries (directory) from API
     """
     headers = get_headers(token)
     
-    # Build URL - path should not have leading slash
+    # Build URL - ensure path doesn't have leading slash
     path = path.lstrip("/")
     url = f"{API_BASE}/repos/{owner}/{repo}/contents/{path}"
     
@@ -117,127 +83,118 @@ def get_contents(token: str, owner: str, repo: str,
         params["ref"] = ref
     
     # Make the API request
-    response = requests.get(url, headers=headers, params=params)
+    response = make_request_with_retry('get', url, headers, params=params)
     
-    # Handle errors
+    # Handle specific error cases with helpful messages
     if response.status_code == 404:
-        print(f"Error: Path '{path}' not found in {owner}/{repo}", file=sys.stderr)
+        print(f"Error: Path '{path or '/'}' not found in {owner}/{repo}",
+              file=sys.stderr)
         if ref:
-            print(f"(ref: {ref})", file=sys.stderr)
+            print(f"(on ref '{ref}')", file=sys.stderr)
         sys.exit(1)
-    elif response.status_code != 200:
-        error_msg = response.json().get("message", "Unknown error")
-        print(f"Error: GitHub API returned {response.status_code}", file=sys.stderr)
-        print(f"Message: {error_msg}", file=sys.stderr)
-        sys.exit(1)
+    
+    handle_api_error(response, f"Contents at '{path}'")
     
     return response.json()
 
 
-def format_file_for_display(content_data: dict) -> str:
-    """
-    Format a file's contents for human-readable display.
-    
-    Args:
-        content_data: File data from GitHub API
-        
-    Returns:
-        Formatted string with file info and content
-    """
-    lines = []
-    
-    # File header
-    name = content_data.get("name", "Unknown")
-    path = content_data.get("path", name)
-    size = content_data.get("size", 0)
-    sha = content_data.get("sha", "")[:8]  # First 8 chars of SHA
-    
-    lines.append(f"📄 {path}")
-    lines.append(f"   Size: {size:,} bytes  |  SHA: {sha}")
-    lines.append("")
-    
-    # Decode and display content
-    encoding = content_data.get("encoding")
-    content = content_data.get("content", "")
-    
-    if encoding == "base64" and content:
-        try:
-            decoded = base64.b64decode(content).decode("utf-8")
-            lines.append("─" * 60)
-            lines.append(decoded)
-            lines.append("─" * 60)
-        except (ValueError, UnicodeDecodeError) as e:
-            lines.append(f"(Binary file - cannot display content: {e})")
-    elif content_data.get("type") == "symlink":
-        target = content_data.get("target", "Unknown")
-        lines.append(f"(Symlink to: {target})")
-    elif content_data.get("type") == "submodule":
-        submodule_url = content_data.get("submodule_git_url", "Unknown")
-        lines.append(f"(Submodule: {submodule_url})")
-    else:
-        lines.append("(No content available)")
-    
-    return "\n".join(lines)
+# =============================================================================
+# Display Formatting Functions
+# =============================================================================
 
-
-def format_directory_for_display(contents: list, path: str = "") -> str:
+def format_directory_for_display(contents: list, path: str) -> str:
     """
     Format a directory listing for human-readable display.
     
+    Sorts items with directories first, then files, both alphabetically.
+    Uses emoji indicators for item types.
+    
     Args:
-        contents: List of content items from GitHub API
-        path: Current directory path
+        contents: List of content items from the API
+        path: The directory path being displayed
         
     Returns:
-        Formatted string with directory listing
+        Formatted string with the directory listing
     """
-    if not contents:
-        return f"📁 {path or '/'}\n   (Empty directory)"
-    
     lines = []
     
-    # Directory header
-    lines.append(f"📁 {path or '/'}")
-    lines.append(f"   {len(contents)} items")
+    # Header showing the path
+    display_path = path if path else "/"
+    lines.append(f"📁 {display_path}")
     lines.append("")
     
-    # Sort: directories first, then files
-    dirs = [c for c in contents if c.get("type") == "dir"]
-    files = [c for c in contents if c.get("type") != "dir"]
+    # Sort: directories first, then files, alphabetically within each group
+    dirs = sorted([c for c in contents if c["type"] == "dir"], 
+                  key=lambda x: x["name"])
+    files = sorted([c for c in contents if c["type"] == "file"], 
+                   key=lambda x: x["name"])
     
-    # List directories
-    for item in sorted(dirs, key=lambda x: x.get("name", "").lower()):
-        name = item.get("name", "Unknown")
-        lines.append(f"   📁 {name}/")
+    # Display directories first
+    for item in dirs:
+        lines.append(f"  📁 {item['name']}/")
     
-    # List files
-    for item in sorted(files, key=lambda x: x.get("name", "").lower()):
-        name = item.get("name", "Unknown")
-        size = item.get("size", 0)
-        item_type = item.get("type", "file")
-        
-        if item_type == "file":
-            # Format size nicely
-            if size >= 1024 * 1024:
-                size_str = f"{size / (1024 * 1024):.1f} MB"
-            elif size >= 1024:
-                size_str = f"{size / 1024:.1f} KB"
-            else:
-                size_str = f"{size} B"
-            lines.append(f"   📄 {name:<40} {size_str:>10}")
-        elif item_type == "symlink":
-            lines.append(f"   🔗 {name} (symlink)")
-        elif item_type == "submodule":
-            lines.append(f"   📦 {name} (submodule)")
-        else:
-            lines.append(f"   ❓ {name} ({item_type})")
+    # Then display files with their sizes
+    for item in files:
+        size = format_size(item.get("size", 0))
+        lines.append(f"  📄 {item['name']}  ({size})")
+    
+    # Summary line
+    lines.append("")
+    lines.append(f"Total: {len(dirs)} directories, {len(files)} files")
     
     return "\n".join(lines)
 
+
+def format_file_for_display(content: dict) -> str:
+    """
+    Format a file's contents for human-readable display.
+    
+    Decodes base64 content and displays with metadata header.
+    
+    Args:
+        content: File content dictionary from the API
+        
+    Returns:
+        Formatted string with file metadata and contents
+    """
+    lines = []
+    
+    # File header with metadata
+    name = content.get("name", "Unknown")
+    size = format_size(content.get("size", 0))
+    sha = content.get("sha", "")[:8]  # Short SHA for display
+    
+    lines.append(f"📄 {content.get('path', name)}")
+    lines.append(f"   Size: {size}  |  SHA: {sha}")
+    lines.append("")
+    lines.append("─" * 60)
+    
+    # Decode and display content if available
+    encoded_content = content.get("content", "")
+    if encoded_content:
+        try:
+            # GitHub returns base64-encoded content
+            decoded = base64.b64decode(encoded_content).decode("utf-8")
+            lines.append(decoded)
+        except (UnicodeDecodeError, ValueError):
+            lines.append("[Binary content - cannot display as text]")
+    else:
+        lines.append("[No content available]")
+    
+    lines.append("─" * 60)
+    
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 def main():
     """
     Main entry point for the contents viewer.
+    
+    Parses command-line arguments and displays file or directory contents.
     """
     parser = argparse.ArgumentParser(
         description="Get file or directory contents from a GitHub repository",
@@ -256,7 +213,7 @@ Examples:
   # Get contents from a specific branch
   uv run scripts/repo_contents.py owner/repo --path config.json --ref develop
 
-  # Output as JSON (includes SHA and other metadata)
+  # JSON output (includes metadata like SHA, size, etc.)
   uv run scripts/repo_contents.py owner/repo --path README.md --json
         """
     )
@@ -267,14 +224,14 @@ Examples:
         help="Repository in owner/repo format"
     )
     
-    # Optional: path
+    # Optional: path within repository
     parser.add_argument(
         "--path", "-p",
         default="",
         help="Path to file or directory (default: root)"
     )
     
-    # Optional: ref (branch, tag, or commit)
+    # Optional: git reference
     parser.add_argument(
         "--ref", "-r",
         help="Git ref (branch, tag, or commit SHA)"
@@ -289,14 +246,14 @@ Examples:
     
     args = parser.parse_args()
     
-    # Parse repository
+    # Parse repository and get token
     owner, repo = parse_repo(args.repo)
-    
-    # Get token and fetch contents
     token = get_token()
+    
+    # Fetch contents
     contents = get_contents(token, owner, repo, args.path, args.ref)
     
-    # Output results
+    # Output based on format and content type
     if args.json:
         print(json.dumps(contents, indent=2))
     elif isinstance(contents, list):
