@@ -29,13 +29,9 @@ This skill provides access to GitHub repositories via a set of Python scripts th
 
 If you (the AI agent) have network restrictions, the user may need to whitelist this domain in the agent's settings for this skill to function.
 
-## Architecture
+## Common Code Used by All Scripts
 
-This skill uses a shared common module (`github_common.py`) to centralize:
-- Authentication and token management
-- HTTP header construction with explicit API versioning
-- Repository string parsing
-- Error handling and retry logic with exponential backoff
+This skill uses a shared common module (`github_common.py`) to centralize authentication, token management, HTTP header construction, repository string parsing, error handling, and retry logic with exponential backoff.
 
 All scripts import from `github_common.py`, which makes maintenance easier and ensures consistent behavior across all operations.
 
@@ -556,7 +552,7 @@ The GitHub API has rate limits:
 
 The skill includes automatic retry logic with exponential backoff for rate limit errors.
 
-Check your current limits:
+Check your current limits as follows:
 
 ```bash
 curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/rate_limit
