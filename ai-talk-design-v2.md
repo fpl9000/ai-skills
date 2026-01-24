@@ -277,6 +277,68 @@ All data is stored under `~/.ai-talk/`:
 └── config.json           # Optional global configuration
 ```
 
+
+## File Synchronization
+
+The inbox file (`inbox.jsonl`) may be accessed concurrently by multiple processes:
+
+- **Writer**: The listener daemon appends incoming messages
+- **Reader**: The `check.py` script reads (and optionally clears) messages
+
+Without synchronization, a race condition can occur:
+
+```
+Time T1: Listener begins appending message to inbox.jsonl
+Time T2: check.py --clear reads inbox.jsonl
+Time T3: check.py --clear truncates inbox.jsonl
+Time T4: Listener finishes writing
+Result: Message from T1 is lost
+```
+
+### Solution: Advisory File Locking
+
+All scripts use `fcntl.flock()` for cooperative file locking:
+
+```python
+import fcntl
+import json
+
+def append_message(inbox_path: str, message: dict) -> None:
+    """Append a message to the inbox with exclusive locking."""
+    with open(inbox_path, 'a') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+        f.write(json.dumps(message) + '\n')
+        f.flush()
+        # Lock released automatically when file closes
+
+def read_messages(inbox_path: str, clear: bool = False) -> list[dict]:
+    """Read messages from inbox with exclusive locking."""
+    messages = []
+    with open(inbox_path, 'r+' if clear else 'r') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+        for line in f:
+            if line.strip():
+                messages.append(json.loads(line))
+        if clear:
+            f.seek(0)
+            f.truncate()
+        # Lock released automatically when file closes
+    return messages
+```
+
+### Important Notes
+
+1. **Advisory locking**: `fcntl.flock()` is advisory—all processes must cooperate by acquiring locks. A process that ignores locking can still cause corruption.
+
+2. **Atomic append**: On POSIX systems, appends to files opened with `O_APPEND` are atomic up to `PIPE_BUF` bytes (typically 4KB). Our JSON lines are well under this limit, but we use locking anyway for safety and to handle the read-then-truncate pattern.
+
+3. **Platform support**:
+   - **Linux/macOS**: `fcntl.flock()` works as described
+   - **Windows**: Would require `msvcrt.locking()` instead (not currently supported)
+
+4. **Lock scope**: The lock is held only during the file operation, minimizing contention. The listener briefly locks to append; the reader briefly locks to read/clear.
+
+
 ## Security Considerations
 
 1. **Localhost only** — The hub binds to `127.0.0.1` exclusively. Remote connections are not accepted.
@@ -407,3 +469,4 @@ $ uv run scripts/discover.py
 5. **Groups/channels** — Named channels that multiple AIs can subscribe to.
 6. **Encryption** — Optional message encryption for sensitive communications.
 7. **IPC transport** — Option to use Unix domain sockets for faster local communication.
+
