@@ -295,48 +295,71 @@ Time T4: Listener finishes writing
 Result: Message from T1 is lost
 ```
 
-### Solution: Advisory File Locking
+### Solution: Cross-Platform File Locking with `portalocker`
 
-All scripts use `fcntl.flock()` for cooperative file locking:
+All scripts use the `portalocker` library for cross-platform advisory file locking. This library wraps:
+
+- **Unix/Linux/macOS**: `fcntl.flock()`
+- **Windows**: `win32file.LockFileEx()` (via pywin32) or `msvcrt.locking()`
 
 ```python
-import fcntl
 import json
+import portalocker
 
 def append_message(inbox_path: str, message: dict) -> None:
     """Append a message to the inbox with exclusive locking."""
-    with open(inbox_path, 'a') as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+    with portalocker.Lock(inbox_path, mode='a', timeout=10) as f:
         f.write(json.dumps(message) + '\n')
         f.flush()
-        # Lock released automatically when file closes
+    # Lock released automatically when context manager exits
 
 def read_messages(inbox_path: str, clear: bool = False) -> list[dict]:
     """Read messages from inbox with exclusive locking."""
     messages = []
-    with open(inbox_path, 'r+' if clear else 'r') as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
-        for line in f:
-            if line.strip():
-                messages.append(json.loads(line))
-        if clear:
-            f.seek(0)
-            f.truncate()
-        # Lock released automatically when file closes
+    mode = 'r+' if clear else 'r'
+    
+    try:
+        with portalocker.Lock(inbox_path, mode=mode, timeout=10) as f:
+            for line in f:
+                if line.strip():
+                    messages.append(json.loads(line))
+            if clear:
+                f.seek(0)
+                f.truncate()
+    except FileNotFoundError:
+        pass  # No inbox yet, return empty list
+    
     return messages
+```
+
+### Dependency Declaration
+
+The `portalocker` dependency is declared in each script's PEP 723 metadata:
+
+```python
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "pyzmq>=26.0.0",
+#     "portalocker>=2.0.0",
+# ]
+# ///
 ```
 
 ### Important Notes
 
-1. **Advisory locking**: `fcntl.flock()` is advisory—all processes must cooperate by acquiring locks. A process that ignores locking can still cause corruption.
+1. **Advisory locking**: Like all userspace file locking, `portalocker` uses advisory locks—all processes must cooperate by acquiring locks. A process that ignores locking can still cause corruption.
 
-2. **Atomic append**: On POSIX systems, appends to files opened with `O_APPEND` are atomic up to `PIPE_BUF` bytes (typically 4KB). Our JSON lines are well under this limit, but we use locking anyway for safety and to handle the read-then-truncate pattern.
+2. **Timeout handling**: The `timeout=10` parameter causes `portalocker.LockException` if the lock cannot be acquired within 10 seconds. Scripts should handle this gracefully.
 
-3. **Platform support**:
-   - **Linux/macOS**: `fcntl.flock()` works as described
-   - **Windows**: Would require `msvcrt.locking()` instead (not currently supported)
+3. **Lock scope**: Locks are held only during the file operation (within the `with` block), minimizing contention between the listener and reader processes.
 
-4. **Lock scope**: The lock is held only during the file operation, minimizing contention. The listener briefly locks to append; the reader briefly locks to read/clear.
+4. **Platform support**:
+   - **Linux/macOS/BSD**: Uses `fcntl.flock()` 
+   - **Windows**: Uses Win32 API (`LockFileEx`) or falls back to `msvcrt.locking()`
+   - No platform-specific code needed in the skill scripts
+
 
 
 ## Security Considerations
@@ -395,6 +418,7 @@ Common error codes:
 - Python 3.10+
 - `uv` for script execution
 - `pyzmq` — ZeroMQ Python bindings (installed automatically via PEP 723 metadata)
+- `portalocker` — Cross-platform file locking (installed automatically via PEP 723 metadata)
 
 All scripts include inline dependency declarations:
 
@@ -404,6 +428,7 @@ All scripts include inline dependency declarations:
 # requires-python = ">=3.10"
 # dependencies = [
 #     "pyzmq>=26.0.0",
+#     "portalocker>=2.0.0",
 # ]
 # ///
 ```
@@ -469,4 +494,5 @@ $ uv run scripts/discover.py
 5. **Groups/channels** — Named channels that multiple AIs can subscribe to.
 6. **Encryption** — Optional message encryption for sensitive communications.
 7. **IPC transport** — Option to use Unix domain sockets for faster local communication.
+
 
