@@ -2,6 +2,7 @@
 
 **Reviewer:** Claude (AI Assistant)  
 **Review Date:** 2026-01-24  
+**Last Updated:** 2026-01-24  
 **Document Under Review:** `docs/ai-talk-design-v2.md`  
 **Review Focus:** Race conditions, command-line syntax, unhandled errors/edge cases
 
@@ -11,7 +12,7 @@
 
 The AI Talk v2 design represents a significant improvement over v1 by adopting ZeroMQ for message transport and introducing proper file locking via `portalocker`. The hub-and-spoke topology is well-suited for local inter-AI communication, and the decision to avoid external dependencies (Redis, NATS) keeps deployment simple.
 
-However, this review identifies **7 race conditions**, **5 command-line syntax issues**, and **18 unhandled errors or edge cases** that should be addressed before implementation.
+However, this review identifies **7 race conditions**, **5 command-line syntax issues**, and **19 unhandled errors or edge cases** that should be addressed before implementation.
 
 ---
 
@@ -638,6 +639,132 @@ Message ordering:
 
 ---
 
+### 3.19 Windows Compatibility Issues
+
+**Location:** Daemon architecture, signal handling, process management  
+**Severity:** High
+
+The design's daemon architecture and signal handling (§3.15) assume Unix-like operating systems. Since the skill's scripts can run on Windows, several platform-specific issues arise.
+
+#### What Works Differently on Windows
+
+**Signals:**
+
+| Signal | Unix Behavior | Windows Behavior |
+|--------|---------------|------------------|
+| `SIGTERM` | Graceful termination | Simulated via `os.kill()`, behavior differs |
+| `SIGINT` | Ctrl+C | Works, but behavior varies |
+| `SIGHUP` | Reload/reconnect | **Does not exist** |
+| `SIGUSR1` | User-defined | **Does not exist** |
+| `SIGBREAK` | N/A | Windows-specific (Ctrl+Break) |
+
+**Process Management:**
+- `os.kill(pid, 0)` for existence checks works differently on Windows—raises `OSError` for permission denied, not just non-existent processes
+- No `fork()` system call—must use `subprocess.Popen()` with `CREATE_NEW_PROCESS_GROUP`
+- No `setsid()` for daemon creation
+- Different path for null device (`NUL` vs `/dev/null`)
+
+**File Locking:**
+- `portalocker` handles this correctly (wraps `win32file.LockFileEx()` on Windows)
+- This is the one area the design already addresses via library choice ✓
+
+#### Recommendations
+
+**1. Document platform support explicitly:**
+```
+Platform Support:
+- Linux/macOS/BSD: Full support (all features)
+- Windows: Partial support (no graceful reload, limited signal handling)
+```
+
+**2. Use platform-agnostic process termination:**
+```python
+import sys
+import subprocess
+
+def stop_process(pid: int) -> bool:
+    """Terminate a process in a platform-appropriate way."""
+    if sys.platform == 'win32':
+        # Windows: use taskkill for reliable termination
+        result = subprocess.run(
+            ['taskkill', '/PID', str(pid), '/F'],
+            capture_output=True
+        )
+        return result.returncode == 0
+    else:
+        # Unix: send SIGTERM for graceful shutdown
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+            return True
+        except OSError:
+            return False
+```
+
+**3. Use platform-agnostic process existence check:**
+```python
+def is_process_running(pid: int) -> bool:
+    """Check if a process is running, cross-platform."""
+    if sys.platform == 'win32':
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        SYNCHRONIZE = 0x00100000
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+```
+
+**4. Implement alternative graceful shutdown for Windows:**
+
+Since `SIGHUP` and `SIGUSR1` don't exist on Windows, consider:
+- **Sentinel file**: Daemon polls for `~/.ai-talk/hub-9000.stop`; if found, initiates shutdown
+- **Named pipe**: Windows-native IPC for control commands
+- **TCP control port**: A separate port accepting "stop", "status", "reload" commands
+
+**5. Adjust daemon spawning for Windows:**
+```python
+import sys
+import subprocess
+
+def spawn_daemon(script_path: str, args: list[str]) -> int:
+    """Spawn a background daemon process, cross-platform."""
+    if sys.platform == 'win32':
+        # Windows: use CREATE_NEW_PROCESS_GROUP to detach
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        DETACHED_PROCESS = 0x00000008
+        proc = subprocess.Popen(
+            [sys.executable, script_path] + args,
+            creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    else:
+        # Unix: traditional double-fork or simple background
+        proc = subprocess.Popen(
+            [sys.executable, script_path] + args,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    return proc.pid
+```
+
+**6. Consider Windows-specific error codes:**
+- `PLATFORM_NOT_SUPPORTED` — For features unavailable on Windows (e.g., `SIGHUP` reload)
+- `WINDOWS_PERMISSION_ERROR` — When Windows returns access denied vs. process not found
+
+---
+
 ## 4. Additional Recommendations
 
 ### 4.1 Add a --version Flag
@@ -721,6 +848,7 @@ Adding unique message IDs would enable:
 | 3.16 | Undocumented outbox.jsonl | Low |
 | 3.17 | Undocumented config.json | Low |
 | 3.18 | Message ordering guarantees | Moderate |
+| 3.19 | Windows compatibility issues | High |
 
 ---
 
@@ -733,8 +861,9 @@ The v2 design is a solid foundation with thoughtful choices (ZeroMQ, portalocker
 2. **High:** Add listener readiness synchronization (§1.2)
 3. **High:** Implement stale PID detection (§3.1)
 4. **High:** Add unregister.py script (§3.2)
-5. **Moderate:** Standardize --hub-port across all scripts (§2.2)
-6. **Moderate:** Define identity validation rules (§2.5)
+5. **High:** Address Windows compatibility or document platform limitations (§3.19)
+6. **Moderate:** Standardize --hub-port across all scripts (§2.2)
+7. **Moderate:** Define identity validation rules (§2.5)
 
 ---
 
