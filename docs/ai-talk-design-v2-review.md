@@ -1,4 +1,3 @@
-# Technical Review: AI Talk Skill Design v2
 
 **Reviewer:** Claude (AI Assistant)  
 **Review Date:** 2026-01-24  
@@ -646,9 +645,22 @@ Message ordering:
 
 The design's daemon architecture and signal handling (§3.15) assume Unix-like operating systems. Since the skill's scripts can run on Windows, several platform-specific issues arise.
 
+#### Platform Clarification
+
+**macOS is not affected by these issues.** macOS is Unix-based (BSD/Darwin) and fully supports `fork()`, `setsid()`, and all relevant signals (`SIGTERM`, `SIGHUP`, `SIGUSR1`, etc.). The issues described in this section are **Windows-specific only**.
+
+| Feature | Linux | macOS | Windows |
+|---------|:-----:|:-----:|:-------:|
+| `SIGTERM` | ✓ | ✓ | Simulated |
+| `SIGHUP` | ✓ | ✓ | ❌ |
+| `SIGUSR1` | ✓ | ✓ | ❌ |
+| `fork()` | ✓ | ✓ | ❌ |
+| `setsid()` | ✓ | ✓ | ❌ |
+| `os.kill(pid, 0)` | ✓ | ✓ | Differs |
+
 #### What Works Differently on Windows
 
-**Signals:**
+**Signal Behavior Details:**
 
 | Signal | Unix Behavior | Windows Behavior |
 |--------|---------------|------------------|
