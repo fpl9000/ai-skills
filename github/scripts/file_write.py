@@ -16,6 +16,8 @@ This script uses the GitHub Contents API to:
 - Create files on specific branches
 - Optionally set file mode (e.g., executable) via --mode
 
+Supports both text and binary files (e.g., images, archives, executables).
+
 Usage:
     uv run scripts/file_write.py owner/repo --path docs/README.md --content "..." --message "Add docs"
     uv run scripts/file_write.py owner/repo --path config.json --from-file local.json --message "Update config"
@@ -23,6 +25,9 @@ Usage:
     
     # Create an executable script
     uv run scripts/file_write.py owner/repo --path scripts/build.sh --from-file build.sh --message "Add build script" --mode 755
+    
+    # Upload a binary file (e.g., ZIP archive, image)
+    uv run scripts/file_write.py owner/repo --path assets/logo.png --from-file logo.png --message "Add logo"
 
 Note on --mode:
     The GitHub Contents API doesn't support setting file modes directly.
@@ -38,6 +43,7 @@ import argparse
 import base64
 import json
 import sys
+from typing import Union
 
 # Import shared utilities from the common module
 from github_common import (
@@ -145,7 +151,7 @@ def create_or_update_file(
     owner: str,
     repo: str,
     path: str,
-    content: str,
+    content: Union[str, bytes],
     message: str,
     sha: str = None,
     branch: str = None
@@ -157,12 +163,15 @@ def create_or_update_file(
     a SHA is provided. When updating, the SHA must match the current
     file's SHA to prevent overwriting concurrent changes.
     
+    Supports both text (str) and binary (bytes) content. Binary content
+    is useful for uploading images, archives, compiled files, etc.
+    
     Args:
         token: GitHub Personal Access Token
         owner: Repository owner
         repo: Repository name
         path: Path for the file in the repository
-        content: File content as a string
+        content: File content as a string (text) or bytes (binary)
         message: Commit message
         sha: SHA of file being replaced (required for updates)
         branch: Branch to commit to (default: repo's default branch)
@@ -178,7 +187,15 @@ def create_or_update_file(
     url = f"{API_BASE}/repos/{owner}/{repo}/contents/{path}"
     
     # Encode content as base64 (GitHub API requirement)
-    content_bytes = content.encode("utf-8")
+    # Handle both string (text) and bytes (binary) content
+    if isinstance(content, str):
+        # Text content: encode to UTF-8 bytes first
+        content_bytes = content.encode("utf-8")
+    else:
+        # Binary content: already bytes, use directly
+        content_bytes = content
+    
+    # Base64 encode the bytes for the GitHub API
     content_b64 = base64.b64encode(content_bytes).decode("utf-8")
     
     # Build request body
@@ -354,6 +371,12 @@ Examples:
       --from-file build.sh \\
       --message "Add build script" \\
       --mode 755
+
+  # Upload a binary file (image, archive, etc.)
+  uv run scripts/file_write.py owner/repo \\
+      --path assets/logo.png \\
+      --from-file logo.png \\
+      --message "Add logo image"
         """
     )
     
@@ -378,7 +401,7 @@ Examples:
     )
     content_group.add_argument(
         "--from-file", "-f",
-        help="Read content from this local file"
+        help="Read content from this local file (supports both text and binary files)"
     )
     
     # Required: commit message
@@ -417,9 +440,12 @@ Examples:
     args = parser.parse_args()
     
     # Get content from file if specified
+    # Use binary mode to support both text and binary files
     if args.from_file:
         try:
-            with open(args.from_file, "r", encoding="utf-8") as f:
+            # Read file in binary mode to handle any file type
+            # (text files, images, archives, executables, etc.)
+            with open(args.from_file, "rb") as f:
                 content = f.read()
         except FileNotFoundError:
             print(f"Error: Local file not found: {args.from_file}", file=sys.stderr)
@@ -428,6 +454,7 @@ Examples:
             print(f"Error reading file: {e}", file=sys.stderr)
             sys.exit(1)
     else:
+        # Content from --content argument is always a string
         content = args.content
     
     # Parse repository
