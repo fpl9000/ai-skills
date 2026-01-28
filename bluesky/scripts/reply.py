@@ -222,6 +222,92 @@ def find_thread_root(thread):
     return root_uri, root_cid
 
 
+def build_text_with_facets(text: str):
+    """
+    Build a TextBuilder with proper link facets for URLs in the text.
+    
+    The atproto library's send_post() method does NOT automatically detect
+    URLs in plain text strings. To make links clickable, we must use the
+    TextBuilder class and explicitly mark URLs with the .link() method.
+    
+    This function detects URLs in the text (both with and without http(s)://
+    schemes) and constructs a TextBuilder with proper link facets.
+    
+    Args:
+        text: The post text that may contain URLs
+        
+    Returns:
+        A TextBuilder instance with links properly marked as facets
+    """
+    # Import the client_utils module for TextBuilder
+    from atproto import client_utils
+    
+    # Regex pattern to match URLs in text
+    # This pattern matches:
+    # 1. URLs with explicit scheme: http:// or https://
+    # 2. URLs without scheme that start with common patterns like www. or domain.tld/
+    # 
+    # The pattern is designed to stop at whitespace, quotes, and common punctuation
+    # that typically ends a URL in natural text.
+    url_pattern = re.compile(
+        r'('
+        # Match URLs with explicit http:// or https:// scheme
+        r'https?://[^\s<>\[\]()\"\']*[^\s<>\[\]()\"\'.,;:!?\)]'
+        r'|'
+        # Match www. URLs without scheme
+        r'www\.[^\s<>\[\]()\"\']+[^\s<>\[\]()\"\'.,;:!?\)]'
+        r'|'
+        # Match domain.tld/path URLs without scheme (e.g., github.com/user/repo)
+        # Requires at least one path segment to avoid matching plain domains in text
+        r'[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:/[^\s<>\[\]()\"\']*[^\s<>\[\]()\"\'.,;:!?\)])?'
+        r')',
+        re.IGNORECASE
+    )
+    
+    # Find all URL matches with their positions
+    matches = list(url_pattern.finditer(text))
+    
+    # If no URLs found, return a simple TextBuilder with just the text
+    if not matches:
+        tb = client_utils.TextBuilder()
+        tb.text(text)
+        return tb
+    
+    # Build the text with proper link facets
+    # We iterate through the text, adding plain text segments and link segments
+    tb = client_utils.TextBuilder()
+    last_end = 0
+    
+    for match in matches:
+        start, end = match.span()
+        url_text = match.group(0)
+        
+        # Add any plain text before this URL
+        if start > last_end:
+            tb.text(text[last_end:start])
+        
+        # Determine the full URL (add https:// if no scheme present)
+        # This is required for the facet's URI field
+        if url_text.startswith(('http://', 'https://')):
+            full_url = url_text
+        elif url_text.startswith('www.'):
+            full_url = 'https://' + url_text
+        else:
+            full_url = 'https://' + url_text
+        
+        # Add the URL as a link facet
+        # The first argument is the display text, second is the actual URL
+        tb.link(url_text, full_url)
+        
+        last_end = end
+    
+    # Add any remaining plain text after the last URL
+    if last_end < len(text):
+        tb.text(text[last_end:])
+    
+    return tb
+
+
 def post_reply(client, parent_uri: str, parent_cid: str, 
                root_uri: str, root_cid: str, text: str):
     """
@@ -230,6 +316,9 @@ def post_reply(client, parent_uri: str, parent_cid: str,
     AT Protocol replies require both root and parent references:
     - root: The original post that started the thread (maintains thread integrity)
     - parent: The specific post being replied to (creates the reply chain)
+    
+    This function also handles URL detection and creates proper link facets
+    so that URLs in the reply text are clickable.
     
     Args:
         client: An authenticated Client instance
@@ -268,10 +357,15 @@ def post_reply(client, parent_uri: str, parent_cid: str,
         parent=parent_ref
     )
     
-    # Post the reply using send_post with the reply reference
-    # send_post handles facet detection (mentions, links, hashtags) automatically
+    # Build the text with proper link facets for any URLs
+    # This is necessary because send_post() does NOT auto-detect URLs
+    # when passed a plain string - it only extracts facets from TextBuilder
+    text_builder = build_text_with_facets(text)
+    
+    # Post the reply using send_post with the TextBuilder
+    # When passed a TextBuilder, send_post extracts both the text and facets
     post_ref = client.send_post(
-        text=text,
+        text=text_builder,
         reply_to=reply_ref
     )
     

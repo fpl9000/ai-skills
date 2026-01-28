@@ -25,6 +25,7 @@ Environment Variables Required:
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -88,6 +89,92 @@ def create_client_and_login(handle: str, password: str):
     print(f"Logged in as: {profile.display_name} (@{profile.handle})")
     
     return client
+
+
+def build_text_with_facets(text: str):
+    """
+    Build a TextBuilder with proper link facets for URLs in the text.
+    
+    The atproto library's send_post() method does NOT automatically detect
+    URLs in plain text strings. To make links clickable, we must use the
+    TextBuilder class and explicitly mark URLs with the .link() method.
+    
+    This function detects URLs in the text (both with and without http(s)://
+    schemes) and constructs a TextBuilder with proper link facets.
+    
+    Args:
+        text: The post text that may contain URLs
+        
+    Returns:
+        A TextBuilder instance with links properly marked as facets
+    """
+    # Import the client_utils module for TextBuilder
+    from atproto import client_utils
+    
+    # Regex pattern to match URLs in text
+    # This pattern matches:
+    # 1. URLs with explicit scheme: http:// or https://
+    # 2. URLs without scheme that start with common patterns like www. or domain.tld/
+    # 
+    # The pattern is designed to stop at whitespace, quotes, and common punctuation
+    # that typically ends a URL in natural text.
+    url_pattern = re.compile(
+        r'('
+        # Match URLs with explicit http:// or https:// scheme
+        r'https?://[^\s<>\[\]()\"\']*[^\s<>\[\]()\"\'.,;:!?\)]'
+        r'|'
+        # Match www. URLs without scheme
+        r'www\.[^\s<>\[\]()\"\']+[^\s<>\[\]()\"\'.,;:!?\)]'
+        r'|'
+        # Match domain.tld/path URLs without scheme (e.g., github.com/user/repo)
+        # Requires at least one path segment to avoid matching plain domains in text
+        r'[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:/[^\s<>\[\]()\"\']*[^\s<>\[\]()\"\'.,;:!?\)])?'
+        r')',
+        re.IGNORECASE
+    )
+    
+    # Find all URL matches with their positions
+    matches = list(url_pattern.finditer(text))
+    
+    # If no URLs found, return a simple TextBuilder with just the text
+    if not matches:
+        tb = client_utils.TextBuilder()
+        tb.text(text)
+        return tb
+    
+    # Build the text with proper link facets
+    # We iterate through the text, adding plain text segments and link segments
+    tb = client_utils.TextBuilder()
+    last_end = 0
+    
+    for match in matches:
+        start, end = match.span()
+        url_text = match.group(0)
+        
+        # Add any plain text before this URL
+        if start > last_end:
+            tb.text(text[last_end:start])
+        
+        # Determine the full URL (add https:// if no scheme present)
+        # This is required for the facet's URI field
+        if url_text.startswith(('http://', 'https://')):
+            full_url = url_text
+        elif url_text.startswith('www.'):
+            full_url = 'https://' + url_text
+        else:
+            full_url = 'https://' + url_text
+        
+        # Add the URL as a link facet
+        # The first argument is the display text, second is the actual URL
+        tb.link(url_text, full_url)
+        
+        last_end = end
+    
+    # Add any remaining plain text after the last URL
+    if last_end < len(text):
+        tb.text(text[last_end:])
+    
+    return tb
 
 
 def upload_image(client, image_path: str, alt_text: str = ""):
@@ -180,8 +267,11 @@ def create_post_with_images(client, text: str, images: list):
     # This wraps the list of images in the proper structure
     embed = models.AppBskyEmbedImages.Main(images=image_objects)
     
+    # Build the text with proper link facets for any URLs
+    text_builder = build_text_with_facets(text)
+    
     # Send the post with the images embed
-    post_ref = client.send_post(text=text, embed=embed)
+    post_ref = client.send_post(text=text_builder, embed=embed)
     
     return post_ref
 
@@ -218,8 +308,11 @@ def create_post_with_link_card(client, text: str, url: str, title: str = "", des
     # Wrap the External object in the Main container
     embed = models.AppBskyEmbedExternal.Main(external=external)
     
+    # Build the text with proper link facets for any URLs
+    text_builder = build_text_with_facets(text)
+    
     # Send the post with the link card embed
-    post_ref = client.send_post(text=text, embed=embed)
+    post_ref = client.send_post(text=text_builder, embed=embed)
     
     return post_ref
 
@@ -229,7 +322,8 @@ def create_text_post(client, text: str):
     Create a simple text-only post.
     
     This is the most basic type of post - just text content
-    with no embeds or attachments.
+    with no embeds or attachments. URLs in the text will be
+    automatically detected and made clickable.
     
     Args:
         client: An authenticated Client instance
@@ -238,14 +332,16 @@ def create_text_post(client, text: str):
     Returns:
         The created post reference (contains URI and CID)
     """
-    # Bluesky posts have a 300 character limit (graphemes, not bytes)
-    # The library will raise an error if you exceed this
+    # Build the text with proper link facets for any URLs
+    # This is necessary because send_post() does NOT auto-detect URLs
+    # when passed a plain string - it only extracts facets from TextBuilder
+    text_builder = build_text_with_facets(text)
     
-    # send_post is a convenience method that handles:
+    # send_post handles:
     # 1. Creating the post record with proper timestamps
-    # 2. Detecting and creating facets for mentions/links/tags
+    # 2. Extracting facets from the TextBuilder (mentions, links, tags)
     # 3. Submitting to the user's PDS
-    post_ref = client.send_post(text=text)
+    post_ref = client.send_post(text=text_builder)
     
     return post_ref
 
