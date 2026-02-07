@@ -39,7 +39,7 @@ All scripts include PEP 723 inline metadata declaring their dependencies. Just r
 
 ### Post to Bluesky (`scripts/post.py`)
 
-Create posts with text, images, or link cards.
+Create posts with text, images, or link cards. URLs in the text are automatically detected and made clickable (supports `https://...`, `http://...`, `www....`, and bare domain URLs like `github.com/user/repo`).
 
 ```bash
 # Simple text post
@@ -93,7 +93,7 @@ uv run scripts/replies.py --no-parents https://bsky.app/profile/someone/post/abc
 
 ### Post a Reply (`scripts/reply.py`)
 
-Reply to an existing Bluesky post. The script automatically handles AT Protocol threading (root and parent references).
+Reply to an existing Bluesky post. The script automatically handles AT Protocol threading (root and parent references). URLs in the reply text are automatically detected and made clickable.
 
 ```bash
 # Reply to a post using its web URL
