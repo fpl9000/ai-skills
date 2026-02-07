@@ -1,6 +1,6 @@
 # Stateful Agent Skill: Design Document
 
-**Version:** 0.2 (Draft)
+**Version:** 0.3 (Draft)
 **Date:** January 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)
 
@@ -12,25 +12,24 @@
   - [Inspirations](#inspirations)
 - [Architecture](#architecture)
   - [Three-Tier Memory Model](#three-tier-memory-model)
-  - [Dual-Format Storage](#dual-format-storage)
-  - [Why Markdown as Canonical](#why-markdown-as-canonical)
+  - [Markdown Storage](#markdown-storage)
+  - [Why Markdown](#why-markdown)
 - [Persistence Layer](#persistence-layer)
   - [Pluggable Backends](#pluggable-backends)
-  - [Environment Detection](#environment-detection)
-  - [Configuration Discovery](#configuration-discovery)
+  - [First-Run Setup](#first-run-setup)
 - [Configuration](#configuration)
   - [Default Configuration](#default-configuration)
   - [Configuration Storage](#configuration-storage)
   - [Interactive Configuration](#interactive-configuration)
 - [Memory Schema](#memory-schema)
-  - [SQLite Schema](#sqlite-schema)
-  - [Markdown Schema](#markdown-schema)
+  - [File Structure](#file-structure)
   - [Markdown Format](#markdown-format)
+- [Session Lifecycle](#session-lifecycle)
+  - [Session Flow](#session-flow)
 - [Cloud Persistence Strategies](#cloud-persistence-strategies)
   - [Manual Mode (Default)](#manual-mode-default)
   - [GitHub Backend](#github-backend)
-  - [Google Drive Backend](#google-drive-backend)
-  - [Checkpoint Strategy](#checkpoint-strategy)
+    - [Checkpoint Strategy](#checkpoint-strategy)
 - [Concurrency Considerations](#concurrency-considerations)
   - [Local Agents](#local-agents)
   - [Cloud Agents](#cloud-agents)
@@ -41,19 +40,23 @@
   - [Memory Categories](#memory-categories)
   - [Cross-Session Learning](#cross-session-learning)
   - [Conflict Resolution](#conflict-resolution)
+  - [Query Performance](#query-performance)
+  - [Concurrent Write Handling](#concurrent-write-handling)
+  - [Atomic Updates](#atomic-updates)
+  - [Large Memory Stores](#large-memory-stores)
 - [Future Enhancements](#future-enhancements)
 - [References](#references)
 
 ## Overview
 
-This document describes the design of an AI skill that transforms a conversational AI into a stateful agent with persistent memory. The skill provides a hierarchical memory architecture, efficient in-session queries via SQLite, human-readable canonical storage in Markdown, and pluggable persistence backends that work across cloud and local agent environments.
+This document describes the design of an AI skill that transforms a conversational AI into a stateful agent with persistent memory. The skill provides a hierarchical memory architecture, human-readable storage in Markdown, and pluggable persistence backends that work across cloud and local agent environments.
 
 ### Goals
 
 - **Continuity**: Enable agents to maintain identity and accumulated knowledge across sessions
 - **Transparency**: All memories stored in human-readable, editable formats
 - **Portability**: Work in cloud environments (Claude.ai) and local environments (Claude Code, Gemini CLI)
-- **Simplicity**: Zero-configuration defaults with progressive enhancement for power users
+- **Simplicity**: Minimal configuration with clear options presented at first run
 - **Durability**: Pluggable backends prevent memory loss from conversation deletion
 
 ### Non-Goals
@@ -98,25 +101,21 @@ This layering solves a fundamental tension: context windows are finite, but accu
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Dual-Format Storage
+### Markdown Storage
 
-The skill uses two complementary formats:
+All memories are stored directly in Markdown files:
 
-**SQLite (Working Memory)**
-- Used during sessions for efficient queries
-- Append-only semantics (history preserved)
-- Ephemeral in cloud environments, cached in local environments
-
-**Markdown (Canonical Storage)**
-- Source of truth for persistence
+**Markdown Files**
+- Source of truth for all memory storage
 - Human-readable and editable
 - Git-friendly diffs showing exactly what changed
-- Inspectable anywhere (GitHub web UI, Google Drive preview, text editors)
+- Inspectable anywhere (GitHub web UI, text editors)
+- Parsed directly during session operations
 
 ```
 Persistence Backend
         │
-        │  canonical source of truth
+        │  sync
         ▼
 ┌─────────────────────────────┐
 │  Markdown Files             │
@@ -129,29 +128,30 @@ Persistence Backend
 │      └── episodes.md        │
 └─────────────────────────────┘
         │
-        │  load(): parse → SQLite
-        │  save(): query → render
+        │  read/write directly
         ▼
 ┌─────────────────────────────┐
-│  SQLite (session cache)     │
-│  - Fast queries             │
-│  - Append-only history      │
-│  - Rebuilt from markdown    │
+│  Agent Session              │
+│  - Parse on read            │
+│  - Update in place          │
+│  - Atomic file writes       │
 └─────────────────────────────┘
 ```
 
-### Why Markdown as Canonical
+### Why Markdown
 
-| Concern | Markdown | Raw SQLite |
-|---------|----------|------------|
-| Readability | ✓ Human-readable | ✗ Binary blob |
-| Editability | ✓ Any text editor | ✗ Requires SQLite tools |
-| Git diffs | ✓ Meaningful changes | ✗ Binary noise |
-| Inspectability | ✓ GitHub, Drive preview | ✗ Must download |
-| Merge conflicts | ✓ Mostly resolvable | ✗ Catastrophic |
-| Parse overhead | ✗ Rebuild required | ✓ Direct use |
+Markdown is ideal for agent memory storage:
 
-The parse overhead is acceptable because loading happens once per session, and local agents can cache the SQLite file (rebuilding only when markdown is newer).
+| Benefit | Description |
+|---------|-------------|
+| **Human-readable** | Users can inspect memories in any text editor |
+| **Editable** | Users can correct mistakes or add context directly |
+| **Git-friendly** | Diffs show exactly what changed and when |
+| **Inspectable** | Viewable in GitHub web UI, text editors, etc. |
+| **Merge-friendly** | Conflicts are resolvable (unlike binary formats) |
+| **Portable** | Works everywhere, no special tools required |
+
+The trade-off is that lookups require parsing, but this is acceptable for typical memory sizes. See [Open Questions](#open-questions) for considerations on scaling.
 
 ## Persistence Layer
 
@@ -162,10 +162,9 @@ The skill supports multiple persistence backends, selectable via configuration:
 | Backend | Environment | Setup Required | Script-Driven |
 |---------|-------------|----------------|---------------|
 | `filesystem` | Local only | None | Yes |
-| `git_cli` | Both | Git credentials configured | Yes |
-| `github_api` | Both | Personal Access Token | Yes |
-| `gdrive` | Both | Google Drive connected | No (Claude orchestrates) |
-| `manual` | Both | None | Yes |
+| `git_cli` | Local | Git credentials configured | Yes |
+| `github_api` | Local + Cloud | Personal Access Token | Yes |
+| `manual` | Local + Cloud | None | Yes |
 
 #### Backend Interface
 
@@ -182,44 +181,29 @@ exists() → bool
     Check if persistent storage contains existing data.
 ```
 
-The `gdrive` backend is special: because Google Drive requires OAuth authentication handled by Claude's built-in tools, the script cannot perform I/O directly. Instead, it prepares export files and returns instructions for Claude to execute the actual upload/download.
+### First-Run Setup
 
-### Environment Detection
+When no existing configuration is found, the skill prompts the user to select a persistence backend. The agent presents the available options:
 
-The skill auto-detects whether it's running in a cloud or local environment:
+> **Agent:** "I don't have a memory configuration yet. Which persistence backend would you like to use?
+>
+> 1. **filesystem** — Store memories in local files (best for local agents like Claude Code)
+> 2. **git_cli** — Sync to a Git repository using command-line Git (local agents only)
+> 3. **github_api** — Sync to GitHub via REST API (works in cloud and local)
+> 4. **manual** — You upload/download memory files each session (simplest, works anywhere)
+>
+> Which option works best for your environment?"
 
-```
-detect_environment():
-    if '/mnt/user-data/outputs' exists:
-        return 'cloud'    # Claude.ai or similar
-    else:
-        return 'local'    # Claude Code, Gemini CLI, etc.
-```
-
-This detection drives default configuration generation.
-
-### Configuration Discovery
-
-At session start, the skill searches for existing configuration:
-
-```
-discover_config():
-    1. Check /mnt/user-data/uploads/config.yaml (cloud: user uploaded)
-    2. Check AGENT_MEMORY_CONFIG environment variable
-    3. Check ~/.config/agent-memory/config.yaml (local: default path)
-    4. Return None if not found (triggers first-run setup)
-```
-
-If no configuration exists, the skill generates environment-appropriate defaults.
+The user's choice determines the initial configuration. The skill cannot reliably auto-detect whether it's running in a cloud or local environment, so explicit selection ensures the correct backend is used.
 
 ## Configuration
 
 ### Default Configuration
 
-**Local agents** receive filesystem-based defaults (zero-friction persistence):
+After the user selects a backend, the skill generates an appropriate configuration. Example for filesystem backend:
 
 ```yaml
-# config.yaml (auto-generated for local environment)
+# config.yaml
 
 persistence:
   backend: filesystem
@@ -228,37 +212,24 @@ persistence:
 
 backup:
   checkpoint_interval: 5
-  export_markdown: true
 
 memory:
   consolidation_threshold: 50
 ```
 
-**Cloud agents** receive manual-mode defaults (works immediately, upgradeable):
+Example for github_api backend:
 
 ```yaml
-# config.yaml (auto-generated for cloud environment)
-#
-# Currently using manual upload/download. To enable automatic
-# persistence, configure one of the backends below.
+# config.yaml
 
 persistence:
-  backend: manual
-  
-  # Uncomment to use GitHub:
-  # backend: github_api
-  # github_api:
-  #   repo: your-username/agent-memory
-  #   path: memories/
-
-  # Uncomment to use Google Drive:
-  # backend: gdrive
-  # gdrive:
-  #   folder_name: AgentMemory
+  backend: github_api
+  github_api:
+    repo: username/agent-memory
+    path: memories/
 
 backup:
   checkpoint_interval: 5
-  export_markdown: true
 
 memory:
   consolidation_threshold: 50
@@ -273,7 +244,6 @@ The configuration file is stored *in the same backend it describes*. This solves
 | `filesystem` | `~/.config/agent-memory/config.yaml` |
 | `github_api` | `{repo}/config.yaml` |
 | `git_cli` | `{repo_path}/config.yaml` |
-| `gdrive` | `AgentMemory/config.yaml` |
 | `manual` | User uploads each session |
 
 ### Interactive Configuration
@@ -282,52 +252,27 @@ Users can modify configuration through conversation:
 
 > **User:** "Let's set up GitHub persistence"
 >
-> **Agent:** "I'll configure GitHub as your persistence backend. What repository should I use? (e.g., 'username/agent-memory')"
+> **Agent:** "I'll configure GitHub as your persistence backend. You'll need:
+> 1. A GitHub repo (can be private)
+> 2. A Personal Access Token with 'repo' scope
+>
+> What repository should I use? (e.g., 'username/agent-memory')"
 >
 > **User:** "fran/my-agent-memory"
 >
-> **Agent:** *updates config.yaml, writes to outputs*
+> **Agent:** "And what's your Personal Access Token? I can store it in config.yaml, or if you prefer, you can set the GITHUB_TOKEN environment variable yourself."
 >
-> "Done. You'll need to:
-> 1. Create that repo on GitHub (can be private)
-> 2. Create a Personal Access Token with 'repo' scope
-> 3. Set GITHUB_TOKEN in your environment"
+> **User:** "ghp_xxxxxxxxxxxx"
+>
+> **Agent:** *updates config.yaml with repo and token*
+>
+> "Done. GitHub persistence is configured."
 
 ## Memory Schema
 
-### SQLite Schema
+### File Structure
 
-The working database uses append-only semantics following Tim Kellogg's design:
-
-```sql
--- Memory blocks with full history preservation
-CREATE TABLE memory_blocks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tier TEXT NOT NULL,              -- 'core', 'index', or 'content'
-    category TEXT NOT NULL,          -- 'facts', 'patterns', 'episodes', etc.
-    name TEXT NOT NULL,              -- Block identifier
-    value TEXT,                      -- Current content
-    sort INTEGER NOT NULL DEFAULT 0, -- Display ordering
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Index for efficient lookups
-CREATE INDEX idx_blocks_lookup ON memory_blocks(tier, category, name);
-
--- View for current values (latest version of each block)
-CREATE VIEW current_blocks AS
-SELECT tier, category, name, value, sort, created_at
-FROM memory_blocks
-WHERE id IN (
-    SELECT MAX(id) FROM memory_blocks GROUP BY tier, category, name
-);
-```
-
-No records are ever modified or deleted. New versions are inserted; the latest version wins for display. This preserves complete history for provenance and debugging.
-
-### Markdown Schema
-
-The canonical markdown files mirror the SQLite structure:
+Memory is organized in a directory structure following the three-tier model:
 
 ```
 memories/
@@ -378,7 +323,7 @@ This format is:
 
 ## Session Lifecycle
 
-### Local Agent Flow
+### Session Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -387,8 +332,10 @@ This format is:
                           │
                           ▼
               ┌───────────────────────┐
-              │ discover_config()     │
-              │ (check filesystem)    │
+              │ Search for config:    │
+              │ - env var path        │
+              │ - uploaded files      │
+              │ - default locations   │
               └───────────┬───────────┘
                           │
               ┌───────────┴───────────┐
@@ -397,17 +344,17 @@ This format is:
               │                       │
               ▼                       ▼
     ┌─────────────────┐    ┌─────────────────────┐
-    │ Load config     │    │ Generate defaults   │
-    │ Load markdown   │    │ (filesystem backend)│
-    │ Build SQLite    │    │ Initialize empty db │
+    │ Load config     │    │ Prompt user to      │
+    │ Load core.md    │    │ select backend      │
+    │ Load index.md   │    │ Generate config     │
     └────────┬────────┘    └──────────┬──────────┘
              │                        │
              └──────────┬─────────────┘
                         ▼
               ┌─────────────────┐
               │ Session Active  │
-              │ (queries hit    │
-              │  SQLite)        │
+              │ (queries parse  │
+              │  markdown)      │
               └────────┬────────┘
                        │
          ┌─────────────┼─────────────┐
@@ -415,81 +362,24 @@ This format is:
     On write     Checkpoint     Session end
          │        interval           │
          ▼             │             ▼
-    ┌─────────┐        │      ┌─────────────┐
-    │ Update  │        │      │ Final save  │
-    │ SQLite  │        │      │ to markdown │
-    └────┬────┘        │      └─────────────┘
-         │             │
-         └──────┬──────┘
+    ┌─────────────┐    │      ┌─────────────────┐
+    │ Update      │    │      │ Final save      │
+    │ markdown    │    │      │ to backend      │
+    │ (atomic)    │    │      └─────────────────┘
+    └─────┬───────┘    │
+          │            │
+          └─────┬──────┘
                 ▼
        ┌────────────────┐
-       │ Export SQLite  │
-       │ → markdown     │
-       │ → filesystem   │
+       │ Checkpoint to  │
+       │ backend        │
        └────────────────┘
 ```
 
-Local agents benefit from:
-- Automatic persistence (no user action required)
-- Shared state across concurrent sessions
-- SQLite WAL mode for safe concurrent access
-
-### Cloud Agent Flow
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Session Start                           │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-              ┌───────────────────────┐
-              │ Check uploads folder  │
-              │ for config.yaml and   │
-              │ memory files          │
-              └───────────┬───────────┘
-                          │
-              ┌───────────┴───────────┐
-              │                       │
-       Files Found              Not Found
-              │                       │
-              ▼                       ▼
-    ┌─────────────────┐    ┌─────────────────────┐
-    │ Load config     │    │ Generate defaults   │
-    │ Parse markdown  │    │ (manual backend)    │
-    │ Build SQLite    │    │ Initialize empty db │
-    │                 │    │ Write to outputs    │
-    └────────┬────────┘    └──────────┬──────────┘
-             │                        │
-             └──────────┬─────────────┘
-                        ▼
-              ┌─────────────────┐
-              │ Session Active  │
-              └────────┬────────┘
-                       │
-         ┌─────────────┼─────────────┐
-         │             │             │
-    On write     Checkpoint     Session end
-         │        interval           │
-         ▼             │             ▼
-    ┌─────────┐        │      ┌─────────────────┐
-    │ Update  │        │      │ Final export    │
-    │ SQLite  │        │      │ Remind user to  │
-    └────┬────┘        │      │ download files  │
-         │             │      └─────────────────┘
-         └──────┬──────┘
-                ▼
-       ┌────────────────┐
-       │ Export to      │
-       │ /outputs/      │
-       │ (checkpoint)   │
-       └────────────────┘
-```
-
-Cloud agents require:
-- User uploads config + memories at session start
-- Periodic checkpoints to outputs folder (safety net)
-- Reminder to download before session end
-- Optional: GitHub or Google Drive backend eliminates manual steps
+Backend-specific behaviors:
+- **filesystem/git_cli**: Automatic persistence, no user action required
+- **github_api**: Automatic sync via REST API
+- **manual**: User must download files before session end; agent reminds at natural breakpoints
 
 ## Cloud Persistence Strategies
 
@@ -514,16 +404,6 @@ Enables automatic sync without user file management:
 
 **Note:** Scripts can call GitHub API directly (github.com is in allowed domains), so this backend is fully script-driven.
 
-### Google Drive Backend
-
-For users with Google Drive connected:
-
-1. User configures `gdrive` backend with folder name
-2. Agent uses Claude's `google_drive_*` tools to sync
-3. Files visible in Drive for inspection/editing
-
-**Note:** Because Google Drive requires OAuth, Claude must orchestrate uploads/downloads—scripts prepare the files but cannot perform I/O directly.
-
 ### Checkpoint Strategy
 
 Regardless of backend, the skill implements defensive checkpointing:
@@ -536,20 +416,22 @@ Regardless of backend, the skill implements defensive checkpointing:
 
 ### Local Agents
 
-Multiple Claude Code sessions may access the same memory store simultaneously. SQLite handles this gracefully with proper configuration:
+Multiple Claude Code sessions may access the same memory store simultaneously. Without a database, file-based locking is required.
 
-```sql
--- Enable Write-Ahead Logging for better concurrency
-PRAGMA journal_mode=WAL;
-
--- Set a reasonable busy timeout (milliseconds)
-PRAGMA busy_timeout=5000;
-```
+**Approach:**
+- Use OS-level file locking (`fcntl` on Unix, `msvcrt` on Windows)
+- Atomic writes via temp file + rename
+- Accept last-write-wins for simplicity (matching cloud behavior)
 
 Best practices for scripts:
-- Keep transactions short
-- Don't hold connections open during LLM "thinking" time
-- Read, close connection, process, then open new connection to write
+- Acquire lock before reading, release after writing
+- Keep lock duration minimal
+- Use atomic rename for safe file updates
+
+**Trade-offs:**
+- Less sophisticated than database concurrency
+- May occasionally lose updates if sessions write simultaneously
+- Acceptable for typical use (infrequent writes, human-scale interactions)
 
 ### Cloud Agents
 
@@ -568,20 +450,16 @@ Mitigation strategies:
 ├── scripts/
 │   ├── __init__.py
 │   ├── initialize.py           # Session startup, config discovery
-│   ├── memory.py               # Core memory operations
-│   ├── export.py               # SQLite → Markdown conversion
-│   ├── import.py               # Markdown → SQLite conversion
+│   ├── memory.py               # Core memory operations (markdown-native)
 │   └── backends/
 │       ├── __init__.py
 │       ├── base.py             # Abstract backend interface
 │       ├── filesystem.py       # Local filesystem backend
 │       ├── git_cli.py          # Git CLI backend
 │       ├── github_api.py       # GitHub REST API backend
-│       ├── gdrive.py           # Google Drive backend (Claude-orchestrated)
 │       └── manual.py           # Manual upload/download backend
 └── templates/
-    ├── config.yaml.local       # Default config for local environments
-    └── config.yaml.cloud       # Default config for cloud environments
+    └── config.yaml.template    # Template for generating backend configs
 ```
 
 ## SKILL.md Outline
@@ -594,8 +472,9 @@ The skill's instruction file should cover:
 
 2. **Session Startup**
    - Run initialization script
+   - If no config found, prompt user to select a backend
    - Load or generate configuration
-   - Build SQLite from markdown (or initialize empty)
+   - Load core.md and index.md into context
 
 3. **Memory Operations**
    - When to create memories (facts, patterns, episodes)
@@ -610,7 +489,7 @@ The skill's instruction file should cover:
 5. **Session End**
    - Final export
    - Remind user to download (cloud/manual mode)
-   - Offer backup to GitHub/Drive if configured
+   - Offer backup to GitHub if configured
 
 6. **User Interactions**
    - How to respond to "what do you remember about X?"
@@ -641,7 +520,47 @@ The skill's instruction file should cover:
 
 ### Conflict Resolution
 
-When markdown files are edited externally and conflict with SQLite state, what's the resolution strategy? Current proposal: markdown always wins (it's canonical), but this deserves more thought.
+When markdown files are edited externally while a session is active, what's the resolution strategy? Current proposal: always re-read files before writing to minimize conflicts, but this deserves more thought.
+
+### Query Performance
+
+Without database indexes, finding a specific memory requires parsing markdown files:
+
+1. For typical memory sizes (hundreds of entries), is direct parsing acceptably fast?
+
+1. Should the skill recommend maximum file sizes or entry counts?
+
+1. Would in-memory caching within a session (dict built on first load) provide meaningful benefit?
+
+### Concurrent Write Handling
+
+File-based storage lacks SQLite's built-in concurrency handling:
+
+1. Is OS-level file locking (`fcntl`/`msvcrt`) sufficient for typical usage?
+
+1. Should the skill simply accept last-write-wins semantics (matching cloud behavior)?
+
+1. How should the skill handle lock acquisition failures?
+
+### Atomic Updates
+
+Partial file writes could corrupt markdown:
+
+1. Is write-to-temp-then-rename sufficient on all target platforms?
+
+1. Should the skill keep checkpoint copies for recovery?
+
+1. How should the skill handle interrupted writes (recoverable from history section)?
+
+### Large Memory Stores
+
+As memories accumulate, file-based operations may become slow:
+
+1. What are reasonable scale limits to document (files, entries, total size)?
+
+1. Should the skill proactively recommend consolidation when thresholds are exceeded?
+
+1. Is splitting into multiple smaller block files preferable to one large file?
 
 ## Future Enhancements
 
@@ -654,5 +573,4 @@ When markdown files are edited externally and conflict with SQLite state, what's
 
 - [claude_life_assistant](https://github.com/lout33/claude_life_assistant) — Luis Fernando's minimal stateful agent
 - [Memory Architecture for a Synthetic Being](https://timkellogg.me/blog/2025/12/30/memory-arch) — Tim Kellogg's Strix architecture
-- [SQLite Documentation](https://sqlite.org/docs.html) — Particularly WAL mode and concurrency
 - [PEP 723](https://peps.python.org/pep-0723/) — Inline script metadata for self-contained Python scripts
