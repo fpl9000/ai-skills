@@ -104,7 +104,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 **Cons:**
 - Claude Code Desktop's GUI is more basic than Claude.ai's. It lacks artifacts, rich tool widgets (maps, weather, recipes), file preview rendering, and other UI features.
-- The memory skill consumes context window space. Loading `core.md` and `index.md` on every session reduces the available context for actual conversation.
+- The memory skill consumes context window space. Loading `core.md`, `index.md`, and the skill instructions on every session reduces the available context for actual conversation. This overhead is user-managed and can grow unbounded, unlike Anthropic's built-in memory which is automatically kept compact (~500–800 tokens). (Note: Architecture B also has context overhead from MCP tool definitions and built-in memory injection, but these are fixed and Anthropic-managed costs.)
 - Memory quality depends entirely on the skill's prompting and the model's compliance. Anthropic's built-in memory system uses purpose-built infrastructure that may produce higher quality results.
 - Each new session requires the skill to "boot up" by reading memory files, which adds latency and cost to the start of every conversation.
 - Claude Code Desktop is itself a beta product and may have stability issues.
@@ -159,7 +159,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 **B1 Pros:**
 - **No tunnel required** — the MCP bridge runs locally via stdio. No network exposure, no public URL, no tunnel service dependency.
-- Built-in memory — Anthropic's memory system, no context window overhead.
+- Built-in memory — Anthropic's memory system, which manages memory budget automatically. Built-in memory is still injected into the context window, but Anthropic controls its size (typically a compact summary of ~500–800 tokens), unlike a skill-based approach where memory files can grow unbounded.
 - Rich GUI — not quite Claude.ai-grade, but has artifacts, file handling, and most UI features.
 - Skills support — custom skills can be uploaded and used alongside the MCP bridge.
 - Simplest setup of any Architecture B variant — just configure the Desktop App's MCP settings and point it at the bridge server binary.
@@ -170,7 +170,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 - The Desktop App has reported stability issues (crashes related to connectors/extensions). These may improve over time as the app matures.
 - The Desktop App is available on macOS and Windows, but may have platform-specific quirks.
 
-**B1 Verdict:** This is the **simplest and most self-contained** variant of Architecture B. It satisfies all five requirements with minimal infrastructure — no tunnel, no cloud dependency for local operations, and no context window overhead for memory. The only tradeoff is a slightly less polished UI compared to Claude.ai.
+**B1 Verdict:** This is the **simplest and most self-contained** variant of Architecture B. It satisfies all five requirements with minimal infrastructure — no tunnel, no cloud dependency for local operations, and lower context window overhead than a skill-based approach (Anthropic manages memory compactness). The only tradeoff is a slightly less polished UI compared to Claude.ai.
 
 #### Variant B2: Claude.ai + Local MCP Bridge via Tunnel
 
@@ -232,7 +232,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 - Clean separation of concerns: Claude handles reasoning and conversation; the MCP bridge handles local access.
 - The MCP bridge is a general-purpose tool — once built, it benefits all MCP-compatible AI agents, not just Claude.
-- No context window overhead for memory (unlike Architecture A's skill-based approach).
+- Lower context window overhead than Architecture A. Built-in memory is still injected into context, but Anthropic manages its size (typically ~500–800 tokens of compact summary). The skill-based approach in Architecture A loads user-managed markdown files whose size can grow unbounded. Note that MCP tool definitions also consume context (roughly 200–500 tokens per tool), but this is a fixed, predictable cost that does not grow over time.
 - The bridge server can be hardened with allowlists and logging, providing a security boundary.
 - A single codebase supports both variants, so you can switch between B1 and B2 at will.
 
@@ -378,7 +378,7 @@ Architecture B is the **recommended approach**. Start with **B1** (Desktop App, 
 | **R3: Local network** | ✅ Native | ✅ Via MCP | ✅ Via MCP | ✅ Native | ✅ Via sidecar |
 | **R4: Local commands** | ✅ Native | ✅ Via MCP | ✅ Via MCP | ✅ Native | ✅ Via sidecar |
 | **R5: Graphical UI** | ⚠️ Basic GUI | ✅ Rich (near Claude.ai) | ✅ Best-in-class | ⚠️ Terminal-grade | ✅ Best-in-class |
-| **Context window cost** | ⚠️ Skill overhead | ✅ None | ✅ None | ⚠️ Skill overhead | ✅ Minimal |
+| **Context window cost** | ⚠️ High (skill + memory files) | ⚠️ Low (built-in memory + MCP tools) | ⚠️ Low (built-in memory + MCP tools) | ⚠️ High (skill + memory files) | ⚠️ Low (built-in memory) |
 | **Setup complexity** | Low | Low–Moderate | Moderate | High | Low–Moderate |
 | **Maintenance burden** | Low | Low | Low–Moderate | High | Moderate |
 | **Tunnel required** | No | No | Yes | No | No |
@@ -474,7 +474,7 @@ Anthropic is actively developing memory, MCP, and tool integration features (inc
 | MCP protocol undergoes breaking changes | Medium | Medium — requires bridge updates | Pin to stable MCP SDK versions; the bridge is small enough to update quickly. |
 | Stateful memory skill produces low-quality memories (Architecture A only) | Medium | Medium — defeats the purpose | Iterate on prompts; add user-facing memory review/edit commands. Markdown format makes manual correction easy. Does not affect Architecture B (uses built-in memory). |
 | Security incident via MCP bridge (unintended file access/command execution) | Low | High | Strict allowlists, operation logging, optional confirmation prompts for destructive operations. Run the bridge under a restricted user account. B1 has lower risk than B2 (no network exposure). |
-| Context window consumed by memory skill reduces conversation quality (Architecture A only) | Medium | Medium | Aggressive summarization in `core.md` and `index.md`. Load content blocks on demand only. Does not affect Architecture B (uses built-in memory). |
+| Context window consumed by memory skill reduces conversation quality (Architecture A only) | Medium | Medium | Aggressive summarization in `core.md` and `index.md`. Load content blocks on demand only. Architecture B has lower context overhead (Anthropic-managed built-in memory + fixed MCP tool definitions), but is not zero-cost. |
 
 ## Relation to Existing Design
 
