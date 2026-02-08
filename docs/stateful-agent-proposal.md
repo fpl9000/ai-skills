@@ -176,25 +176,25 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Claude.ai (Web UI)                       │
-│                                                              │
-│  Built-in memory ✅    Rich UI ✅    Artifacts ✅            │
-│  Tool widgets ✅       File previews ✅                      │
-│                                                              │
-│           │  MCP Protocol (Streamable HTTP)                   │
-│           ▼                                                  │
-│  ┌──────────────────────────────────────────────────┐        │
-│  │  Secure Tunnel (Cloudflare/ngrok/Tailscale)       │        │
-│  └──────────────────────────────────────────────────┘        │
-│           │                                                  │
-└───────────┼──────────────────────────────────────────────────┘
+│                     Claude.ai (Web UI)                      │
+│                                                             │
+│  Built-in memory ✅    Rich UI ✅    Artifacts ✅          │
+│  Tool widgets ✅       File previews ✅                    │
+│                                                             │
+│           │  MCP Protocol (Streamable HTTP)                 │
+│           ▼                                                 │
+│  ┌──────────────────────────────────────────────────┐       │
+│  │  Secure Tunnel (Cloudflare/ngrok/Tailscale)      │       │
+│  └──────────────────────────────────────────────────┘       │
+│           │                                                 │
+└───────────┼─────────────────────────────────────────────────┘
             │
 ┌───────────┼──────────────────────────────────────────────────┐
 │           ▼                                                  │
 │  ┌──────────────────────────────────────────────────┐        │
-│  │        Local MCP Bridge Server                    │        │
-│  │        (long-running daemon)                      │        │
-│  │                                                   │        │
+│  │        Local MCP Bridge Server                   │        │
+│  │        (long-running daemon)                     │        │
+│  │                                                  │        │
 │  │  ┌──────────┐  ┌──────────┐  ┌───────────────┐   │        │
 │  │  │Filesystem│  │ Network  │  │Command Exec   │   │        │
 │  │  │  Tools   │  │  Tools   │  │   Tools       │   │        │
@@ -202,7 +202,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 │  └──────────────────────────────────────────────────┘        │
 │                                                              │
 │  User's Local Machine                                        │
-│  Local filesystem ✅  Local network ✅  Local commands ✅     │
+│  Local filesystem ✅  Local network ✅  Local commands ✅   │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -248,32 +248,32 @@ Architecture B is the **recommended approach**. Start with **B1** (Desktop App, 
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│              Web Browser (localhost:8080)                 │
-│                                                          │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  Web Terminal UI                                   │  │
-│  │  (e.g., ttyd, xterm.js, custom React app)          │  │
-│  │                                                    │  │
-│  │  Features:                                         │  │
-│  │  - Rich text / Markdown rendering                  │  │
-│  │  - Syntax-highlighted code blocks                  │  │
-│  │  - Scrollback with search                          │  │
-│  │  - Session history sidebar                         │  │
-│  │  - Copy-paste with formatting                      │  │
-│  │  └─────────────────────────────────────────────┘   │  │
-│  │              │                                     │  │
-│  │              │  stdin/stdout                       │  │
-│  │              ▼                                     │  │
-│  │  ┌─────────────────────────────────────────────┐   │  │
-│  │  │  Claude Code CLI                            │   │  │
-│  │  │  + Stateful Memory Skill                    │   │  │
-│  │  │                                             │   │  │
-│  │  │  Local filesystem ✅  Local network ✅       │   │  │
-│  │  │  Local commands ✅    Memory ✅ (skill)      │   │  │
-│  │  └─────────────────────────────────────────────┘   │  │
-│  └────────────────────────────────────────────────────┘  │
-│                                                          │
-│  GUI ⚠️ (terminal-grade, not Claude.ai-grade)            │
+│              Web Browser (localhost:8080)               │
+│                                                         │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │  Web Terminal UI                                   │ │
+│  │  (e.g., ttyd, xterm.js, custom React app)          │ │
+│  │                                                    │ │
+│  │  Features:                                         │ │
+│  │  - Rich text / Markdown rendering                  │ │
+│  │  - Syntax-highlighted code blocks                  │ │
+│  │  - Scrollback with search                          │ │
+│  │  - Session history sidebar                         │ │
+│  │  - Copy-paste with formatting                      │ │
+│  │  └─────────────────────────────────────────────┘   │ │
+│  │              │                                     │ │
+│  │              │  stdin/stdout                       │ │
+│  │              ▼                                     │ │
+│  │  ┌─────────────────────────────────────────────┐   │ │
+│  │  │  Claude Code CLI                            │   │ │
+│  │  │  + Stateful Memory Skill                    │   │ │
+│  │  │                                             │   │ │
+│  │  │  Local filesystem ✅  Local network ✅     │   | │
+│  │  │  Local commands ✅    Memory ✅ (skill)    │   | │
+│  │  └─────────────────────────────────────────────┘   │ │
+│  └────────────────────────────────────────────────────┘ │
+│                                                         │
+│  GUI ⚠️ (terminal-grade, not Claude.ai-grade)          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -317,21 +317,21 @@ Architecture B is the **recommended approach**. Start with **B1** (Desktop App, 
 │                                                                │
 │  ┌─────────────────────────┐    ┌───────────────────────────┐  │
 │  │  Claude.ai (Web UI)     │    │ Local Sidecar Agent       │  │
-│  │                         │    │ (Claude Code CLI)          │  │
-│  │  Primary conversation   │    │                            │  │
-│  │  Built-in memory        │◄──►│  Local filesystem          │  │
-│  │  Rich UI                │    │  Local network              │  │
-│  │  Artifacts              │    │  Local commands             │  │
-│  │                         │    │  Stateful Memory Skill     │  │
-│  │  When local access is   │    │                            │  │
-│  │  needed, instructs user │    │  Runs tasks, returns       │  │
-│  │  or sidecar agent.      │    │  results to clipboard or   │  │
-│  │                         │    │  shared file location.     │  │
+│  │                         │    │ (Claude Code CLI)         │  │
+│  │  Primary conversation   │    │                           │  │
+│  │  Built-in memory        │◄──►│  Local filesystem         │  │
+│  │  Rich UI                │    │  Local network            │  │
+│  │  Artifacts              │    │  Local commands           │  │
+│  │                         │    │  Stateful Memory Skill    │  │
+│  │  When local access is   │    │                           │  │
+│  │  needed, instructs user │    │  Runs tasks, returns      │  │
+│  │  or sidecar agent.      │    │  results to clipboard or  │  │
+│  │                         │    │  shared file location.    │  │
 │  └─────────────────────────┘    └───────────────────────────┘  │
-│           │                              │                      │
-│           └──────── Coordination ────────┘                      │
-│           (manual copy-paste, shared files,                     │
-│            or automated via MCP/webhook)                        │
+│           │                              │                     │
+│           └──────── Coordination ────────┘                     │
+│           (manual copy-paste, shared files,                    │
+│            or automated via MCP/webhook)                       │
 │                                                                │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -371,7 +371,7 @@ Architecture B is the **recommended approach**. Start with **B1** (Desktop App, 
 ## Architecture Comparison
 
 | Criterion | A: CC Desktop + Skill | B1: Desktop App + MCP | B2: Claude.ai + MCP | C: CLI + Web UI | D: Hybrid Sidecar |
-|-----------|:--------------------:|:--------------------:|:------------------:|:---------------:|:-----------------:|
+|-----------|----------------------|----------------------|--------------------|-----------------|-------------------|
 | **Available today** | ✅ Yes | ✅ Yes (needs MCP bridge) | ✅ Yes (needs MCP bridge + tunnel) | ⚠️ Requires dev work | ✅ Yes (manual) |
 | **R1: Persistent memory** | ⚠️ Skill-based | ✅ Built-in | ✅ Built-in | ⚠️ Skill-based | ✅ Built-in (primary) |
 | **R2: Local filesystem** | ✅ Native | ✅ Via MCP | ✅ Via MCP | ✅ Native | ✅ Via sidecar |
