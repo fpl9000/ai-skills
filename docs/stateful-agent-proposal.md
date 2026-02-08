@@ -1,7 +1,7 @@
 # Proposal: Claude as a Stateful Agent with Full Local Access
 
-**Version:** 0.1 (Draft)
-**Date:** February 2026
+**Version:** 0.1 (Draft)<br/>
+**Date:** February 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)
 
 ## Contents
@@ -23,7 +23,7 @@
 
 ## Executive Summary
 
-The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps, with a recommendation to pursue **Architecture B** (Claude.ai + Local MCP Bridge) as the primary strategy, with **Architecture A** (Claude Code Desktop + Stateful Memory Skill) as an interim solution available today.
+The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps, with a recommendation to pursue **Architecture B** (Claude.ai + Local MCP Bridge) as the primary strategy — which is achievable today using Claude.ai's existing custom connector support — with **Architecture A** (Claude Code Desktop + Stateful Memory Skill) as a fallback if the tunnel-based approach proves unreliable.
 
 ## Requirements
 
@@ -42,19 +42,19 @@ Each Claude environment provides a subset of the requirements:
 | Capability | Claude.ai (Web) | Claude Desktop App | Claude Code CLI | Claude Code Desktop |
 |------------|:---------------:|:------------------:|:---------------:|:-------------------:|
 | **R1: Persistent memory** | ✅ Built-in | ✅ Built-in | ❌ None | ❌ None |
-| **R2: Local filesystem** | ❌ Cloud VM only | ⚠️ Read-only | ✅ Full | ✅ Full |
+| **R2: Local filesystem** | ❌ Cloud VM only | ✅ Full | ✅ Full | ✅ Full |
 | **R3: Local network** | ❌ Cloud VM only | ❌ Cloud VM only | ✅ Full | ✅ Full |
 | **R4: Local commands** | ❌ Cloud VM only | ❌ Cloud VM only | ✅ Full | ✅ Full |
 | **R5: Graphical UI** | ✅ Rich web UI | ✅ Rich desktop UI | ❌ Terminal only | ✅ GUI wrapper |
-| **MCP server support** | ❌ Not yet | ✅ Yes | ✅ Yes | ✅ Yes |
+| **MCP server support** | ✅ Remote only | ✅ Remote + Local | ✅ Remote + Local | ✅ Remote + Local |
 | **Skills support** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
 
 Key observations:
 
-- **Claude.ai** has the best memory and the best UI, but is completely isolated from the local machine.
+- **Claude.ai** has the best memory and the best UI, but is completely isolated from the local machine. It supports **remote** MCP servers via the "Connectors" feature (Settings > Connectors), including custom connectors where you provide a remote MCP server URL. However, it cannot connect to **locally-running** MCP servers directly — the server must be reachable over the network.
 - **Claude Code Desktop** has the best local access and has a GUI, but lacks persistent memory and lacks certain rich UI features (artifacts, file previews, tool widgets).
-- **Claude Desktop App** can read local files via MCP, but command execution and network access still happen on the cloud VM, limiting its usefulness.
-- The **MCP protocol** is the most promising bridge between Claude's cloud-based UIs and local machine capabilities, but Claude.ai does not yet support user-configured MCP servers (the Desktop App does).
+- **Claude Desktop App** supports both remote and local MCP servers, but command execution and network access still happen on the cloud VM (not locally), limiting its usefulness for local operations.
+- The **MCP protocol** is the most promising bridge between Claude's cloud-based UIs and local machine capabilities. Claude.ai already supports remote MCP servers. The remaining challenge for local access is making a locally-running MCP server reachable from the cloud (via a tunnel service like Cloudflare Tunnel, ngrok, or Tailscale Funnel).
 
 The central tension is: **memory and rich UI live in the cloud; local access lives on the user's machine.** Every architecture below is a strategy for bridging that gap.
 
@@ -66,22 +66,22 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 ```
 ┌──────────────────────────────────────────────────┐
-│            Claude Code Desktop (GUI)              │
-│                                                   │
-│  ┌─────────────────────────────────────────────┐  │
-│  │  Stateful Memory Skill                      │  │
-│  │  ┌────────┐ ┌────────┐ ┌────────────────┐   │  │
-│  │  │Core.md │ │Index.md│ │ blocks/*.md    │   │  │
-│  │  └────────┘ └────────┘ └────────────────┘   │  │
-│  │         │         │             │            │  │
-│  │         └─────────┼─────────────┘            │  │
-│  │                   ▼                          │  │
-│  │        GitHub API (persistence)              │  │
-│  └─────────────────────────────────────────────┘  │
-│                                                   │
-│  Local filesystem ✅  Local network ✅             │
-│  Local commands ✅    GUI ✅ (basic)               │
-│  Persistent memory ✅ (via skill)                  │
+│            Claude Code Desktop (GUI)             │
+│                                                  │
+│  ┌─────────────────────────────────────────────┐ │
+│  │  Stateful Memory Skill                      │ │
+│  │  ┌────────┐ ┌────────┐ ┌────────────────┐   │ │
+│  │  │Core.md │ │Index.md│ │ blocks/*.md    │   │ │
+│  │  └────────┘ └────────┘ └────────────────┘   │ │
+│  │         │         │             │           │ │
+│  │         └─────────┼─────────────┘           │ │
+│  │                   ▼                         │ │
+│  │        GitHub API (persistence)             │ │
+│  └─────────────────────────────────────────────┘ │
+│                                                  │
+│  Local filesystem ✅  Local network ✅          │
+│  Local commands ✅    GUI ✅ (basic)            │
+│  Persistent memory ✅ (via skill)                │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -113,16 +113,24 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 ### Architecture B: Claude.ai + Local MCP Bridge
 
-**Strategy:** Use Claude.ai for its superior UI and built-in memory, and run a local MCP (Model Context Protocol) server that bridges the gap to local filesystem, network, and command execution.
+**Strategy:** Use Claude.ai for its superior UI and built-in memory, and run a local MCP server that bridges the gap to local filesystem, network, and command execution. Claude.ai already supports custom remote MCP servers via the "Connectors" feature (Settings > Connectors > Add custom connector), so the primary engineering task is making a locally-running MCP server reachable from the cloud via a secure tunnel.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Claude.ai (Web UI)                       │
 │                                                              │
-│  Built-in memory ✅    Rich UI ✅    Artifacts ✅             │
-│  Tool widgets ✅       File previews ✅                       │
+│  Built-in memory ✅    Rich UI ✅    Artifacts ✅            │
+│  Tool widgets ✅       File previews ✅                      │
 │                                                              │
-│           │  MCP Protocol (WebSocket/SSE)                    │
+│           │  MCP Protocol (Streamable HTTP)                   │
+│           ▼                                                  │
+│  ┌──────────────────────────────────────────────────┐        │
+│  │  Secure Tunnel (Cloudflare/ngrok/Tailscale)       │        │
+│  └──────────────────────────────────────────────────┘        │
+│           │                                                  │
+└───────────┼──────────────────────────────────────────────────┘
+            │
+┌───────────┼──────────────────────────────────────────────────┐
 │           ▼                                                  │
 │  ┌──────────────────────────────────────────────────┐        │
 │  │        Local MCP Bridge Server                    │        │
@@ -139,27 +147,26 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 │  │  - run_command, run_script                       │        │
 │  └──────────────────────────────────────────────────┘        │
 │                                                              │
-│  Persistent memory ✅ (built-in)                              │
-│  Local filesystem ✅ (via MCP)                                │
-│  Local network ✅ (via MCP)                                   │
-│  Local commands ✅ (via MCP)                                  │
-│  GUI ✅ (Claude.ai's full-featured web UI)                    │
-└─────────────────────────────────────────────────────────────┘
+│  User's Local Machine                                        │
+│  Local filesystem ✅  Local network ✅  Local commands ✅    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **How it works:**
 
 1. A lightweight MCP server runs on the user's local machine as a long-lived background process (daemon/service).
-2. The MCP server exposes tools for filesystem operations, network requests, and command execution over the MCP protocol.
-3. Claude.ai connects to this MCP server (once Claude.ai supports user-configured remote MCP servers, which is on Anthropic's roadmap).
-4. Claude uses these MCP tools just as it uses any other tool — making tool calls that are routed through the MCP bridge to the local machine.
-5. Claude.ai's built-in memory system handles persistence automatically.
+2. The MCP server exposes tools for filesystem operations, network requests, and command execution over the MCP protocol using Streamable HTTP transport.
+3. A secure tunnel service (Cloudflare Tunnel, ngrok, or Tailscale Funnel) makes the local MCP server reachable at a stable public URL.
+4. The user adds this URL as a custom connector in Claude.ai (Settings > Connectors > Add custom connector). This only needs to be done once.
+5. Claude uses these MCP tools just as it uses any other connector tool — making tool calls that are routed through the tunnel to the local MCP bridge server.
+6. Claude.ai's built-in memory system handles persistence automatically.
 
 **The MCP bridge server** would be a relatively simple program (likely written in TypeScript or Python, since MCP SDKs exist for both) that:
 
-- Listens for MCP connections on a local port.
-- Optionally uses a secure tunnel (e.g., Cloudflare Tunnel, ngrok, or Tailscale Funnel) to make the local server reachable from the cloud, OR Anthropic provides a native mechanism for Claude.ai to connect to locally-hosted MCP servers.
+- Implements the MCP protocol over Streamable HTTP (the transport Claude.ai's Connectors feature uses for remote servers).
+- Listens on a local port, fronted by a secure tunnel for cloud reachability.
 - Implements a configurable allowlist of permitted directories, commands, and network destinations (for security).
+- Optionally supports OAuth 2.1 authentication (Claude.ai's custom connector flow supports OAuth) for access control.
 - Logs all operations for auditability.
 
 **Pros:**
@@ -171,13 +178,13 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 - The bridge server can be hardened with allowlists and logging, providing a security boundary.
 
 **Cons:**
-- **Blocked on Anthropic:** Claude.ai does not yet support user-configured remote MCP servers. The Claude Desktop App does, but it lacks some of Claude.ai's UI features. This is the biggest risk — the timeline is uncertain.
-- Requires running a persistent local service, which adds operational complexity.
-- The connection between Claude.ai (cloud) and the local MCP server introduces latency and requires a reliable network path. If using a tunnel service, there is an additional dependency.
-- Security surface: exposing local filesystem and command execution to a cloud service requires careful access controls. A misconfigured bridge could be dangerous.
+- Requires running a persistent local service (the MCP bridge) and a tunnel service, which adds operational complexity. If the tunnel goes down, Claude.ai loses access to local tools.
+- The connection between Claude.ai (cloud) and the local MCP server introduces latency (typically 50–200ms round-trip through a tunnel) and requires a reliable network path.
+- Security surface: exposing local filesystem and command execution to a cloud-reachable endpoint requires careful access controls. A misconfigured bridge or tunnel could be dangerous. OAuth 2.1 support and strict allowlists are essential.
 - MCP protocol is still evolving. Breaking changes in the protocol could require bridge updates.
+- Tunnel services (ngrok, Cloudflare Tunnel) may have their own reliability, rate-limiting, or cost considerations for sustained use.
 
-**Verdict:** This is the **ideal long-term architecture**. It combines the best UI, the best memory, and full local access. The blocking dependency is Claude.ai's MCP support, which is under active development at Anthropic. In the meantime, the Claude Desktop App can serve as a partial substitute (it supports MCP but has a less feature-rich UI than Claude.ai).
+**Verdict:** This is the **ideal architecture** and is **achievable today**. Claude.ai already supports custom remote MCP servers via the Connectors feature. The remaining engineering work is building the local MCP bridge server and configuring a secure tunnel. This combines the best UI, the best memory, and full local access with a relatively small amount of custom infrastructure.
 
 ---
 
@@ -311,7 +318,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 | Criterion | A: CC Desktop + Skill | B: Claude.ai + MCP | C: CLI + Web UI | D: Hybrid Sidecar |
 |-----------|:--------------------:|:------------------:|:---------------:|:-----------------:|
-| **Available today** | ✅ Yes | ⚠️ Partial (Desktop App only) | ⚠️ Requires dev work | ✅ Yes (manual) |
+| **Available today** | ✅ Yes | ✅ Yes (needs MCP bridge + tunnel) | ⚠️ Requires dev work | ✅ Yes (manual) |
 | **R1: Persistent memory** | ⚠️ Skill-based | ✅ Built-in | ⚠️ Skill-based | ✅ Built-in (primary) |
 | **R2: Local filesystem** | ✅ Native | ✅ Via MCP | ✅ Native | ✅ Via sidecar |
 | **R3: Local network** | ✅ Native | ✅ Via MCP | ✅ Native | ✅ Via sidecar |
@@ -324,64 +331,64 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 ## Recommendation
 
-### Short-term (Now): Architecture A
+### Primary Strategy (Now): Architecture B
 
-**Use Claude Code Desktop with the Stateful Memory Skill.**
+**Build a local MCP bridge server and connect it to Claude.ai via a secure tunnel.**
 
-This is available today and satisfies all five requirements. The UI is less polished than Claude.ai, and the memory system requires context window space, but it works. Build the stateful memory skill as described in the [existing design document](stateful-agent-skill-design.md), targeting Claude Code Desktop as the primary environment.
+Since Claude.ai already supports custom remote MCP servers via the Connectors feature, Architecture B is achievable today. This provides the best UI, the best memory, and full local access. The engineering work is building the MCP bridge server and configuring a tunnel.
+
+Specific actions:
+
+1. **Build the local MCP bridge server** using the TypeScript or Python MCP SDK. Implement Streamable HTTP transport with tools for filesystem operations, network requests, and command execution.
+2. **Configure a secure tunnel** (Cloudflare Tunnel is recommended for stability and zero-cost for personal use; ngrok or Tailscale Funnel are alternatives) to expose the local MCP server at a stable URL.
+3. **Add the tunnel URL as a custom connector** in Claude.ai (Settings > Connectors > Add custom connector).
+4. **Implement security controls**: directory allowlists, command allowlists, operation logging, and optionally OAuth 2.1 authentication.
+5. **Test and iterate** on the tool set — start with filesystem and command execution, then add network tools as needed.
+
+### Fallback Strategy: Architecture A
+
+**If the MCP bridge + tunnel approach proves unreliable, fall back to Claude Code Desktop with the Stateful Memory Skill.**
+
+Architecture A requires no networking infrastructure and works entirely locally. It is simpler to set up but has a less polished UI and requires the memory skill to consume context window space.
 
 Specific actions:
 
 1. **Implement the stateful memory skill** with the `filesystem` backend for local persistence and `github_api` backend for backup/sync.
 2. **Configure Claude Code Desktop** with the skill loaded on startup.
 3. **Establish a GitHub repo** (e.g., `fpl9000/agent-memory`) for memory persistence and version history.
-4. **Iterate on memory quality** — tune the skill's prompts to produce useful, well-structured memories.
 
-### Medium-term (3–6 months): Transition to Architecture B
+### Long-term (6–12 months): Simplification
 
-**Monitor Anthropic's MCP rollout for Claude.ai and prepare a local MCP bridge server.**
-
-As Claude.ai gains support for user-configured MCP servers (or as the Claude Desktop App's UI catches up to Claude.ai), transition to Architecture B.
-
-Specific actions:
-
-1. **Build the local MCP bridge server** in advance. Use the TypeScript MCP SDK. Implement filesystem, network, and command execution tools with configurable allowlists.
-2. **Test with Claude Desktop App** (which already supports MCP) to validate the bridge server before Claude.ai support arrives.
-3. **When Claude.ai supports MCP**, connect the bridge server and migrate the primary workflow from Claude Code Desktop to Claude.ai.
-4. **Retire the stateful memory skill** — Claude.ai's built-in memory replaces it.
-
-### Long-term (6–12 months): Full Integration
-
-Anthropic is actively developing memory, MCP, and tool integration features. The long-term trajectory is that Claude.ai will natively support the kind of local access that currently requires workarounds. At that point, the local MCP bridge server becomes the only piece of custom infrastructure — a clean, maintainable, general-purpose tool.
+Anthropic is actively developing memory, MCP, and tool integration features (including MCP Apps for interactive in-conversation UIs, announced January 2026). The long-term trajectory is that the MCP bridge server becomes the only piece of custom infrastructure — a clean, maintainable, general-purpose tool. As Anthropic's built-in memory improves, the supplementary memory skill (if used) may become unnecessary.
 
 ## Implementation Roadmap
 
 ```
 2026 Q1 (Now)
-├── Implement stateful memory skill (per existing design doc)
-├── Set up agent-memory GitHub repo
-├── Configure Claude Code Desktop as primary environment
-└── Begin using the system for daily work
+├── Build local MCP bridge server (TypeScript or Python)
+│   ├── Filesystem tools (read, write, list, search)
+│   ├── Command execution tools (run_command, run_script)
+│   └── Security: directory/command allowlists, operation logging
+├── Configure secure tunnel (Cloudflare Tunnel recommended)
+├── Add tunnel URL as custom connector in Claude.ai
+├── Test end-to-end: Claude.ai → tunnel → MCP bridge → local operations
+└── Begin using Architecture B for daily work
 
 2026 Q2
-├── Build local MCP bridge server (TypeScript)
-│   ├── Filesystem tools (read, write, list, search)
+├── Expand MCP bridge tool set
 │   ├── Network tools (HTTP requests, curl-equivalent)
-│   ├── Command execution tools (run_command, run_script)
-│   └── Security: allowlists, logging, confirmation prompts
-├── Test MCP bridge with Claude Desktop App
-└── Monitor Anthropic announcements re: Claude.ai MCP support
-
-2026 Q3
-├── If Claude.ai supports MCP: migrate primary workflow
-├── If not: continue with Claude Code Desktop + skill
-├── Evaluate: has Anthropic's built-in memory improved enough
-│   to retire the skill?
+│   ├── OAuth 2.1 authentication for the bridge endpoint
+│   └── Optional: confirmation prompts for destructive operations
+├── Evaluate tunnel reliability and latency over sustained use
+├── If tunnel approach is unreliable: implement Architecture A fallback
+│   ├── Stateful memory skill (per existing design doc)
+│   └── Claude Code Desktop as alternative environment
 └── Contribute MCP bridge server as open-source project
 
-2026 Q4
-├── Full Architecture B deployment (if MCP available)
-├── Retire stateful memory skill if built-in memory is sufficient
+2026 Q3–Q4
+├── Evaluate Anthropic's evolving MCP Apps support
+├── Evaluate built-in memory improvements
+├── Assess whether supplementary memory skill adds value
 └── Evaluate emerging capabilities (agentic browsing, etc.)
 ```
 
@@ -389,7 +396,7 @@ Anthropic is actively developing memory, MCP, and tool integration features. The
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Anthropic delays Claude.ai MCP support | Medium | High — blocks Architecture B | Continue with Architecture A; it works today. |
+| Tunnel service unreliable for sustained use | Medium | Medium — degrades Architecture B | Evaluate multiple tunnel providers; fall back to Architecture A if needed. Tailscale Funnel may be more reliable for personal use than ngrok. |
 | Claude Code Desktop is discontinued or deprioritized | Low | High — blocks Architecture A | Architecture A's skill also works in Claude Code CLI. Build Architecture C as fallback. |
 | MCP protocol undergoes breaking changes | Medium | Medium — requires bridge updates | Pin to stable MCP SDK versions; the bridge is small enough to update quickly. |
 | Stateful memory skill produces low-quality memories | Medium | Medium — defeats the purpose | Iterate on prompts; add user-facing memory review/edit commands. Markdown format makes manual correction easy. |
@@ -411,14 +418,14 @@ The one piece of the design document that becomes unnecessary in Architecture B 
 
 ## Open Questions
 
-1. **MCP tunnel security:** If Architecture B requires a tunnel service (ngrok, Cloudflare Tunnel) to make the local MCP server reachable from Claude.ai, what are the security implications? Is there a way for Anthropic to support locally-hosted MCP servers without a public tunnel (e.g., a browser extension or desktop agent that acts as a local relay)?
+1. **MCP tunnel security:** Architecture B requires a tunnel service to make the local MCP server reachable from Claude.ai. What are the security implications of exposing local filesystem and command execution behind a public URL? Cloudflare Tunnel offers access policies and authentication; ngrok offers IP allowlisting and webhook verification. Which approach provides the best security-to-convenience tradeoff? Is there a way for Anthropic to eventually support locally-hosted MCP servers without a public tunnel (e.g., a browser extension or desktop relay agent)?
 
-2. **Memory migration:** When transitioning from Architecture A (skill-based memory) to Architecture B (built-in memory), how do we migrate the accumulated markdown memory into Anthropic's built-in system? Is there a way to "seed" built-in memory from structured data?
+2. **Custom connector limitations:** Claude.ai's custom connector support is relatively new. Are there rate limits, timeout restrictions, or tool-count limits that could constrain the MCP bridge's usefulness? The help docs mention that Advanced Research cannot invoke tools from connectors — are there other feature restrictions?
 
-3. **Claude Desktop App trajectory:** Is the Claude Desktop App converging with Claude.ai in terms of UI features? If so, Architecture B could become viable sooner using the Desktop App instead of waiting for Claude.ai MCP support.
+3. **Memory migration:** If starting with Architecture A (skill-based memory) and transitioning to Architecture B (built-in memory), how do we migrate the accumulated markdown memory into Anthropic's built-in system? Is there a way to "seed" built-in memory from structured data?
 
-4. **MCP authentication:** How will Claude.ai authenticate with user-hosted MCP servers? Shared secrets? OAuth? Mutual TLS? This affects the security architecture of the bridge server.
+4. **MCP authentication best practices:** Claude.ai's custom connector flow supports OAuth 2.1 with optional client ID and secret. For a personal MCP bridge server, is full OAuth overkill? Would a simpler shared-secret approach suffice, or does the tunnel service's own authentication layer (e.g., Cloudflare Access) make application-level auth unnecessary?
 
-5. **Anthropic's own plans for local access:** Is Anthropic working on native local access features for Claude.ai (beyond MCP)? If so, the local MCP bridge may become unnecessary, simplifying the architecture further.
+5. **Anthropic's own plans for local access:** Is Anthropic working on native local access features for Claude.ai (beyond MCP)? The Claude Desktop App already supports local MCP servers via stdio — if the Desktop App's UI converges with Claude.ai, the tunnel requirement could be eliminated entirely.
 
-6. **Memory skill as supplementary store:** Even after transitioning to Architecture B, is there value in keeping the three-tier markdown memory system as a supplementary knowledge store? Anthropic's built-in memory is opaque and has limited capacity. A transparent, user-controlled supplementary store could hold project context, technical notes, and other detailed information that exceeds what built-in memory is designed for.
+6. **Memory skill as supplementary store:** Even with Architecture B, is there value in keeping the three-tier markdown memory system as a supplementary knowledge store? Anthropic's built-in memory is opaque and has limited capacity. A transparent, user-controlled supplementary store (accessible via the MCP bridge) could hold project context, technical notes, and other detailed information that exceeds what built-in memory is designed for.
