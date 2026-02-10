@@ -18,6 +18,13 @@
   - [Architecture D: Hybrid — Claude.ai Primary with Local Agent Sidecar](#architecture-d-hybrid--claudeai-primary-with-local-agent-sidecar)
 - [Architecture Comparison](#architecture-comparison)
 - [Recommendation](#recommendation)
+- [Supplementary Memory Strategy](#supplementary-memory-strategy)
+  - [The Limitation](#the-limitation-built-in-memory-is-not-enough)
+  - [Design Principle: Layered Memory](#design-principle-layered-memory)
+  - [Option 1: Tiered Memory via MCP Filesystem Tools](#option-1-tiered-memory-via-mcp-filesystem-tools)
+  - [Option 2: Dedicated MCP Memory Server](#option-2-dedicated-mcp-memory-server)
+  - [Option 3: Hybrid — Filesystem Core with Search Index](#option-3-hybrid--filesystem-core-with-search-index)
+  - [Supplementary Memory Recommendation](#supplementary-memory-recommendation)
 - [Implementation Roadmap](#implementation-roadmap)
 - [Risks and Mitigations](#risks-and-mitigations)
 - [Relation to Existing Design](#relation-to-existing-design)
@@ -26,6 +33,8 @@
 ## Executive Summary
 
 The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps, with a recommendation to pursue **Architecture B** (Local MCP Bridge) as the primary strategy. Architecture B has two variants: **B1** uses the Claude Desktop App with a local MCP bridge (no tunnel required, simpler setup, available today) and **B2** uses Claude.ai with the same MCP bridge exposed via a secure tunnel (best UI, but adds tunnel complexity). **Architecture A** (Claude Code Desktop + Stateful Memory Skill) remains as a fallback that requires no MCP infrastructure at all.
+
+Because Anthropic's built-in memory is limited (~500–2,000 tokens — adequate for identity and preferences, but far too small for deep project context, episodic recall, or technical notes), this proposal also defines a **two-layer memory strategy**. Layer 1 is Anthropic's built-in memory (automatic, compact, always present). Layer 2 is a supplementary system using the three-tier markdown memory model from the [existing design document](stateful-agent-skill-design.md), accessed via the MCP bridge's filesystem tools. This layered approach brings Claude closer to the deep memory capabilities of systems like Letta (formerly MemGPT) while maintaining transparency (human-readable markdown files) and portability (Git-backed, no vendor lock-in).
 
 ## Requirements
 
@@ -426,12 +435,187 @@ Specific actions:
 
 ### Long-term (6–12 months): Simplification
 
-Anthropic is actively developing memory, MCP, and tool integration features (including MCP Apps for interactive in-conversation UIs, announced January 2026). The long-term trajectory is that the MCP bridge server becomes the only piece of custom infrastructure — a clean, maintainable, general-purpose tool. As the Desktop App's UI matures and converges with Claude.ai, the gap between B1 and B2 will narrow, potentially eliminating the need for the tunnel altogether. As Anthropic's built-in memory improves, the supplementary memory skill (if used in Architecture A) may become unnecessary.
+Anthropic is actively developing memory, MCP, and tool integration features (including MCP Apps for interactive in-conversation UIs, announced January 2026). The long-term trajectory is that the MCP bridge server becomes the only piece of custom infrastructure — a clean, maintainable, general-purpose tool. As the Desktop App's UI matures and converges with Claude.ai, the gap between B1 and B2 will narrow, potentially eliminating the need for the tunnel altogether. As Anthropic's built-in memory improves (potentially increasing Layer 1 capacity for structured project context, episodic recall, and search), the Layer 2 supplementary memory system may eventually become unnecessary — but the markdown files will remain as a portable archive regardless. See the [Supplementary Memory Strategy](#supplementary-memory-strategy) section for the detailed design of the two-layer memory approach.
+
+## Supplementary Memory Strategy
+
+### The Limitation: Built-in Memory Is Not Enough
+
+Anthropic's built-in memory system (available in Claude.ai and the Claude Desktop App) is designed to store a compact summary of user identity, preferences, and high-level project context. Based on observation, the memory summary injected into context is roughly **500–2,000 tokens** — approximately 500 words or ~4,000 characters. Anthropic does not publicly document a hard limit, but the system is clearly designed to keep the summary small, since it is injected into the system prompt on every conversation turn.
+
+This is adequate for "who am I talking to?" context — the user's name, role, communication preferences, and active projects. But it is far too small for the kind of deep, structured, project-aware memory that systems like **Letta** (formerly MemGPT) provide. Letta's architecture supports essentially unlimited structured memory with semantic search, episodic recall, and multi-tier storage. For Claude to function as a comparable stateful agent, we need a **supplementary memory layer** that works alongside the built-in memory.
+
+This supplementary layer is especially important for:
+
+- **Project context** — architectural decisions, design rationale, implementation status, open issues, and technical debt across multiple active projects.
+- **Episodic memory** — what happened in past conversations, what was decided, what was tried and abandoned, and why.
+- **Technical notes** — detailed reference material (API patterns, code conventions, environment configurations) that the user shouldn't have to re-explain each session.
+- **Long-term goals and plans** — roadmaps, milestones, and evolving strategies that span weeks or months.
+
+### Design Principle: Layered Memory
+
+The recommended approach is a **two-layer memory system**:
+
+| Layer | Provider | Storage | Capacity | Loaded When | Purpose |
+|-------|----------|---------|----------|-------------|--------|
+| **Layer 1: Identity & Preferences** | Anthropic's built-in memory | Cloud (opaque) | ~500–2,000 tokens | Every turn (automatic) | User identity, communication style, role, high-level project list |
+| **Layer 2: Deep Context** | Supplementary system (via MCP) | Local filesystem (+ optional GitHub backup) | Unbounded (loaded on demand) | On request or at session start | Project details, episodic memories, technical notes, decision history |
+
+Layer 1 is always present and requires no user effort — Anthropic maintains it automatically. Layer 2 is opt-in and managed by Claude via the MCP bridge's tools, guided by a skill that teaches Claude the memory structure and lifecycle.
+
+The key insight is that **Layer 2 content does not need to be loaded all at once**. The three-tier model from the [existing design document](stateful-agent-skill-design.md) — core summary, index, and on-demand content blocks — is designed precisely for this. Claude loads only the core summary and index at session start (a bounded cost), then retrieves specific content blocks as needed during the conversation.
+
+### Option 1: Tiered Memory via MCP Filesystem Tools
+
+**Strategy:** Store the three-tier memory structure (from the existing design document) as markdown files on the local filesystem, and access them via the MCP bridge's existing filesystem tools (`read_file`, `write_file`, `list_dir`, `search_files`). A Claude skill (.zip) provides the instructions that teach Claude how to manage the memory lifecycle.
+
+```
+Local Filesystem:
+~/.claude-agent-memory/
+├── core.md              # Identity, active projects, key facts (~500–1,000 tokens)
+├── index.md             # Topic index with one-line summaries + block references
+└── blocks/
+    ├── project-foo.md   # Deep context for Project Foo
+    ├── project-bar.md   # Deep context for Project Bar
+    ├── decisions.md     # Key decisions and rationale
+    ├── episodic-2026-02.md  # What happened in Feb 2026
+    └── ...              # Additional blocks as needed
+```
+
+**Session lifecycle:**
+
+1. **Session start:** The skill instructs Claude to read `core.md` and `index.md` via the MCP bridge. These are small, bounded files (~500–1,000 tokens each) that give Claude a high-level picture of who the user is and what topics are available.
+2. **During conversation:** When a topic comes up that matches an index entry, Claude reads the relevant content block on demand. Only the needed block is loaded, not the entire memory store.
+3. **Session end (or periodically):** Claude updates `core.md`, `index.md`, and any modified content blocks via the MCP bridge's `write_file` tool. New topics get new blocks; existing blocks are updated or summarized.
+4. **Backup (optional):** A background script or cron job periodically commits the memory directory to a GitHub repo for versioning and backup.
+
+**Pros:**
+- No new infrastructure — uses the same MCP bridge filesystem tools already built for Architecture B.
+- Fully transparent — all memory is human-readable markdown files editable with any text editor.
+- Works identically with both B1 (Desktop App) and B2 (Claude.ai).
+- The three-tier structure (core/index/blocks) bounds the per-session context cost while allowing unbounded total storage.
+- Versioning via Git/GitHub provides complete history and rollback.
+
+**Cons:**
+- Retrieval is keyword/filename-based, not semantic. Claude must scan the index to decide which block to load, which works for a moderate number of blocks but may degrade as the memory grows to hundreds of topics.
+- Memory quality depends on Claude's compliance with the skill's instructions for updating files. The model may forget to persist changes or may summarize poorly.
+- The skill instructions themselves consume context (~200–500 tokens), adding to the per-session overhead.
+
+### Option 2: Dedicated MCP Memory Server
+
+**Strategy:** Build (or adopt) a separate MCP server specifically designed for memory operations — semantic search, structured CRUD, and automatic summarization. This server runs alongside the general-purpose MCP bridge (or as additional tools within it).
+
+```
+MCP Memory Server Tools:
+├── memory_search(query, top_k)       # Semantic or full-text search over all memories
+├── memory_read(topic_id)             # Retrieve a specific memory block
+├── memory_write(topic_id, content)   # Create or update a memory block
+├── memory_list(category?)            # List available topics, optionally filtered
+├── memory_summarize(topic_id)        # Trigger summarization of a block
+└── memory_delete(topic_id)           # Remove a memory block
+
+Backend Storage:
+├── SQLite + FTS5 (full-text search)   # Simple, local, no external dependencies
+├── ── or ──
+└── SQLite + vector embeddings         # Semantic search via local embedding model
+```
+
+**How it works:**
+
+1. The memory server exposes MCP tools that Claude calls just like any other tool.
+2. On session start, Claude calls `memory_search("active projects")` or `memory_list()` to get an overview of what's in memory — analogous to reading `core.md` + `index.md`, but with search.
+3. During conversation, Claude calls `memory_search(query)` to find relevant context, and `memory_read(topic_id)` to load specific blocks.
+4. Claude calls `memory_write()` to persist new information.
+5. The server can optionally run background summarization (e.g., compressing old episodic entries).
+
+**Backend options:**
+
+| Backend | Search Type | Complexity | Dependencies |
+|---------|------------|------------|-------------|
+| **SQLite + FTS5** | Full-text keyword search | Low | None (SQLite is built-in everywhere) |
+| **SQLite + vector embeddings** | Semantic similarity search | Medium | Local embedding model (e.g., `all-MiniLM-L6-v2` via `sentence-transformers`) |
+| **Existing MCP memory servers** | Varies | Low (if pre-built) | NPM/Python packages (e.g., `@modelcontextprotocol/server-memory`) |
+
+**Pros:**
+- Semantic or full-text search scales much better than filename-based retrieval. Claude can find relevant memories even when it doesn't know the exact topic name.
+- Structured API — memory operations are explicit tool calls, not ad-hoc file reads. This makes it easier to enforce consistency and logging.
+- The server can handle background tasks (summarization, deduplication, archival) that would be awkward to do via filesystem operations alone.
+- Existing open-source MCP memory servers (e.g., the `@modelcontextprotocol/server-memory` package) provide a starting point.
+
+**Cons:**
+- More infrastructure to build and maintain — a dedicated memory server is a non-trivial project, especially if semantic search is desired.
+- Adds MCP tool definitions to context (each tool ~200–500 tokens), increasing the fixed per-session overhead.
+- Less transparent than plain markdown files — the user can't just open a text editor to review or correct memories (though a CLI or web UI could be built).
+- If using vector embeddings, requires a local embedding model, which has its own resource requirements.
+
+### Option 3: Hybrid — Filesystem Core with Search Index
+
+**Strategy:** Combine the transparency of Option 1 with the search capability of Option 2. Store memories as markdown files (human-readable, Git-friendly), but maintain a search index alongside them.
+
+```
+~/.claude-agent-memory/
+├── core.md              # Always loaded at session start
+├── index.md             # Human-readable topic index
+├── blocks/              # Markdown content blocks (same as Option 1)
+│   ├── project-foo.md
+│   ├── decisions.md
+│   └── ...
+└── .search-index.db     # SQLite FTS5 index over block contents
+```
+
+**How it works:**
+
+1. The MCP bridge (or a thin wrapper) provides both filesystem tools and a `memory_search(query)` tool.
+2. The search tool queries the SQLite FTS5 index and returns ranked snippets with block filenames.
+3. Claude uses the search results to decide which blocks to read in full via `read_file`.
+4. When Claude writes or updates a block via `write_file`, a filesystem watcher or post-write hook updates the search index.
+5. The markdown files remain the source of truth — the search index is a derived artifact that can be rebuilt from the files at any time.
+
+**Pros:**
+- Best of both worlds: human-readable markdown files + fast search retrieval.
+- The search index is a derived artifact, not the source of truth. If it gets corrupted, rebuild it from the markdown files.
+- Git-friendly — the markdown files can be committed to GitHub; the `.search-index.db` goes in `.gitignore`.
+- Minimal additional infrastructure — SQLite FTS5 requires no external dependencies.
+
+**Cons:**
+- Slightly more complex than Option 1 (need to maintain the search index).
+- Full-text search is not semantic search. It finds keyword matches, not conceptual similarities. (Could be upgraded to vector search later if needed.)
+- The post-write indexing hook adds a small amount of complexity to the MCP bridge.
+
+### Supplementary Memory Recommendation
+
+**Start with Option 1 (filesystem-only), plan for Option 3 (filesystem + search index).**
+
+Option 1 requires no new infrastructure beyond the MCP bridge already being built for Architecture B. The three-tier markdown structure is proven (described in the existing design document), transparent, and easy to debug. It is sufficient for a moderate number of topics (perhaps 20–50 content blocks), which is likely adequate for the first several months of use.
+
+If the memory grows to the point where keyword/filename-based retrieval becomes cumbersome (hundreds of blocks), add the SQLite FTS5 search index (Option 3). This is a relatively small upgrade — a single `memory_search` tool added to the MCP bridge, plus a post-write indexing hook.
+
+Option 2 (dedicated MCP memory server) is the most powerful but also the most complex. It makes sense if you want to build a general-purpose memory infrastructure for multiple AI agents, or if semantic search proves essential. Defer this unless the simpler options prove insufficient.
+
+**How this works with Architecture B:**
+
+- In **B1** (Desktop App): The memory files live on the local filesystem. Claude accesses them via the MCP bridge's filesystem tools (stdio). The skill (.zip) provides the memory management instructions. Anthropic's built-in memory handles Layer 1 (identity/preferences) automatically.
+- In **B2** (Claude.ai): Identical, except the MCP bridge is accessed via tunnel. The memory files still live on the local filesystem.
+- In **Architecture A** (fallback): The same memory files are accessed directly by Claude Code Desktop's native filesystem access, guided by the same skill. No MCP bridge needed.
+
+**Comparison with Letta:**
+
+| Capability | Letta (MemGPT) | Proposed Supplementary Memory |
+|-----------|---------------|------------------------------|
+| **Core memory** (identity, key facts) | ✅ In-context, bounded | ✅ `core.md` (~500–1,000 tokens) + Anthropic built-in |
+| **Archival memory** (long-term storage) | ✅ Vector DB, semantic search | ✅ Markdown blocks + FTS5 search (Option 3) |
+| **Recall memory** (conversation history) | ✅ Automatic, searchable | ⚠️ Depends on Claude's built-in chat search + episodic blocks |
+| **Automatic memory management** | ✅ Agent-managed (model decides what to store) | ⚠️ Skill-guided (model follows instructions, but compliance varies) |
+| **Transparency** | ⚠️ DB-backed, requires tools to inspect | ✅ Human-readable markdown, editable with any text editor |
+| **Semantic search** | ✅ Native | ❌ Not in Options 1/3 (upgrade path: add embeddings) |
+| **Self-hosted, no vendor lock-in** | ✅ Open source | ✅ Plain files + open-source tools |
+
+The proposed system is less automated than Letta (Claude must be instructed to manage memory, while Letta's agent does it autonomously) and lacks semantic search out of the box. But it is simpler, more transparent, and integrates naturally with Architecture B's MCP bridge without requiring a separate agent framework.
 
 ## Implementation Roadmap
 
 ```
-2026 Q1 (Now) — Deploy Architecture B1
+2026 Q1 (Now) — Deploy Architecture B1 + Supplementary Memory (Option 1)
 ├── Build local MCP bridge server (TypeScript or Python)
 │   ├── Stdio transport (for Desktop App)
 │   ├── Filesystem tools (read, write, list, search)
@@ -439,12 +623,26 @@ Anthropic is actively developing memory, MCP, and tool integration features (inc
 │   └── Security: directory/command allowlists, operation logging
 ├── Register bridge in Claude Desktop App (claude_desktop_config.json)
 ├── Test end-to-end: Desktop App → stdio → MCP bridge → local operations
-└── Begin using Architecture B1 for daily work
+├── Deploy supplementary memory (Option 1: filesystem-only)
+│   ├── Create ~/.claude-agent-memory/ directory structure (core.md, index.md, blocks/)
+│   ├── Write memory management skill (.zip) with session lifecycle instructions
+│   ├── Seed core.md and index.md with initial context from existing conversations
+│   ├── Verify Claude can read/write memory files via MCP bridge filesystem tools
+│   └── Set up GitHub repo for memory backup (optional cron job for auto-commit)
+└── Begin using Architecture B1 with layered memory for daily work
 
-2026 Q2 — Expand tools, evaluate B2 upgrade
+2026 Q2 — Expand tools, evaluate B2 upgrade, iterate on memory
 ├── Expand MCP bridge tool set
 │   ├── Network tools (HTTP requests, curl-equivalent)
 │   └── Optional: confirmation prompts for destructive operations
+├── Iterate on supplementary memory based on real-world usage
+│   ├── Tune memory skill prompts for better compliance (update frequency, summarization quality)
+│   ├── Evaluate whether block count exceeds comfortable filename-based retrieval (~50 blocks)
+│   ├── If retrieval is becoming cumbersome: upgrade to Option 3 (add FTS5 search index)
+│   │   ├── Add memory_search(query) tool to MCP bridge
+│   │   ├── Implement post-write indexing hook (rebuild .search-index.db on file change)
+│   │   └── Test search quality against real memory content
+│   └── Review memory quality: manually audit core.md, index.md, and sample blocks
 ├── Evaluate Desktop App stability and UI adequacy
 ├── If Desktop App proves limiting: upgrade to B2
 │   ├── Add Streamable HTTP transport to bridge
@@ -460,7 +658,11 @@ Anthropic is actively developing memory, MCP, and tool integration features (inc
 ├── Evaluate Anthropic's evolving MCP Apps support
 ├── Evaluate Desktop App UI convergence with Claude.ai
 ├── Evaluate built-in memory improvements
-├── Assess whether supplementary memory skill adds value
+│   └── If Anthropic's built-in memory grows substantially, reassess whether Layer 2 is still needed
+├── Evaluate supplementary memory maturity
+│   ├── Assess total block count and search effectiveness
+│   ├── If Option 3 (FTS5) proves insufficient: evaluate Option 2 (dedicated memory server)
+│   └── If semantic search is needed: evaluate local embedding model (e.g., all-MiniLM-L6-v2)
 └── Evaluate emerging capabilities (agentic browsing, etc.)
 ```
 
@@ -472,22 +674,26 @@ Anthropic is actively developing memory, MCP, and tool integration features (inc
 | Tunnel service unreliable for sustained use (B2 only) | Medium | Medium — degrades B2 | Does not affect B1 (no tunnel). For B2: evaluate multiple tunnel providers; Tailscale Funnel may be more reliable for personal use than ngrok. Fall back to B1 if tunnel proves unreliable. |
 | Claude Code Desktop is discontinued or deprioritized | Low | High — blocks Architecture A | Architecture A's skill also works in Claude Code CLI. Build Architecture C as fallback. |
 | MCP protocol undergoes breaking changes | Medium | Medium — requires bridge updates | Pin to stable MCP SDK versions; the bridge is small enough to update quickly. |
-| Stateful memory skill produces low-quality memories (Architecture A only) | Medium | Medium — defeats the purpose | Iterate on prompts; add user-facing memory review/edit commands. Markdown format makes manual correction easy. Does not affect Architecture B (uses built-in memory). |
-| Security incident via MCP bridge (unintended file access/command execution) | Low | High | Strict allowlists, operation logging, optional confirmation prompts for destructive operations. Run the bridge under a restricted user account. B1 has lower risk than B2 (no network exposure). |
-| Context window consumed by memory skill reduces conversation quality (Architecture A only) | Medium | Medium | Aggressive summarization in `core.md` and `index.md`. Load content blocks on demand only. Architecture B has lower context overhead (Anthropic-managed built-in memory + fixed MCP tool definitions), but is not zero-cost. |
+| Supplementary memory degrades in quality over time (all architectures) | Medium | Medium — memory becomes unreliable | Regular manual audits of `core.md`, `index.md`, and sample blocks. Markdown format makes manual correction easy. Git history provides rollback if a bad update corrupts memory. Periodic review cadence (e.g., monthly) to prune stale entries and fix inaccuracies. |
+| Claude fails to follow memory skill instructions consistently | Medium | Medium — memories not persisted or poorly summarized | Iterate on skill prompts for clarity. Add explicit "end of session" reminders. Consider a wrapper script that prompts Claude to save memory before session close. Monitor compliance by checking file modification timestamps after sessions. |
+| Supplementary memory grows too large for filename-based retrieval (Option 1) | Medium | Low — degrades retrieval, not data | Planned upgrade path: add FTS5 search index (Option 3) when block count exceeds ~50. The index is a derived artifact and can be added without restructuring the memory files. |
+| Security incident via MCP bridge (unintended file access/command execution) | Low | High | Strict allowlists, operation logging, optional confirmation prompts for destructive operations. Run the bridge under a restricted user account. B1 has lower risk than B2 (no network exposure). Memory files in `~/.claude-agent-memory/` should be included in the allowlist but backed up via Git in case of accidental corruption. |
+| Context window consumed by supplementary memory reduces conversation quality | Medium | Medium | Layer 1 (built-in memory) is Anthropic-managed and compact (~500–2,000 tokens). Layer 2 overhead is bounded: `core.md` + `index.md` loaded at session start (~1,000–2,000 tokens), content blocks loaded on demand only. Aggressive summarization in `core.md` keeps the fixed cost low. Total per-session overhead (both layers + MCP tool definitions) should remain under ~4,000 tokens. |
+| Anthropic's built-in memory improves enough to make Layer 2 unnecessary | Low | Low — positive outcome | Monitor Anthropic's memory improvements. If built-in memory grows to support structured project context, episodic recall, and search, the supplementary layer can be retired gracefully. Markdown files remain as a portable archive regardless. |
 
 ## Relation to Existing Design
 
 This proposal is a **companion to** the [Stateful Agent Skill Design Document](stateful-agent-skill-design.md), not a replacement for it. The design document specifies *how the memory skill works internally* (three-tier model, markdown storage, pluggable backends, session lifecycle). This proposal specifies *which Claude environment to run it in* and *what additional infrastructure is needed* to satisfy the full set of requirements.
 
-The key design decisions from the existing document that carry forward:
+The key design decisions from the existing document that carry forward into **all** architectures, including Architecture B:
 
-- **Three-tier memory model** (core, index, content blocks) — used in Architectures A, C, and D.
-- **Markdown storage** — unchanged; the format works in all architectures.
-- **GitHub API backend** — critical for Architecture A (primary persistence) and useful for Architecture B (memory backup/migration).
-- **Pluggable backends** — the backend interface makes it straightforward to add new backends (e.g., an MCP-aware backend for Architecture B).
+- **Three-tier memory model** (core, index, content blocks) — serves as the Layer 2 supplementary memory in all architectures. In Architecture B, it complements Anthropic's built-in memory (Layer 1) by providing deep project context, episodic memory, and technical notes that exceed Layer 1's ~500–2,000 token capacity.
+- **Markdown storage** — unchanged; the format works in all architectures and provides the transparency advantage over Letta's opaque database storage.
+- **GitHub API backend** — used for memory backup and version history in all architectures. In Architecture B, a cron job or manual process periodically commits `~/.claude-agent-memory/` to a GitHub repo.
+- **Pluggable backends** — the backend interface makes it straightforward to add new backends. The upgrade path from Option 1 (filesystem-only) to Option 3 (filesystem + FTS5 search) is a concrete example of this flexibility.
+- **Session lifecycle** (load at start, update during conversation, persist at end) — the skill's session lifecycle instructions carry forward directly. In Architecture B, the skill (.zip) teaches Claude when and how to interact with the supplementary memory files via the MCP bridge.
 
-The one piece of the design document that becomes unnecessary in Architecture B is the memory skill itself — both the Claude Desktop App (B1) and Claude.ai (B2) provide built-in memory that replaces the skill-based approach. However, the three-tier model and markdown format could still be valuable as a *supplementary* knowledge store (e.g., for project-specific context that exceeds what Anthropic's built-in memory is designed to hold), accessible to Claude via the MCP bridge's filesystem tools.
+The [Supplementary Memory Strategy](#supplementary-memory-strategy) section above details how the existing design document's three-tier model integrates with Architecture B's layered memory approach. The key shift is that the memory skill is no longer the *entire* memory system (as it would be in Architecture A) — it is now the *Layer 2 supplement* to Anthropic's built-in Layer 1 memory. This is a narrower but still critical role: Layer 1 handles identity and preferences automatically, while Layer 2 handles everything that requires more depth, structure, or capacity than Layer 1 can provide.
 
 ## Open Questions
 
@@ -497,10 +703,16 @@ The one piece of the design document that becomes unnecessary in Architecture B 
 
 3. **Desktop App MCP limitations (B1 only):** Are there tool-count limits, timeout restrictions, or other constraints on local MCP servers in the Claude Desktop App? How does the Desktop App handle MCP server crashes or restarts? Can the Desktop App be configured to auto-reconnect to a restarted MCP server?
 
-4. **Memory migration:** If starting with Architecture A (skill-based memory) and transitioning to Architecture B (built-in memory), how do we migrate the accumulated markdown memory into Anthropic's built-in system? Is there a way to "seed" built-in memory from structured data?
+4. **Memory migration between layers:** With the two-layer memory system, Layer 1 (Anthropic's built-in) and Layer 2 (supplementary markdown files) will inevitably contain overlapping or contradictory information. What happens when they diverge? Should there be a periodic reconciliation process? Additionally, if transitioning from Architecture A (where the skill *is* the entire memory) to Architecture B (where the skill becomes Layer 2 only), some content currently in `core.md` should migrate into Layer 1 (built-in memory) — but Anthropic's import mechanism (if one exists) is undocumented. Anthropic has added experimental memory import/export support; monitor its maturity.
 
 5. **MCP authentication best practices (B2 only):** Claude.ai's custom connector flow supports OAuth 2.1 with optional client ID and secret. For a personal MCP bridge server, is full OAuth overkill? Would a simpler shared-secret approach suffice, or does the tunnel service's own authentication layer (e.g., Cloudflare Access) make application-level auth unnecessary? Note: B1 does not need authentication since the bridge is only accessible to the local Desktop App process.
 
 6. **Desktop App UI convergence:** The Claude Desktop App already supports local MCP servers via stdio, which is what makes B1 possible without a tunnel. Is Anthropic actively working to converge the Desktop App's UI with Claude.ai's (artifacts, tool widgets, cloud VM features)? If the gap narrows significantly, B1 becomes the clear winner over B2 with no meaningful tradeoff.
 
-7. **Memory skill as supplementary store:** Even with Architecture B, is there value in keeping the three-tier markdown memory system as a supplementary knowledge store? Anthropic's built-in memory is opaque and has limited capacity. A transparent, user-controlled supplementary store (accessible via the MCP bridge) could hold project context, technical notes, and other detailed information that exceeds what built-in memory is designed for.
+7. **~~Memory skill as supplementary store~~** *(Resolved — see [Supplementary Memory Strategy](#supplementary-memory-strategy)):* Yes, the three-tier markdown memory system is valuable as a Layer 2 supplement to Anthropic's built-in Layer 1 memory. The new section details three options for implementing this, with Option 1 (filesystem-only) recommended as the starting point.
+
+8. **Supplementary memory skill compliance:** The Layer 2 memory system depends on Claude reliably following the skill's instructions to read memory at session start and persist updates at session end. How reliable is this in practice? What prompting strategies maximize compliance? Is there a way to detect when Claude has failed to persist changes (e.g., by comparing file timestamps before and after a session)?
+
+9. **Layer 1 / Layer 2 content boundary:** What content belongs in Layer 1 (built-in memory) vs. Layer 2 (supplementary)? The design says Layer 1 handles identity/preferences and Layer 2 handles project context/episodic memory, but the boundary is fuzzy. For example, should "Fran is working on an MCP bridge server" live in Layer 1 (high-level project awareness) or Layer 2 (project detail)? Should the memory skill explicitly instruct Claude on how to allocate content between layers?
+
+10. **Supplementary memory portability across Claude interfaces:** The Layer 2 memory files live on the local filesystem. They are accessible from B1 (Desktop App via MCP bridge), B2 (Claude.ai via tunnel), and Architecture A (Claude Code Desktop via native filesystem). But what about Claude.ai's cloud VM (used for file creation and code execution)? The cloud VM cannot access the local filesystem. If Claude is asked to reference supplementary memory during a cloud VM task, it would need to read the memory via MCP tools *before* switching to VM execution. Is this workflow ergonomic, or does it create friction?
