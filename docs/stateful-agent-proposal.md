@@ -24,6 +24,7 @@
   - [Option 1: Tiered Memory via MCP Filesystem Tools](#option-1-tiered-memory-via-mcp-filesystem-tools)
   - [Option 2: Dedicated MCP Memory Server](#option-2-dedicated-mcp-memory-server)
   - [Option 3: Hybrid — Filesystem Core with Search Index](#option-3-hybrid--filesystem-core-with-search-index)
+  - [Concurrent Conversation Writes](#concurrent-conversation-writes)
   - [Supplementary Memory Recommendation](#supplementary-memory-recommendation)
 - [Implementation Roadmap](#implementation-roadmap)
 - [Risks and Mitigations](#risks-and-mitigations)
@@ -582,6 +583,37 @@ Backend Storage:
 - Full-text search is not semantic search. It finds keyword matches, not conceptual similarities. (Could be upgraded to vector search later if needed.)
 - The post-write indexing hook adds a small amount of complexity to the MCP bridge.
 
+### Concurrent Conversation Writes
+
+A subtle but important issue arises when **multiple conversations are active simultaneously** and both attempt to update the supplementary memory. This can happen when you have two Claude windows open (e.g., a Desktop App session and a Claude.ai session, or two Desktop App windows), or even when a long-running conversation overlaps with a quick one.
+
+**The problem is not torn writes** — a mutex or file lock in the MCP bridge can prevent two writes from interleaving at the byte level. The problem is **semantic divergence**: each conversation loads memory files at session start, works with a stale snapshot while the other conversation evolves, and then writes back its version of the files. The second write may silently overwrite changes from the first.
+
+**Severity depends on the overlap pattern:**
+
+| Scenario | Conflict Risk | Impact |
+|----------|--------------|--------|
+| **Non-overlapping topics** — Conversation A discusses Project Foo, Conversation B discusses Project Bar | Low | Content blocks are separate files (`blocks/project-foo.md` vs. `blocks/project-bar.md`). The only shared files are `core.md` and `index.md`, which are summaries — a later write that includes both projects' status is a superset of the earlier write. Minor information loss is possible if one conversation's `core.md` update overwrites the other's before it has learned about the other's changes. |
+| **Overlapping topics** — Both conversations discuss the same project | High | Both conversations load the same `blocks/project-foo.md` at session start, make independent changes, and write back their version. The second write clobbers the first, potentially losing decisions, context, or corrections from the other conversation. |
+| **Sequential with gap** — One conversation ends before the other starts | None | No conflict. The second conversation loads the first's final state. This is the common case for a single user. |
+| **Sequential with overlap** — One conversation is idle (no writes) while the other is active | Very Low | The idle conversation's stale snapshot only matters if it writes again later. If it does, it may overwrite the active conversation's changes to shared files. |
+
+**The `core.md` and `index.md` problem is the most common risk.** These files are updated by every conversation (they are global summaries). If Conversation A adds a new topic to the index and Conversation B doesn't know about it, B's next index write will lose A's new entry.
+
+**Mitigation strategies (from simplest to most complex):**
+
+1. **Operational discipline (recommended for now):** Avoid running memory-intensive conversations in parallel. For most single-user scenarios, this is natural — you focus on one conversation at a time, and the other is idle. The memory skill should include an instruction: *"Before writing to core.md or index.md, re-read the current version from disk to incorporate any changes made by other sessions since you last loaded it."* This "read-before-write" pattern dramatically reduces the stale snapshot window.
+
+2. **Append-only episodic logs:** For episodic memory (`blocks/episodic-*.md`), use an append-only pattern rather than overwriting. Each conversation appends a timestamped entry to the current month's episodic file. Appends from concurrent conversations interleave harmlessly (each entry is self-contained). The MCP bridge can implement this as an `append_file` tool or by reading, appending, and writing atomically under a lock.
+
+3. **Per-conversation session files with background merge:** Instead of writing directly to `core.md` and `index.md`, each conversation writes to a session-scoped file (e.g., `sessions/session-<id>.md`) containing its proposed updates. A background process (cron job or filesystem watcher) periodically merges session files into the canonical `core.md` and `index.md`, resolving conflicts by taking the union of changes. This is more complex but eliminates the "second write clobbers first" problem entirely.
+
+4. **Git-based merge:** Each conversation commits its changes to a Git branch. A background process merges branches into `main`, using Git's merge machinery (or a simple "accept both" strategy for independent line changes). This leverages Git's conflict detection and provides full audit trails. It requires the MCP bridge to support Git operations or a background script that watches for changes and commits them.
+
+5. **Move to Option 2 (dedicated memory server):** A dedicated MCP memory server can handle concurrent writes at the application level — e.g., by accepting fine-grained updates ("add this fact to Project Foo's block") rather than full-file overwrites. This is the cleanest solution but requires the most infrastructure.
+
+**Recommendation:** Start with strategy 1 (operational discipline + read-before-write) and strategy 2 (append-only episodic logs). These are sufficient for a single user who occasionally has overlapping conversations. If concurrent writes become a recurring problem in practice, upgrade to strategy 3 (session files with background merge) or strategy 4 (Git-based merge). Strategy 5 is a natural consequence of upgrading to Option 2, which is already on the deferred roadmap.
+
 ### Supplementary Memory Recommendation
 
 **Start with Option 1 (filesystem-only), plan for Option 3 (filesystem + search index).**
@@ -679,6 +711,7 @@ The proposed system is less automated than Letta (Claude must be instructed to m
 | Supplementary memory grows too large for filename-based retrieval (Option 1) | Medium | Low — degrades retrieval, not data | Planned upgrade path: add FTS5 search index (Option 3) when block count exceeds ~50. The index is a derived artifact and can be added without restructuring the memory files. |
 | Security incident via MCP bridge (unintended file access/command execution) | Low | High | Strict allowlists, operation logging, optional confirmation prompts for destructive operations. Run the bridge under a restricted user account. B1 has lower risk than B2 (no network exposure). Memory files in `~/.claude-agent-memory/` should be included in the allowlist but backed up via Git in case of accidental corruption. |
 | Context window consumed by supplementary memory reduces conversation quality | Medium | Medium | Layer 1 (built-in memory) is Anthropic-managed and compact (~500–2,000 tokens). Layer 2 overhead is bounded: `core.md` + `index.md` loaded at session start (~1,000–2,000 tokens), content blocks loaded on demand only. Aggressive summarization in `core.md` keeps the fixed cost low. Total per-session overhead (both layers + MCP tool definitions) should remain under ~4,000 tokens. |
+| Concurrent conversations corrupt supplementary memory via interleaved writes | Medium | Medium — silent data loss in shared files | Operational discipline (avoid parallel memory-intensive conversations) + read-before-write pattern in the memory skill. Append-only pattern for episodic logs eliminates conflicts for that file type. Upgrade to session-file merge or Git-based merge if concurrent writes become a recurring problem. See [Concurrent Conversation Writes](#concurrent-conversation-writes). |
 | Anthropic's built-in memory improves enough to make Layer 2 unnecessary | Low | Low — positive outcome | Monitor Anthropic's memory improvements. If built-in memory grows to support structured project context, episodic recall, and search, the supplementary layer can be retired gracefully. Markdown files remain as a portable archive regardless. |
 
 ## Relation to Existing Design
@@ -715,4 +748,6 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 9. **Layer 1 / Layer 2 content boundary:** What content belongs in Layer 1 (built-in memory) vs. Layer 2 (supplementary)? The design says Layer 1 handles identity/preferences and Layer 2 handles project context/episodic memory, but the boundary is fuzzy. For example, should "Fran is working on an MCP bridge server" live in Layer 1 (high-level project awareness) or Layer 2 (project detail)? Should the memory skill explicitly instruct Claude on how to allocate content between layers?
 
-10. **Supplementary memory portability across Claude interfaces:** The Layer 2 memory files live on the local filesystem. They are accessible from B1 (Desktop App via MCP bridge), B2 (Claude.ai via tunnel), and Architecture A (Claude Code Desktop via native filesystem). But what about Claude.ai's cloud VM (used for file creation and code execution)? The cloud VM cannot access the local filesystem. If Claude is asked to reference supplementary memory during a cloud VM task, it would need to read the memory via MCP tools *before* switching to VM execution. Is this workflow ergonomic, or does it create friction?
+10. **Concurrent write detection:** The [Concurrent Conversation Writes](#concurrent-conversation-writes) section recommends read-before-write as the primary mitigation. But can the MCP bridge detect when a file has been modified since the conversation last read it (i.e., an optimistic concurrency check)? If so, the bridge could warn Claude that the file has changed, prompting it to re-read before writing. This would be a lightweight alternative to full locking or session-file merging. Implementation could be as simple as tracking `mtime` per file per MCP session and rejecting writes when `mtime` has advanced.
+
+11. **Supplementary memory portability across Claude interfaces:** The Layer 2 memory files live on the local filesystem. They are accessible from B1 (Desktop App via MCP bridge), B2 (Claude.ai via tunnel), and Architecture A (Claude Code Desktop via native filesystem). But what about Claude.ai's cloud VM (used for file creation and code execution)? The cloud VM cannot access the local filesystem. If Claude is asked to reference supplementary memory during a cloud VM task, it would need to read the memory via MCP tools *before* switching to VM execution. Is this workflow ergonomic, or does it create friction?
