@@ -146,9 +146,9 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 │           │  MCP Protocol (stdio — local, no tunnel)        │
 │           ▼                                                 │
 │  ┌──────────────────────────────────────────────────┐       │
-│  │        Local MCP Bridge Server                    │      │
-│  │        (launched as subprocess by Desktop App)     │     │
-│  │                                                   │      │
+│  │        Local MCP Bridge Server                   │       │
+│  │        (launched as subprocess by Desktop App)   │       │
+│  │                                                  │       │
 │  │  ┌──────────┐  ┌──────────┐  ┌───────────────┐   │       │
 │  │  │Filesystem│  │ Network  │  │Command Exec   │   │       │
 │  │  │  Tools   │  │  Tools   │  │   Tools       │   │       │
