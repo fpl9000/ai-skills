@@ -26,6 +26,13 @@
   - [Option 3: Hybrid — Filesystem Core with Search Index](#option-3-hybrid--filesystem-core-with-search-index)
   - [Concurrent Conversation Writes](#concurrent-conversation-writes)
   - [Supplementary Memory Recommendation](#supplementary-memory-recommendation)
+- [Sub-Agent Architecture](#sub-agent-architecture)
+  - [Design Constraints](#design-constraints)
+  - [The spawn_agent Tool](#the-spawn_agent-tool)
+  - [Execution Model: Synchronous with Sequential Spawning](#execution-model-synchronous-with-sequential-spawning)
+  - [Default System Preamble](#default-system-preamble)
+  - [Sub-Agent Memory Access](#sub-agent-memory-access)
+  - [Relationship to Claude Code's Built-in Memory](#relationship-to-claude-codes-built-in-memory)
 - [Implementation Roadmap](#implementation-roadmap)
 - [Risks and Mitigations](#risks-and-mitigations)
 - [Relation to Existing Design](#relation-to-existing-design)
@@ -36,6 +43,8 @@
 The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps, with a recommendation to pursue **Architecture B** (Local MCP Bridge) as the primary strategy. Architecture B has two variants: **B1** uses the Claude Desktop App with a local MCP bridge (no tunnel required, simpler setup, available today) and **B2** uses Claude.ai with the same MCP bridge exposed via a secure tunnel (best UI, but adds tunnel complexity). **Architecture A** (Claude Code Desktop + Stateful Memory Skill) remains as a fallback that requires no MCP infrastructure at all.
 
 Because Anthropic's built-in memory is limited (~500–2,000 tokens — adequate for identity and preferences, but far too small for deep project context, episodic recall, or technical notes), this proposal also defines a **two-layer memory strategy**. Layer 1 is Anthropic's built-in memory (automatic, compact, always present). Layer 2 is a supplementary system using the three-tier markdown memory model from the [existing design document](stateful-agent-skill-design.md), accessed via the MCP bridge's filesystem tools. This layered approach brings Claude closer to the deep memory capabilities of systems like Letta (formerly MemGPT) while maintaining transparency (human-readable markdown files) and portability (Git-backed, no vendor lock-in).
+
+The proposal additionally defines a **sub-agent architecture** for delegating focused tasks to ephemeral Claude Code CLI instances via a `spawn_agent` MCP tool. Sub-agents are one-shot (fire-and-forget), have no memory of their own, and return results to the primary agent for incorporation into the conversation and optional persistence to Layer 2 memory.
 
 ## Requirements
 
@@ -644,6 +653,166 @@ Option 2 (dedicated MCP memory server) is the most powerful but also the most co
 
 The proposed system is less automated than Letta (Claude must be instructed to manage memory, while Letta's agent does it autonomously) and lacks semantic search out of the box. But it is simpler, more transparent, and integrates naturally with Architecture B's MCP bridge without requiring a separate agent framework.
 
+## Sub-Agent Architecture
+
+The primary design focuses on a single Claude conversation interacting with the local machine via the MCP bridge. But some workflows benefit from **delegating focused tasks to sub-agents** — ephemeral Claude instances that perform a specific job and return the result. For example, the primary conversation might spawn a sub-agent to search a codebase for a pattern, review a document for errors, or run a test suite and summarize the results, all without leaving the main conversation flow.
+
+### Design Constraints
+
+The sub-agent design follows these principles:
+
+1. **One-shot execution.** Each sub-agent receives a task, performs it, and terminates. It does not maintain an ongoing dialogue with the user or the primary agent. If it cannot complete the task, it returns a response explaining what additional information is needed — and the primary agent decides whether to retry with more context.
+
+2. **No memory of its own.** Sub-agents do not have Layer 1 memory (they are invoked via Claude Code CLI, which does not receive Anthropic's built-in memory injection) and do not write to Layer 2 memory. They are stateless workers. The primary agent is the sole writer to the supplementary memory store, preserving the concurrency model described in [Concurrent Conversation Writes](#concurrent-conversation-writes).
+
+3. **Read-only access to Layer 2 (optional).** Sub-agents *may* read Layer 2 memory files for context (e.g., to understand a project's architecture before reviewing its code), but they never write to them. The primary agent controls what context to provide — either by passing it inline in the task prompt, or by instructing the sub-agent to read specific files from `~/.claude-agent-memory/`.
+
+4. **Full local access via native Claude Code capabilities.** Sub-agents are invoked via `claude -p` (Claude Code CLI in pipe/prompt mode), which natively provides filesystem access, command execution, and network access. They do **not** go through the MCP bridge — they run directly on the local machine as Claude Code processes. This means sub-agents have the same local access as Architecture A, with no MCP overhead.
+
+5. **Scoped and sandboxed.** The `spawn_agent` tool can restrict sub-agents to a specific working directory and provide scope boundaries via the system prompt (e.g., "do not modify files outside `/tmp/agent-workspace/`"). This prevents a sub-agent from making unintended changes to the user's filesystem.
+
+### The `spawn_agent` Tool
+
+The MCP bridge exposes a `spawn_agent` tool that the primary Claude conversation can call like any other tool. Under the hood, it invokes Claude Code CLI in non-interactive mode.
+
+**Tool interface:**
+
+```
+spawn_agent(
+  task: string,                    // The task description (becomes the prompt to claude -p)
+  system_prompt: string | null,    // Optional task-specific instructions (appended to default preamble)
+  working_directory: string | null, // Working directory for the sub-agent (default: user's home)
+  timeout_seconds: number | null,  // Maximum execution time (default: 120)
+  allow_memory_read: boolean       // Whether sub-agent may read ~/.claude-agent-memory/ (default: false)
+) -> string                        // The sub-agent's text response
+```
+
+**Execution flow:**
+
+1. The primary agent calls `spawn_agent(task, ...)` via the MCP bridge.
+2. The bridge constructs a `claude -p` invocation:
+   - The `task` becomes the prompt.
+   - The default system preamble (see below) plus any `system_prompt` are passed via `--append-system-prompt`.
+   - `working_directory` sets the CWD for the subprocess.
+3. The bridge launches the Claude Code CLI subprocess, waits for it to complete (or times out), and captures stdout.
+4. The bridge returns the sub-agent's text response to the primary agent as the tool result.
+5. The primary agent incorporates the result into its conversation — summarizing it, acting on it, or persisting relevant findings to Layer 2 memory.
+
+**Example invocations from the primary agent's perspective:**
+
+Simple file search (no system prompt needed):
+```
+spawn_agent(
+  task: "Find all Python files under ~/projects/foo that import the `requests` library. List each file with the line number of the import.",
+  working_directory: "~/projects/foo",
+  timeout_seconds: 60
+)
+```
+
+Architecture review with memory read access:
+```
+spawn_agent(
+  task: "Review the architecture described in ~/.claude-agent-memory/blocks/mcp-bridge.md and identify any gaps in error handling. Focus on the command execution tools.",
+  system_prompt: "Return your analysis as a markdown list. Each finding should have a severity (high/medium/low) and a one-line recommendation.",
+  allow_memory_read: true,
+  timeout_seconds: 300
+)
+```
+
+Test suite runner:
+```
+spawn_agent(
+  task: "Run `npm test` in this directory. If any tests fail, analyze the failures and suggest fixes.",
+  working_directory: "~/projects/mcp-bridge",
+  timeout_seconds: 180
+)
+```
+
+### Execution Model: Synchronous with Sequential Spawning
+
+MCP tool calls are **synchronous** — when the primary agent calls `spawn_agent`, the MCP bridge blocks until the sub-agent process completes (or times out), then returns the result. The primary agent cannot do anything else while waiting. This is a constraint of the MCP protocol, not a design choice.
+
+This means **multiple sub-agents run sequentially, not in parallel.** The primary agent can spawn as many sub-agents as it wants, but each one must complete before the next can start. If the primary agent spawns three sub-agents that each take 60 seconds, the total wall-clock time is ~180 seconds (the sum), not ~60 seconds (the max).
+
+**When sequential execution is fine:**
+
+- **Dependent tasks** — when the second sub-agent needs the first sub-agent's result as input (e.g., "find the relevant files" → "review those files for bugs"). These are inherently sequential regardless of the execution model.
+- **Low sub-agent count** — spawning 2–3 sub-agents sequentially adds a few minutes at most, which is tolerable in a human-in-the-loop conversation.
+- **Most real-world workflows** — in practice, the primary agent typically spawns one sub-agent for a focused task, incorporates the result, and continues the conversation.
+
+**When sequential execution hurts:**
+
+- **Embarrassingly parallel tasks** — like "search these 5 codebases for the same pattern" or "review these 4 independent files." These tasks have no dependencies and would complete much faster if run simultaneously.
+- **High sub-agent count** — spawning 10+ sequential sub-agents could mean 10+ minutes of waiting, which degrades the conversational experience.
+
+**Upgrade path — asynchronous execution:**
+
+If parallel sub-agents prove valuable, the MCP bridge could be extended with an async pattern:
+
+```
+// Launch without blocking
+spawn_agent_async(task: "...", ...) -> { job_id: "abc123", status: "running" }
+
+// Check status (non-blocking)
+check_agent(job_id: "abc123") -> { status: "running" } | { status: "complete", result: "..." }
+
+// Block until done
+wait_agent(job_id: "abc123") -> { status: "complete", result: "..." }
+```
+
+This would allow the primary agent to spawn several sub-agents, optionally continue the conversation while they run, then collect results. The tradeoff is significant added complexity in the bridge (process lifecycle management, result caching, cleanup of abandoned jobs) and in the primary agent's workflow (it must remember outstanding jobs and collect them). This is deferred unless sequential execution proves to be a bottleneck in practice.
+
+### Default System Preamble
+
+The MCP bridge injects a default system preamble into every sub-agent invocation via `--append-system-prompt`. This preamble establishes the sub-agent's role and constraints without requiring the primary agent to repeat boilerplate on every call.
+
+```
+You are a sub-agent performing a focused task on behalf of a primary Claude conversation.
+
+Rules:
+- Complete the assigned task and return your findings as text output.
+- Be concise and structured. Prefer markdown formatting for readability.
+- Do NOT modify files under ~/.claude-agent-memory/. This directory is read-only for you.
+- Do NOT commit to Git or push to any remote repository unless the task explicitly asks for it.
+- If you cannot complete the task with the information provided, return a clear explanation
+  of what additional information or context you need.
+- Do NOT engage in open-ended exploration. Stay focused on the assigned task.
+```
+
+If `allow_memory_read` is `false`, the preamble additionally includes:
+```
+- Do NOT read files under ~/.claude-agent-memory/. You do not have access to the memory store.
+```
+
+The primary agent's optional `system_prompt` parameter is appended after this preamble, allowing task-specific instructions to override or extend the defaults.
+
+### Sub-Agent Memory Access
+
+The sub-agent memory model is intentionally restrictive:
+
+| Memory Layer | Sub-Agent Access | Rationale |
+|-------------|-----------------|----------|
+| **Layer 1** (Anthropic built-in) | ❌ Not available | Claude Code CLI does not receive built-in memory injection. This is an Anthropic platform limitation, not a design choice. |
+| **Layer 2** (supplementary files) | 🔒 Read-only (optional) | Controlled by `allow_memory_read`. When enabled, the sub-agent can read `~/.claude-agent-memory/` for project context. It never writes — the primary agent is the sole writer. |
+| **Claude Code auto-memory** | ⚠️ Available but separate | If `~/.claude/projects/<project>/memory/MEMORY.md` exists, Claude Code will load it automatically. This is Claude Code's own memory system and is **not** the same as our Layer 2 memory. See below. |
+
+**Why no write access?** Allowing sub-agents to write to Layer 2 would reintroduce the concurrent write problem — potentially worse than with multiple conversations, because sub-agents are automated and could be spawned in parallel. By making the primary agent the sole writer, we maintain a clean single-writer model for Layer 2.
+
+**What if a sub-agent discovers something worth remembering?** It returns the finding in its text response. The primary agent decides whether to persist it to Layer 2 memory. This is the fire-and-forget pattern: the sub-agent does the work, the primary agent manages the knowledge.
+
+### Relationship to Claude Code's Built-in Memory
+
+Claude Code has its own memory system (`~/.claude/CLAUDE.md`, `~/.claude/projects/<project>/memory/MEMORY.md`, and project-level `.claude/CLAUDE.md` files). These are **entirely separate** from our Layer 2 supplementary memory at `~/.claude-agent-memory/`.
+
+This separation is intentional:
+
+- **Different purposes.** Claude Code's memory is designed for coding instructions, project patterns, and tool preferences (e.g., "use pnpm, not npm"). Our Layer 2 memory is designed for deep project context, episodic recall, decision history, and cross-project knowledge.
+- **Different lifecycles.** Claude Code's auto-memory is managed by Claude Code itself (it writes to `MEMORY.md` as it discovers patterns). Our Layer 2 memory is managed by the primary agent following the memory skill's session lifecycle.
+- **Coupling risk.** Piggybacking on Claude Code's memory locations would couple our design to Claude Code's conventions, which Anthropic could change at any time. An independent directory (`~/.claude-agent-memory/`) is under our control.
+- **Scope isolation.** Claude Code's memory is loaded automatically at Claude Code session start (first 200 lines of `MEMORY.md`). If we put our Layer 2 content there, it would be loaded into every Claude Code session — including sub-agents that don't need it, wasting context window space.
+
+Sub-agents invoked via `claude -p` *will* receive Claude Code's own memory if it exists (e.g., `~/.claude/CLAUDE.md` user-level instructions). This is fine — those instructions are typically useful for any Claude Code session (coding conventions, tool preferences). The key point is that our Layer 2 memory is loaded only when explicitly requested, not automatically.
+
 ## Implementation Roadmap
 
 ```
@@ -663,9 +832,14 @@ The proposed system is less automated than Letta (Claude must be instructed to m
 │   └── Set up GitHub repo for memory backup (optional cron job for auto-commit)
 └── Begin using Architecture B1 with layered memory for daily work
 
-2026 Q2 — Expand tools, evaluate B2 upgrade, iterate on memory
+2026 Q2 — Expand tools, evaluate B2 upgrade, iterate on memory, add sub-agents
 ├── Expand MCP bridge tool set
 │   ├── Network tools (HTTP requests, curl-equivalent)
+│   ├── spawn_agent tool (invoke `claude -p` as subprocess)
+│   │   ├── Implement default system preamble (role, constraints, no-memory-writes)
+│   │   ├── Support optional system_prompt, working_directory, timeout, allow_memory_read
+│   │   ├── Test with representative tasks (file search, code review, test runner)
+│   │   └── Verify sub-agents cannot write to ~/.claude-agent-memory/
 │   └── Optional: confirmation prompts for destructive operations
 ├── Iterate on supplementary memory based on real-world usage
 │   ├── Tune memory skill prompts for better compliance (update frequency, summarization quality)
@@ -711,6 +885,8 @@ The proposed system is less automated than Letta (Claude must be instructed to m
 | Supplementary memory grows too large for filename-based retrieval (Option 1) | Medium | Low — degrades retrieval, not data | Planned upgrade path: add FTS5 search index (Option 3) when block count exceeds ~50. The index is a derived artifact and can be added without restructuring the memory files. |
 | Security incident via MCP bridge (unintended file access/command execution) | Low | High | Strict allowlists, operation logging, optional confirmation prompts for destructive operations. Run the bridge under a restricted user account. B1 has lower risk than B2 (no network exposure). Memory files in `~/.claude-agent-memory/` should be included in the allowlist but backed up via Git in case of accidental corruption. |
 | Context window consumed by supplementary memory reduces conversation quality | Medium | Medium | Layer 1 (built-in memory) is Anthropic-managed and compact (~500–2,000 tokens). Layer 2 overhead is bounded: `core.md` + `index.md` loaded at session start (~1,000–2,000 tokens), content blocks loaded on demand only. Aggressive summarization in `core.md` keeps the fixed cost low. Total per-session overhead (both layers + MCP tool definitions) should remain under ~4,000 tokens. |
+| Sub-agent escapes scope constraints (modifies files or memory it shouldn't) | Low | Medium — unintended side effects | Default system preamble explicitly prohibits memory writes and unscoped file changes. The `allow_memory_read` flag defaults to `false`. For additional hardening, the bridge could use OS-level controls (e.g., a read-only bind mount of `~/.claude-agent-memory/` for sub-agent processes). Timeout prevents runaway sub-agents. |
+| Sub-agent costs accumulate unexpectedly (API usage) | Medium | Low — financial, not data loss | Each `claude -p` invocation consumes API credits (or usage quota). The primary agent could spawn many sub-agents for a complex task. Mitigate with timeout limits, a per-session sub-agent count cap in the bridge, and monitoring of Claude Code usage in Settings > Usage. |
 | Concurrent conversations corrupt supplementary memory via interleaved writes | Medium | Medium — silent data loss in shared files | Operational discipline (avoid parallel memory-intensive conversations) + read-before-write pattern in the memory skill. Append-only pattern for episodic logs eliminates conflicts for that file type. Upgrade to session-file merge or Git-based merge if concurrent writes become a recurring problem. See [Concurrent Conversation Writes](#concurrent-conversation-writes). |
 | Anthropic's built-in memory improves enough to make Layer 2 unnecessary | Low | Low — positive outcome | Monitor Anthropic's memory improvements. If built-in memory grows to support structured project context, episodic recall, and search, the supplementary layer can be retired gracefully. Markdown files remain as a portable archive regardless. |
 
@@ -751,3 +927,11 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 10. **Concurrent write detection — should the MCP bridge enforce it?** The [Concurrent Conversation Writes](#concurrent-conversation-writes) section recommends read-before-write as the primary mitigation, relying on Claude following the skill's instructions. But the bridge could enforce this at the infrastructure level using optimistic concurrency: track each file's `mtime` (via the OS's standard `stat()` call) when the bridge serves a `read_file` request, then reject a subsequent `write_file` to the same path if `mtime` has advanced since the read (meaning another conversation modified the file in the interim). This would make stale-write detection automatic rather than depending on Claude's compliance. The tradeoff is added complexity in the bridge (per-session state tracking for `mtime` values) and the need to handle the rejection gracefully (Claude would need to re-read, merge, and retry). Is this worth building into the bridge from the start, or should it be deferred until concurrent writes prove to be a problem in practice?
 
 11. **Supplementary memory portability across Claude interfaces:** The Layer 2 memory files live on the local filesystem. They are accessible from B1 (Desktop App via MCP bridge), B2 (Claude.ai via tunnel), and Architecture A (Claude Code Desktop via native filesystem). But what about Claude.ai's cloud VM (used for file creation and code execution)? The cloud VM cannot access the local filesystem. If Claude is asked to reference supplementary memory during a cloud VM task, it would need to read the memory via MCP tools *before* switching to VM execution. Is this workflow ergonomic, or does it create friction?
+
+12. **~~Use of sub-agents~~** *(Resolved — see [Sub-Agent Architecture](#sub-agent-architecture)):* Sub-agents are implemented as one-shot Claude Code CLI invocations via a `spawn_agent` MCP tool. They have no memory of their own, optional read-only access to Layer 2, and return their results as text to the primary agent.
+
+13. **Sub-agent model selection:** The `spawn_agent` tool invokes `claude -p`, which uses whatever model Claude Code is configured to use. Should the primary agent be able to specify a model for the sub-agent (e.g., use Haiku for fast/cheap tasks, Opus for complex analysis)? Claude Code supports `--model` flag, so this is technically straightforward. The tradeoff is added complexity in the tool interface vs. cost optimization for simple tasks.
+
+14. **~~Sub-agent parallelism~~** *(Partially resolved — see [Execution Model](#execution-model-synchronous-with-sequential-spawning)):* The design is synchronous/sequential for now. Multiple sub-agents can be spawned but each must complete before the next starts. An async upgrade path (`spawn_agent_async` / `check_agent` / `wait_agent`) is sketched for future use if embarrassingly parallel tasks prove common enough to justify the added bridge complexity. Remaining question: if the async pattern is implemented, should there be a cap on concurrent sub-agents to limit API cost and system load?
+
+15. **Sub-agent output size:** A sub-agent's response becomes the tool result in the primary agent's context window. A verbose sub-agent could return thousands of tokens, consuming significant context. Should the bridge truncate sub-agent responses beyond a configurable limit? Should the default system preamble include a token budget (e.g., "keep your response under 2,000 words")?
