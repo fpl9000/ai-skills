@@ -686,8 +686,11 @@ spawn_agent(
                                    //   Passed to claude -p via --model flag
   working_directory: string | null, // Working directory for the sub-agent (default: user's home)
   timeout_seconds: number | null,  // Maximum execution time (default: 120)
+  max_output_tokens: number | null, // Truncate sub-agent response to this many tokens (default: 4000)
+                                   //   Approximate: uses chars/4 heuristic, not a tokenizer
+                                   //   Truncated responses get a marker appended
   allow_memory_read: boolean       // Whether sub-agent may read ~/.claude-agent-memory/ (default: false)
-) -> string                        // The sub-agent's text response
+) -> string                        // The sub-agent's text response (possibly truncated)
 ```
 
 **Execution flow:**
@@ -698,8 +701,9 @@ spawn_agent(
    - The default system preamble (see below) plus any `system_prompt` are passed via `--append-system-prompt`.
    - `working_directory` sets the CWD for the subprocess.
 3. The bridge launches the Claude Code CLI subprocess, waits for it to complete (or times out), and captures stdout.
-4. The bridge returns the sub-agent's text response to the primary agent as the tool result.
-5. The primary agent incorporates the result into its conversation — summarizing it, acting on it, or persisting relevant findings to Layer 2 memory.
+4. If the captured output exceeds `max_output_tokens` (estimated via a chars/4 heuristic), the bridge truncates from the end and appends: `\n\n[Output truncated at ~{N} tokens. Original output was ~{M} tokens.]`
+5. The bridge returns the (possibly truncated) text response to the primary agent as the tool result.
+6. The primary agent incorporates the result into its conversation — summarizing it, acting on it, or persisting relevant findings to Layer 2 memory.
 
 **Example invocations from the primary agent's perspective:**
 
@@ -775,6 +779,8 @@ You are a sub-agent performing a focused task on behalf of a primary Claude conv
 Rules:
 - Complete the assigned task and return your findings as text output.
 - Be concise and structured. Prefer markdown formatting for readability.
+- Keep your response under 2,000 words unless the task requires more detail. Your output
+  will be truncated if it exceeds a token budget, so prioritize the most important findings.
 - Do NOT modify files under ~/.claude-agent-memory/. This directory is read-only for you.
 - Do NOT commit to Git or push to any remote repository unless the task explicitly asks for it.
 - If you cannot complete the task with the information provided, return a clear explanation
@@ -937,7 +943,7 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 14. **~~Sub-agent parallelism~~** *(Partially resolved — see [Execution Model](#execution-model-synchronous-with-sequential-spawning)):* The design is synchronous/sequential for now. Multiple sub-agents can be spawned but each must complete before the next starts. An async upgrade path (`spawn_agent_async` / `check_agent` / `wait_agent`) is sketched for future use if embarrassingly parallel tasks prove common enough to justify the added bridge complexity. Remaining question: if the async pattern is implemented, should there be a cap on concurrent sub-agents to limit API cost and system load?
 
-15. **Sub-agent output size:** A sub-agent's response becomes the tool result in the primary agent's context window. A verbose sub-agent could return thousands of tokens, consuming significant context. Should the bridge truncate sub-agent responses beyond a configurable limit? Should the default system preamble include a token budget (e.g., "keep your response under 2,000 words")?
+15. **~~Sub-agent output size~~** *(Resolved):* The `spawn_agent` tool includes a `max_output_tokens` parameter (default: 4,000 tokens, estimated via a chars/4 heuristic). If a sub-agent's output exceeds this limit, the bridge truncates from the end and appends a marker indicating the truncation and original size. The default system preamble also includes a soft instruction ("keep your response under 2,000 words") so sub-agents self-limit before the hard truncation kicks in. The two mechanisms are complementary: the preamble is a soft hint, `max_output_tokens` is the hard ceiling that protects the primary agent's context window regardless of sub-agent behavior.
 
 16. **~~Coding Language for MCP Bridge~~** *(Resolved):* **Go** is the chosen language. It compiles to a single static binary with no runtime dependencies (no Node.js, no Python), has excellent subprocess management and concurrency primitives (goroutines), fast startup, and low memory footprint. The Go MCP ecosystem is supported by [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go). SQLite FTS5 integration (for Option 3) is available via `modernc.org/sqlite` (pure Go, no CGO) or `mattn/go-sqlite3` (CGO wrapper). The single-binary deployment model means installation is just copying the executable — no package managers, no virtual environments, no version conflicts.
 
