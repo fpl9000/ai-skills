@@ -136,7 +136,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 **Strategy:** Run a local MCP server that provides tools for filesystem operations, network requests, and command execution, then connect a Claude UI to it. The same MCP bridge server codebase supports two deployment variants, depending on which Claude UI you prefer.
 
-**The MCP bridge server** is a relatively simple program (likely written in TypeScript or Python, since MCP SDKs exist for both) that:
+**The MCP bridge server** is a relatively simple program written in **Go**, compiled to a single static binary with no runtime dependencies. The Go MCP ecosystem (notably [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go)) provides the necessary SDK support, and Go's standard library covers all other requirements (filesystem operations, HTTP server, JSON handling, process spawning, concurrency via goroutines). The bridge:
 
 - Exposes tools for filesystem operations (`read_file`, `write_file`, `list_dir`, `search`), network requests (`http_get`, `http_post`), and command execution (`run_command`, `run_script`).
 - Implements a configurable allowlist of permitted directories, commands, and network destinations (for security).
@@ -413,7 +413,7 @@ This is the simplest path to satisfying all five requirements. The Claude Deskto
 
 Specific actions:
 
-1. **Build the local MCP bridge server** using the TypeScript or Python MCP SDK. Implement stdio transport with tools for filesystem operations, network requests, and command execution.
+1. **Build the local MCP bridge server** in Go using the `mark3labs/mcp-go` SDK. Implement stdio transport with tools for filesystem operations, network requests, and command execution. The result is a single static binary with no runtime dependencies — no Node.js, no Python, no installation steps beyond copying the binary.
 2. **Register the bridge** in the Desktop App's MCP configuration file (`claude_desktop_config.json`).
 3. **Implement security controls**: directory allowlists, command allowlists, and operation logging.
 4. **Test and iterate** on the tool set — start with filesystem and command execution, then add network tools as needed.
@@ -817,7 +817,7 @@ Sub-agents invoked via `claude -p` *will* receive Claude Code's own memory if it
 
 ```
 2026 Q1 (Now) — Deploy Architecture B1 + Supplementary Memory (Option 1)
-├── Build local MCP bridge server (TypeScript or Python)
+├── Build local MCP bridge server (Go, single static binary)
 │   ├── Stdio transport (for Desktop App)
 │   ├── Filesystem tools (read, write, list, search)
 │   ├── Command execution tools (run_command, run_script)
@@ -935,3 +935,15 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 14. **~~Sub-agent parallelism~~** *(Partially resolved — see [Execution Model](#execution-model-synchronous-with-sequential-spawning)):* The design is synchronous/sequential for now. Multiple sub-agents can be spawned but each must complete before the next starts. An async upgrade path (`spawn_agent_async` / `check_agent` / `wait_agent`) is sketched for future use if embarrassingly parallel tasks prove common enough to justify the added bridge complexity. Remaining question: if the async pattern is implemented, should there be a cap on concurrent sub-agents to limit API cost and system load?
 
 15. **Sub-agent output size:** A sub-agent's response becomes the tool result in the primary agent's context window. A verbose sub-agent could return thousands of tokens, consuming significant context. Should the bridge truncate sub-agent responses beyond a configurable limit? Should the default system preamble include a token budget (e.g., "keep your response under 2,000 words")?
+
+16. **~~Coding Language for MCP Bridge~~** *(Resolved):* **Go** is the chosen language. It compiles to a single static binary with no runtime dependencies (no Node.js, no Python), has excellent subprocess management and concurrency primitives (goroutines), fast startup, and low memory footprint. The Go MCP ecosystem is supported by [`mark3labs/mcp-go`](https://github.com/mark3labs/mcp-go). SQLite FTS5 integration (for Option 3) is available via `modernc.org/sqlite` (pure Go, no CGO) or `mattn/go-sqlite3` (CGO wrapper). The single-binary deployment model means installation is just copying the executable — no package managers, no virtual environments, no version conflicts.
+
+17. **Remote access via Telegram, Discord, and Signal (watch this space):** It would be valuable to have remote access to the agent from a phone via messaging apps, similar to what LettaBot and OpenClaw provide. Two implementation paths were explored:
+
+    - **`claude -p` bot:** A messaging bot receives inbound messages and invokes Claude Code CLI (`claude -p`) with Layer 2 memory loaded via `--append-system-prompt`. This is fully programmatic and reliable, but sub-agents invoked this way have no Layer 1 memory, no Claude Desktop UI, and limited conversational continuity (each message is either a one-shot invocation or requires the bot to manage conversation history). Output is restricted to plain text/markdown — no artifacts, though images could be sent via the messaging API.
+
+    - **UI automation via AutoHotkey (inbound) + MCP tool (outbound):** An AutoHotkey script injects Telegram messages directly into Claude Desktop via `SendInput`, giving the bot full access to the Desktop App's capabilities (Layer 1 memory, MCP bridge, artifacts). Claude sends its response back to Telegram via a `send_message` MCP tool. This reuses the entire existing infrastructure but is fragile — UI automation depends on timing (`Sleep`), window focus, and app UI stability, with no reliable way to detect when Claude Desktop is ready for input.
+
+    A deeper problem blocks both paths from being ideal: **MCP is strictly client-initiated.** The bridge cannot asynchronously push a prompt into Claude Desktop — it can only respond when Claude calls a tool. There is no server-initiated prompting capability in the MCP protocol. Until Anthropic adds such a capability (or the Claude Desktop App exposes a programmatic interface for injecting prompts, e.g., via an IPC channel or local HTTP endpoint), fully seamless remote access through the Desktop App is not achievable.
+
+    **Status: Not implementing now.** Revisit if any of the following change: (a) the MCP protocol adds server-initiated prompting or a push notification mechanism, (b) Claude Desktop exposes a local API or automation interface, or (c) `claude -p` gains session resumption support (`--continue`) that works reliably enough to provide conversational continuity for a messaging bot.
