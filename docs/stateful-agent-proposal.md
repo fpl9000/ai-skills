@@ -40,7 +40,7 @@
 
 ## Executive Summary
 
-The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps, with a recommendation to pursue **Architecture B** (Local MCP Bridge) as the primary strategy. Architecture B has two variants: **B1** uses the Claude Desktop App with a local MCP bridge (no tunnel required, simpler setup, available today) and **B2** uses Claude.ai with the same MCP bridge exposed via a secure tunnel (best UI, but adds tunnel complexity). **Architecture A** (Claude Code Desktop + Stateful Memory Skill) remains as a fallback that requires no MCP infrastructure at all.
+The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps. The chosen architecture is **B1: Claude Desktop App + Local MCP Bridge** — a Go-based MCP bridge server running locally via stdio, providing filesystem, network, and command access to the Claude Desktop App. No tunnel, no cloud dependency for local operations, and a single static binary with no runtime dependencies. **Architecture A** (Claude Code Desktop + Stateful Memory Skill) remains as a fallback that requires no MCP infrastructure at all. **Architecture B2** (Claude.ai + tunnel) is documented as a potential future upgrade if the Desktop App's UI proves insufficient, but is not planned for initial implementation.
 
 Because Anthropic's built-in memory is limited (~500–2,000 tokens — adequate for identity and preferences, but far too small for deep project context, episodic recall, or technical notes), this proposal also defines a **two-layer memory strategy**. Layer 1 is Anthropic's built-in memory (automatic, compact, always present). Layer 2 is a supplementary system using the three-tier markdown memory model from the [existing design document](stateful-agent-skill-design.md), accessed via the MCP bridge's filesystem tools. This layered approach brings Claude closer to the deep memory capabilities of systems like Letta (formerly MemGPT) while maintaining transparency (human-readable markdown files) and portability (Git-backed, no vendor lock-in).
 
@@ -405,11 +405,11 @@ Architecture B is the **recommended approach**. Start with **B1** (Desktop App, 
 
 ## Recommendation
 
-### Primary Strategy (Now): Architecture B1
+### Chosen Architecture: B1 (Claude Desktop App + Local MCP Bridge)
 
-**Build a local MCP bridge server and connect it to the Claude Desktop App via stdio.**
+**Build a local MCP bridge server in Go and connect it to the Claude Desktop App via stdio.**
 
-This is the simplest path to satisfying all five requirements. The Claude Desktop App provides built-in memory and a rich GUI. A local MCP bridge server provides local filesystem, network, and command access. No tunnel is needed — the Desktop App launches the bridge as a local subprocess.
+This is the chosen architecture for implementation. It is the simplest path to satisfying all five requirements. The Claude Desktop App provides built-in memory and a rich GUI. A local MCP bridge server provides local filesystem, network, and command access. No tunnel is needed — the Desktop App launches the bridge as a local subprocess.
 
 Specific actions:
 
@@ -418,11 +418,11 @@ Specific actions:
 3. **Implement security controls**: directory allowlists, command allowlists, and operation logging.
 4. **Test and iterate** on the tool set — start with filesystem and command execution, then add network tools as needed.
 
-### Upgrade Path: Architecture B2
+### Potential Future Upgrade: Architecture B2
 
-**If the Desktop App's UI limitations or stability issues become frustrating, upgrade to B2 by adding a tunnel and switching to Claude.ai.**
+**Not planned for initial implementation.** If the Desktop App's UI limitations or stability issues become frustrating, B2 remains available as an upgrade path — add a tunnel and switch to Claude.ai.
 
-The same MCP bridge codebase supports both stdio (B1) and Streamable HTTP (B2) transports. The upgrade path is:
+The same MCP bridge codebase supports both stdio (B1) and Streamable HTTP (B2) transports. The upgrade steps would be:
 
 1. **Add Streamable HTTP transport** to the bridge (or enable it if already built with dual-transport support).
 2. **Configure a secure tunnel** (Cloudflare Tunnel is recommended for stability and zero-cost for personal use; ngrok or Tailscale Funnel are alternatives) to expose the bridge at a stable URL.
@@ -681,6 +681,9 @@ The MCP bridge exposes a `spawn_agent` tool that the primary Claude conversation
 spawn_agent(
   task: string,                    // The task description (becomes the prompt to claude -p)
   system_prompt: string | null,    // Optional task-specific instructions (appended to default preamble)
+  model: string | null,            // Model for the sub-agent (default: Claude Code's configured model)
+                                   //   e.g., "sonnet" for routine tasks, "opus" for complex analysis
+                                   //   Passed to claude -p via --model flag
   working_directory: string | null, // Working directory for the sub-agent (default: user's home)
   timeout_seconds: number | null,  // Maximum execution time (default: 120)
   allow_memory_read: boolean       // Whether sub-agent may read ~/.claude-agent-memory/ (default: false)
@@ -906,17 +909,17 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 ## Open Questions
 
-1. **MCP tunnel security (B2 only):** Architecture B2 requires a tunnel service to make the local MCP server reachable from Claude.ai. What are the security implications of exposing local filesystem and command execution behind a public URL? Cloudflare Tunnel offers access policies and authentication; ngrok offers IP allowlisting and webhook verification. Which approach provides the best security-to-convenience tradeoff? Note: This question does not apply to B1, which uses stdio with no network exposure.
+1. **~~MCP tunnel security (B2 only)~~** *(Resolved — not applicable):* B1 is the chosen architecture. B1 uses stdio with no network exposure, so tunnel security is not a concern. If B2 is pursued in the future, this question would need to be revisited.
 
-2. **Custom connector limitations (B2 only):** Claude.ai's custom connector support is relatively new. Are there rate limits, timeout restrictions, or tool-count limits that could constrain the MCP bridge's usefulness? The help docs mention that Advanced Research cannot invoke tools from connectors — are there other feature restrictions? Note: This question does not apply to B1, which uses the Desktop App's native MCP support.
+2. **~~Custom connector limitations (B2 only)~~** *(Resolved — not applicable):* B1 is the chosen architecture. B1 uses the Desktop App's native local MCP support, not Claude.ai's custom connector feature. If B2 is pursued in the future, this question would need to be revisited.
 
 3. **Desktop App MCP limitations (B1 only):** Are there tool-count limits, timeout restrictions, or other constraints on local MCP servers in the Claude Desktop App? How does the Desktop App handle MCP server crashes or restarts? Can the Desktop App be configured to auto-reconnect to a restarted MCP server?
 
 4. **Memory migration between layers:** With the two-layer memory system, Layer 1 (Anthropic's built-in) and Layer 2 (supplementary markdown files) will inevitably contain overlapping or contradictory information. What happens when they diverge? Should there be a periodic reconciliation process? Additionally, if transitioning from Architecture A (where the skill *is* the entire memory) to Architecture B (where the skill becomes Layer 2 only), some content currently in `core.md` should migrate into Layer 1 (built-in memory) — but Anthropic's import mechanism (if one exists) is undocumented. Anthropic has added experimental memory import/export support; monitor its maturity.
 
-5. **MCP authentication best practices (B2 only):** Claude.ai's custom connector flow supports OAuth 2.1 with optional client ID and secret. For a personal MCP bridge server, is full OAuth overkill? Would a simpler shared-secret approach suffice, or does the tunnel service's own authentication layer (e.g., Cloudflare Access) make application-level auth unnecessary? Note: B1 does not need authentication since the bridge is only accessible to the local Desktop App process.
+5. **~~MCP authentication best practices (B2 only)~~** *(Resolved — not applicable):* B1 is the chosen architecture. B1 does not need authentication since the bridge is only accessible to the local Desktop App process via stdio. If B2 is pursued in the future, this question would need to be revisited.
 
-6. **Desktop App UI convergence:** The Claude Desktop App already supports local MCP servers via stdio, which is what makes B1 possible without a tunnel. Is Anthropic actively working to converge the Desktop App's UI with Claude.ai's (artifacts, tool widgets, cloud VM features)? If the gap narrows significantly, B1 becomes the clear winner over B2 with no meaningful tradeoff.
+6. **Desktop App UI convergence (monitoring):** B1 is the chosen architecture. The Desktop App's UI is adequate but not as feature-rich as Claude.ai's. Monitor Anthropic's efforts to converge the Desktop App's UI with Claude.ai's (artifacts, tool widgets, cloud VM features). If the gap narrows, B1's position as the right choice is further strengthened. If the Desktop App stagnates, B2 becomes the fallback upgrade path.
 
 7. **~~Memory skill as supplementary store~~** *(Resolved — see [Supplementary Memory Strategy](#supplementary-memory-strategy)):* Yes, the three-tier markdown memory system is valuable as a Layer 2 supplement to Anthropic's built-in Layer 1 memory. The new section details three options for implementing this, with Option 1 (filesystem-only) recommended as the starting point.
 
@@ -926,11 +929,11 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 10. **Concurrent write detection — should the MCP bridge enforce it?** The [Concurrent Conversation Writes](#concurrent-conversation-writes) section recommends read-before-write as the primary mitigation, relying on Claude following the skill's instructions. But the bridge could enforce this at the infrastructure level using optimistic concurrency: track each file's `mtime` (via the OS's standard `stat()` call) when the bridge serves a `read_file` request, then reject a subsequent `write_file` to the same path if `mtime` has advanced since the read (meaning another conversation modified the file in the interim). This would make stale-write detection automatic rather than depending on Claude's compliance. The tradeoff is added complexity in the bridge (per-session state tracking for `mtime` values) and the need to handle the rejection gracefully (Claude would need to re-read, merge, and retry). Is this worth building into the bridge from the start, or should it be deferred until concurrent writes prove to be a problem in practice?
 
-11. **Supplementary memory portability across Claude interfaces:** The Layer 2 memory files live on the local filesystem. They are accessible from B1 (Desktop App via MCP bridge), B2 (Claude.ai via tunnel), and Architecture A (Claude Code Desktop via native filesystem). But what about Claude.ai's cloud VM (used for file creation and code execution)? The cloud VM cannot access the local filesystem. If Claude is asked to reference supplementary memory during a cloud VM task, it would need to read the memory via MCP tools *before* switching to VM execution. Is this workflow ergonomic, or does it create friction?
+11. **~~Supplementary memory portability across Claude interfaces~~** *(Resolved — simplified by B1 choice):* B1 is the chosen architecture. In B1, all operations happen locally via the MCP bridge — there is no cloud VM involved. The Desktop App does not use a cloud VM for code execution or file creation (unlike Claude.ai). Layer 2 memory files at `~/.claude-agent-memory/` are directly accessible via the bridge's filesystem tools at all times. The cloud VM portability concern only applied to B2 (Claude.ai), which is not planned for initial implementation.
 
 12. **~~Use of sub-agents~~** *(Resolved — see [Sub-Agent Architecture](#sub-agent-architecture)):* Sub-agents are implemented as one-shot Claude Code CLI invocations via a `spawn_agent` MCP tool. They have no memory of their own, optional read-only access to Layer 2, and return their results as text to the primary agent.
 
-13. **Sub-agent model selection:** The `spawn_agent` tool invokes `claude -p`, which uses whatever model Claude Code is configured to use. Should the primary agent be able to specify a model for the sub-agent (e.g., use Haiku for fast/cheap tasks, Opus for complex analysis)? Claude Code supports `--model` flag, so this is technically straightforward. The tradeoff is added complexity in the tool interface vs. cost optimization for simple tasks.
+13. **~~Sub-agent model selection~~** *(Resolved):* The `spawn_agent` tool includes an optional `model` parameter. The primary agent (running in Claude Desktop, typically on a capable model like Opus) selects the appropriate model for each sub-agent based on the task's complexity — e.g., Haiku or Sonnet for simple file searches and data extraction, Opus for complex analysis or code review. The bridge passes this to `claude -p` via the `--model` flag. This pattern — a smarter orchestrator model delegating to less capable (faster, cheaper) models for routine sub-tasks — is a well-established practice in multi-agent systems. If `model` is omitted, the sub-agent uses whatever model Claude Code is configured to use by default.
 
 14. **~~Sub-agent parallelism~~** *(Partially resolved — see [Execution Model](#execution-model-synchronous-with-sequential-spawning)):* The design is synchronous/sequential for now. Multiple sub-agents can be spawned but each must complete before the next starts. An async upgrade path (`spawn_agent_async` / `check_agent` / `wait_agent`) is sketched for future use if embarrassingly parallel tasks prove common enough to justify the added bridge complexity. Remaining question: if the async pattern is implemented, should there be a cap on concurrent sub-agents to limit API cost and system load?
 
