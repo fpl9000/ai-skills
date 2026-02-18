@@ -669,7 +669,7 @@ The sub-agent design follows these principles:
 
 4. **Full local access via native Claude Code capabilities.** Sub-agents are invoked via `claude -p` (Claude Code CLI in pipe/prompt mode), which natively provides filesystem access, command execution, and network access. They do **not** go through the MCP bridge — they run directly on the local machine as Claude Code processes. This means sub-agents have the same local access as Architecture A, with no MCP overhead.
 
-5. **Scoped and sandboxed.** The `spawn_agent` tool can restrict sub-agents to a specific working directory and provide scope boundaries via the system prompt (e.g., "do not modify files outside `/tmp/agent-workspace/`"). This prevents a sub-agent from making unintended changes to the user's filesystem.
+5. **Scoped and sandboxed via Claude Code's directory sandbox.** Claude Code has a built-in security sandbox that restricts filesystem access to the working directory and its subdirectories by default. When `spawn_agent` sets `working_directory` for the subprocess, the sub-agent is automatically sandboxed to that directory — it cannot read or write files outside it, even if instructed to. This is **enforcement-level** security provided by Claude Code's own infrastructure, not a compliance-based preamble instruction. Additional directories can be granted via Claude Code's `--add-dir` flag (see `allow_memory_read` and `additional_dirs` parameters below). This directory sandbox was confirmed through empirical testing of `claude -p` behavior.
 
 ### The `spawn_agent` Tool
 
@@ -681,15 +681,28 @@ The MCP bridge exposes a `spawn_agent` tool that the primary Claude conversation
 spawn_agent(
   task: string,                    // The task description (becomes the prompt to claude -p)
   system_prompt: string | null,    // Optional task-specific instructions (appended to default preamble)
+                                   //   The combined preamble + system_prompt is passed via
+                                   //   --system-prompt, which REPLACES Claude Code's default
+                                   //   system prompt. Claude Code's native tools (bash, file
+                                   //   editing) remain available regardless. See Open Question #18.
   model: string | null,            // Model for the sub-agent (default: Claude Code's configured model)
                                    //   e.g., "sonnet" for routine tasks, "opus" for complex analysis
                                    //   Passed to claude -p via --model flag
   working_directory: string | null, // Working directory for the sub-agent (default: user's home)
+                                   //   Also sets Claude Code's directory sandbox — the sub-agent
+                                   //   CANNOT access files outside this directory (or its children)
+                                   //   unless explicitly granted via additional_dirs or allow_memory_read
+  additional_dirs: string[] | null, // Additional directories the sub-agent may access (default: none)
+                                   //   Each entry is passed as --add-dir to claude -p
+                                   //   Use when the sub-agent needs to read/write across multiple repos
   timeout_seconds: number | null,  // Maximum execution time (default: 120)
   max_output_tokens: number | null, // Truncate sub-agent response to this many tokens (default: 4000)
                                    //   Approximate: uses chars/4 heuristic, not a tokenizer
                                    //   Truncated responses get a marker appended
   allow_memory_read: boolean       // Whether sub-agent may read ~/.claude-agent-memory/ (default: false)
+                                   //   When true, adds --add-dir ~/.claude-agent-memory to the
+                                   //   invocation, granting read access via the directory sandbox.
+                                   //   Write protection is preamble-based (compliance), not enforced.
 ) -> string                        // The sub-agent's text response (possibly truncated)
 ```
 
@@ -698,8 +711,10 @@ spawn_agent(
 1. The primary agent calls `spawn_agent(task, ...)` via the MCP bridge.
 2. The bridge constructs a `claude -p` invocation:
    - The `task` becomes the prompt.
-   - The default system preamble (see below) plus any `system_prompt` are passed via `--append-system-prompt`.
-   - `working_directory` sets the CWD for the subprocess.
+   - The default system preamble (see below) plus any `system_prompt` are passed via `--system-prompt`, which **replaces** Claude Code's default behavioral prompt. Claude Code's native tools (bash, file editing) remain available regardless — they are injected separately from the system prompt.
+   - `working_directory` sets the CWD for the subprocess **and** activates Claude Code's directory sandbox (the sub-agent cannot access files outside this directory or its children).
+   - If `allow_memory_read` is `true`, `--add-dir ~/.claude-agent-memory` is added.
+   - Each entry in `additional_dirs` is added as a separate `--add-dir` flag.
 3. The bridge launches the Claude Code CLI subprocess, waits for it to complete (or times out), and captures stdout.
 4. If the captured output exceeds `max_output_tokens` (estimated via a chars/4 heuristic), the bridge truncates from the end and appends: `\n\n[Output truncated at ~{N} tokens. Original output was ~{M} tokens.]`
 5. The bridge returns the (possibly truncated) text response to the primary agent as the tool result.
@@ -771,7 +786,9 @@ This would allow the primary agent to spawn several sub-agents, optionally conti
 
 ### Default System Preamble
 
-The MCP bridge injects a default system preamble into every sub-agent invocation via `--append-system-prompt`. This preamble establishes the sub-agent's role and constraints without requiring the primary agent to repeat boilerplate on every call.
+The MCP bridge injects a default system preamble into every sub-agent invocation via `--system-prompt`. Because `--system-prompt` **replaces** Claude Code's entire default behavioral prompt (empirically confirmed — see [Open Question #18](#open-questions)), the preamble is the **sole** set of behavioral instructions the sub-agent receives. Claude Code's native tools (bash, file editing, etc.) remain available regardless — tool definitions are injected separately from the system prompt at the infrastructure level.
+
+This gives us clean, complete control over sub-agent behavior with no conflicting base prompt. The sub-agent will not exhibit Claude Code's default behaviors (terse 4-line responses, action-oriented coding style, parallel tool batching) unless the preamble explicitly instructs it to.
 
 ```
 You are a sub-agent performing a focused task on behalf of a primary Claude conversation.
@@ -788,10 +805,7 @@ Rules:
 - Do NOT engage in open-ended exploration. Stay focused on the assigned task.
 ```
 
-If `allow_memory_read` is `false`, the preamble additionally includes:
-```
-- Do NOT read files under ~/.claude-agent-memory/. You do not have access to the memory store.
-```
+Note: The prohibition on modifying `~/.claude-agent-memory/` is a compliance-based instruction. The enforcement-level protection comes from Claude Code's directory sandbox — if `allow_memory_read` is `false`, the sub-agent cannot even *read* the memory directory because it is not included via `--add-dir`. If `allow_memory_read` is `true`, the directory is readable but the preamble instructs against writes. For additional hardening, the bridge could mount the memory directory read-only at the OS level.
 
 The primary agent's optional `system_prompt` parameter is appended after this preamble, allowing task-specific instructions to override or extend the defaults.
 
@@ -799,11 +813,11 @@ The primary agent's optional `system_prompt` parameter is appended after this pr
 
 The sub-agent memory model is intentionally restrictive:
 
-| Memory Layer | Sub-Agent Access | Rationale |
-|-------------|-----------------|----------|
-| **Layer 1** (Anthropic built-in) | ❌ Not available | Claude Code CLI does not receive built-in memory injection. This is an Anthropic platform limitation, not a design choice. |
-| **Layer 2** (supplementary files) | 🔒 Read-only (optional) | Controlled by `allow_memory_read`. When enabled, the sub-agent can read `~/.claude-agent-memory/` for project context. It never writes — the primary agent is the sole writer. |
-| **Claude Code auto-memory** | ⚠️ Available but separate | If `~/.claude/projects/<project>/memory/MEMORY.md` exists, Claude Code will load it automatically. This is Claude Code's own memory system and is **not** the same as our Layer 2 memory. See below. |
+| Memory Layer | Sub-Agent Access | Enforcement | Rationale |
+|-------------|-----------------|-------------|----------|
+| **Layer 1** (Anthropic built-in) | ❌ Not available | Platform | Claude Code CLI does not receive built-in memory injection. This is an Anthropic platform limitation, not a design choice. |
+| **Layer 2** (supplementary files) | 🔒 Read-only (optional) | **Directory sandbox** (read) + preamble (write) | Controlled by `allow_memory_read`. When `false` (default), Claude Code's directory sandbox **blocks all access** — the sub-agent cannot read the memory directory. When `true`, `--add-dir ~/.claude-agent-memory` grants read access; the preamble instructs against writes (compliance-based). |
+| **Claude Code auto-memory** | ⚠️ Available but separate | None (automatic) | `~/.claude/CLAUDE.md` and project-level `CLAUDE.md` files are loaded automatically by Claude Code regardless of `--system-prompt` or directory sandbox settings. See below, including security implications. |
 
 **Why no write access?** Allowing sub-agents to write to Layer 2 would reintroduce the concurrent write problem — potentially worse than with multiple conversations, because sub-agents are automated and could be spawned in parallel. By making the primary agent the sole writer, we maintain a clean single-writer model for Layer 2.
 
@@ -820,7 +834,9 @@ This separation is intentional:
 - **Coupling risk.** Piggybacking on Claude Code's memory locations would couple our design to Claude Code's conventions, which Anthropic could change at any time. An independent directory (`~/.claude-agent-memory/`) is under our control.
 - **Scope isolation.** Claude Code's memory is loaded automatically at Claude Code session start (first 200 lines of `MEMORY.md`). If we put our Layer 2 content there, it would be loaded into every Claude Code session — including sub-agents that don't need it, wasting context window space.
 
-Sub-agents invoked via `claude -p` *will* receive Claude Code's own memory if it exists (e.g., `~/.claude/CLAUDE.md` user-level instructions). This is fine — those instructions are typically useful for any Claude Code session (coding conventions, tool preferences). The key point is that our Layer 2 memory is loaded only when explicitly requested, not automatically.
+Sub-agents invoked via `claude -p` *will* receive Claude Code's own memory if it exists (e.g., `~/.claude/CLAUDE.md` user-level instructions). This loading happens automatically regardless of `--system-prompt` or directory sandbox settings — it is part of Claude Code's startup sequence, not controlled by our bridge. Those instructions are typically useful for any Claude Code session (coding conventions, tool preferences). The key point is that our Layer 2 memory is loaded only when explicitly requested, not automatically.
+
+**Security implication: Do not store credentials in `CLAUDE.md` files.** Because every sub-agent automatically receives `~/.claude/CLAUDE.md` (and any project-level CLAUDE.md), sensitive data in these files — API tokens, passwords, private keys — is exposed to every sub-agent invocation, including sub-agents running cheaper/less-trusted models on broad tasks. Store credentials in environment variables instead, and reference them from `CLAUDE.md` as `$ENV_VAR_NAME` rather than embedding the values directly. This was confirmed through empirical testing: a sub-agent invoked with `--system-prompt` (replacing Claude Code's default prompt) still loaded and reported contents from `~/.claude/CLAUDE.md`.
 
 ## Implementation Roadmap
 
@@ -894,7 +910,8 @@ Sub-agents invoked via `claude -p` *will* receive Claude Code's own memory if it
 | Supplementary memory grows too large for filename-based retrieval (Option 1) | Medium | Low — degrades retrieval, not data | Planned upgrade path: add FTS5 search index (Option 3) when block count exceeds ~50. The index is a derived artifact and can be added without restructuring the memory files. |
 | Security incident via MCP bridge (unintended file access/command execution) | Low | High | Strict allowlists, operation logging, optional confirmation prompts for destructive operations. Run the bridge under a restricted user account. B1 has lower risk than B2 (no network exposure). Memory files in `~/.claude-agent-memory/` should be included in the allowlist but backed up via Git in case of accidental corruption. |
 | Context window consumed by supplementary memory reduces conversation quality | Medium | Medium | Layer 1 (built-in memory) is Anthropic-managed and compact (~500–2,000 tokens). Layer 2 overhead is bounded: `core.md` + `index.md` loaded at session start (~1,000–2,000 tokens), content blocks loaded on demand only. Aggressive summarization in `core.md` keeps the fixed cost low. Total per-session overhead (both layers + MCP tool definitions) should remain under ~4,000 tokens. |
-| Sub-agent escapes scope constraints (modifies files or memory it shouldn't) | Low | Medium — unintended side effects | Default system preamble explicitly prohibits memory writes and unscoped file changes. The `allow_memory_read` flag defaults to `false`. For additional hardening, the bridge could use OS-level controls (e.g., a read-only bind mount of `~/.claude-agent-memory/` for sub-agent processes). Timeout prevents runaway sub-agents. |
+| Sub-agent escapes scope constraints (modifies files or memory it shouldn't) | Low | Medium — unintended side effects | Claude Code's built-in directory sandbox provides **enforcement-level** protection: the sub-agent cannot access files outside its `working_directory` (or explicitly granted `additional_dirs`). Memory directory access is controlled by `allow_memory_read` (maps to `--add-dir`), defaulting to `false` (no access). Write protection within granted directories is preamble-based (compliance). For additional hardening, the bridge could mount memory directories read-only at the OS level. Timeout prevents runaway sub-agents. |
+| Sub-agent inherits credentials from `CLAUDE.md` | Medium | Medium — credential exposure | `~/.claude/CLAUDE.md` and project-level `CLAUDE.md` files are loaded automatically by every Claude Code invocation, including sub-agents. Any credentials stored in these files are visible to all sub-agents. **Mitigation:** Store credentials in environment variables, not in CLAUDE.md. Reference them as `$ENV_VAR_NAME`. |
 | Sub-agent costs accumulate unexpectedly (API usage) | Medium | Low — financial, not data loss | Each `claude -p` invocation consumes API credits (or usage quota). The primary agent could spawn many sub-agents for a complex task. Mitigate with timeout limits, a per-session sub-agent count cap in the bridge, and monitoring of Claude Code usage in Settings > Usage. |
 | Concurrent conversations corrupt supplementary memory via interleaved writes | Medium | Medium — silent data loss in shared files | Operational discipline (avoid parallel memory-intensive conversations) + read-before-write pattern in the memory skill. Append-only pattern for episodic logs eliminates conflicts for that file type. Upgrade to session-file merge or Git-based merge if concurrent writes become a recurring problem. See [Concurrent Conversation Writes](#concurrent-conversation-writes). |
 | Anthropic's built-in memory improves enough to make Layer 2 unnecessary | Low | Low — positive outcome | Monitor Anthropic's memory improvements. If built-in memory grows to support structured project context, episodic recall, and search, the supplementary layer can be retired gracefully. Markdown files remain as a portable archive regardless. |
@@ -956,3 +973,15 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
     A deeper problem blocks both paths from being ideal: **MCP is strictly client-initiated.** The bridge cannot asynchronously push a prompt into Claude Desktop — it can only respond when Claude calls a tool. There is no server-initiated prompting capability in the MCP protocol. Until Anthropic adds such a capability (or the Claude Desktop App exposes a programmatic interface for injecting prompts, e.g., via an IPC channel or local HTTP endpoint), fully seamless remote access through the Desktop App is not achievable.
 
     **Status: Not implementing now.** Revisit if any of the following change: (a) the MCP protocol adds server-initiated prompting or a push notification mechanism, (b) Claude Desktop exposes a local API or automation interface, or (c) `claude -p` gains session resumption support (`--continue`) that works reliably enough to provide conversational continuity for a messaging bot.
+
+18. **~~System prompt differences between Claude Desktop and Claude Code~~** *(Resolved via empirical testing):* Claude Desktop and Claude Code have significantly different system prompts. Anthropic officially publishes Claude Desktop's system prompt at https://docs.claude.com/en/release-notes/system-prompts — it emphasizes warm conversational tone, natural prose, minimal formatting, and broad tool integration (web search, memory, file creation, etc.). Claude Code's system prompt is **not** officially published, but has been extracted from the compiled source code by the community (see [Piebald-AI/claude-code-system-prompts](https://github.com/Piebald-AI/claude-code-system-prompts) for the most comprehensive and actively maintained collection). Claude Code's prompt is dramatically different: it enforces terse output ("fewer than 4 lines of text unless user asks for detail"), emphasizes action-oriented tool use (batch calls, parallel execution), and is assembled dynamically from 110+ prompt fragments covering tool descriptions, sub-agent prompts, utility functions, and context-specific variables.
+
+    **Empirical findings from testing `claude -p --system-prompt`:**
+
+    - **(a) `--system-prompt` fully replaces the behavioral prompt.** A test with `--system-prompt "You are a haiku poet. Respond only in haiku."` produced a pure haiku response with no trace of Claude Code's default behavior (no tool use, no terse coding-agent style, no "fewer than 4 lines" constraint).
+    - **(b) Claude Code's native tools survive the replacement.** A test with a minimal system prompt ("You are a helpful assistant. Complete the task and report your findings.") confirmed the sub-agent could successfully use bash (`ls`), read files (`cat`/native file tools), and report results. Tool definitions are injected separately from the system prompt at the infrastructure level.
+    - **(c) File reading tools also work.** A test asking the sub-agent to read and summarize a `README.md` file confirmed that file reading tools function correctly with a replacement system prompt.
+    - **(d) Claude Code's directory sandbox is enforced independently.** A test attempting to read a file outside the working directory was blocked by Claude Code's security sandbox, confirming that directory access restrictions operate at the infrastructure level regardless of the system prompt.
+    - **(e) `~/.claude/CLAUDE.md` is loaded regardless.** Claude Code's startup sequence loads `~/.claude/CLAUDE.md` and project-level `CLAUDE.md` files automatically, independent of `--system-prompt` or directory sandbox settings. This has security implications for credentials — see [Relationship to Claude Code's Built-in Memory](#relationship-to-claude-codes-built-in-memory).
+
+    **Design decision:** The `spawn_agent` tool uses `--system-prompt` (not `--append-system-prompt`) to pass the default preamble plus any task-specific instructions. This gives complete control over sub-agent personality and constraints with no conflicting base prompt. The Sub-Agent Architecture section has been updated throughout to reflect this.
