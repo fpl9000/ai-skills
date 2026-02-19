@@ -33,6 +33,7 @@
   - [Default System Preamble](#default-system-preamble)
   - [Sub-Agent Memory Access](#sub-agent-memory-access)
   - [Relationship to Claude Code's Built-in Memory](#relationship-to-claude-codes-built-in-memory)
+  - [Recommended CLAUDE.md Content for Sub-Agents](#recommended-claudemd-content-for-sub-agents)
 - [Implementation Roadmap](#implementation-roadmap)
 - [Risks and Mitigations](#risks-and-mitigations)
 - [Relation to Existing Design](#relation-to-existing-design)
@@ -838,6 +839,71 @@ Sub-agents invoked via `claude -p` *will* receive Claude Code's own memory if it
 
 **Security implication: Do not store credentials in `CLAUDE.md` files.** Because every sub-agent automatically receives `~/.claude/CLAUDE.md` (and any project-level CLAUDE.md), sensitive data in these files — API tokens, passwords, private keys — is exposed to every sub-agent invocation, including sub-agents running cheaper/less-trusted models on broad tasks. Store credentials in environment variables instead, and reference them from `CLAUDE.md` as `$ENV_VAR_NAME` rather than embedding the values directly. This was confirmed through empirical testing: a sub-agent invoked with `--system-prompt` (replacing Claude Code's default prompt) still loaded and reported contents from `~/.claude/CLAUDE.md`.
 
+### Recommended CLAUDE.md Content for Sub-Agents
+
+Since `~/CLAUDE.md` is loaded into every Claude Code invocation — including every sub-agent spawned by the MCP bridge — its content should be optimized for the sub-agent use case. In the B1 architecture, Claude Code CLI is used exclusively as a sub-agent runtime, not as a primary UI. The CLAUDE.md content should therefore be:
+
+- **Lean.** Every token in CLAUDE.md is a fixed tax on every sub-agent invocation, regardless of task relevance. The file should contain only what is broadly useful across sub-agent tasks. Aim for under 500 tokens (~400 words).
+- **Environment-focused.** Sub-agents need to know how to operate correctly on the host machine: OS type, shell behavior, pathname conventions, available tools. This prevents common errors (wrong path separators, missing executables, incorrect shell syntax).
+- **Free of credentials.** No API tokens, passwords, or keys. Use environment variables instead (see security note above).
+- **Free of interactive instructions.** Sub-agents are one-shot and non-interactive. Instructions like "confirm with the user before..." or "ask the user for..." are confusing in a sub-agent context. Remove or reframe them.
+- **Free of service-specific instructions.** Sub-agents performing code review or file search don't need to know Bluesky posting conventions or GitHub profile URLs. Service-specific context should be passed via the `system_prompt` parameter of `spawn_agent` when relevant to the task, not baked into every invocation.
+
+**Recommended CLAUDE.md structure for sub-agent use:**
+
+```markdown
+# OS Environment
+
+- This is a Windows 11 system with Cygwin installed.
+- Bash commands are executed by the Cygwin Bash shell.
+- Most Linux commands are available: cd, cat, ls, grep, find, cp, mv, sed, awk, git, python, etc.
+- To execute `rm`, use the full pathname `/bin/rm` (avoids a wrapper script's confirmation prompt).
+- Cygwin symlinks for drive letters exist: /c -> /cygdrive/c, /d -> /cygdrive/d, etc.
+  Native Windows apps cannot follow Cygwin symlinks.
+
+## Pathname Conventions
+
+- Cygwin apps: use forward slashes. Absolute paths start with /c/ (drive letter).
+  Example: /c/franl/git/project/file.txt
+- Native Windows apps: use backslashes, single-quoted to escape.
+  Example: 'C:\franl\git\project\file.txt'
+- If a pathname contains spaces or shell metacharacters, always single-quote it.
+
+## Available Tools
+
+- Compilers/runtimes: gcc, g++, go, rustc, cargo, python, node, npm, npx.
+- Package managers: uv, uvx (Python), npm/npx (Node.js).
+- Utilities: git, gh (GitHub CLI).
+- Do not install additional tools without explicit task instructions to do so.
+
+# Source Code Conventions
+
+- Line width: under 100 columns.
+- Use meaningful variable/loop names (not single characters).
+- Newlines: UNIX-style (LF) for new files. Match existing convention when editing.
+- Encoding: UTF-8 for new files. Match existing encoding when editing.
+- Comments: write well-commented code. Aim for nearly as many comment lines as code lines.
+  Comments should explain purpose and rationale, not restate what the code does.
+  Place comments on the line above the code they reference.
+- Prefer Python and Bash for scripts. Use PEP 723 metadata in Python scripts.
+- Bash variables: UPPERCASE for globals, _UPPERCASE for function locals.
+- When building executables, always use .exe extension (Windows).
+```
+
+This is roughly 350 tokens — well within budget. It gives every sub-agent the environment awareness needed to operate correctly on the host machine, plus coding conventions for consistent output, without any irrelevant context.
+
+**Content that should NOT be in CLAUDE.md (and where it goes instead):**
+
+| Content | Why not in CLAUDE.md | Where it goes |
+|---------|---------------------|---------------|
+| GitHub credentials or profile | Credential exposure; not needed for most tasks | Environment variables for tokens; `spawn_agent`'s `system_prompt` for profile context when needed |
+| Bluesky credentials or posting conventions | Credential exposure; irrelevant to most sub-agents | Environment variables; `system_prompt` for Bluesky-specific tasks |
+| "Confirm with the user" instructions | Sub-agents are non-interactive | Remove entirely; the `--system-prompt` preamble controls sub-agent behavior |
+| Skill-writing guidelines | Niche; irrelevant to most sub-agent tasks | `system_prompt` for skill-writing tasks, or a project-level CLAUDE.md in the skills repo |
+| GUI application build flags | Niche | `system_prompt` for GUI build tasks, or a project-level CLAUDE.md |
+
+Note: Project-level CLAUDE.md files (placed in a project's `.claude/CLAUDE.md`) are also loaded by Claude Code when the sub-agent's `working_directory` is set to that project. These are a good place for project-specific conventions that don't belong in the global file.
+
 ## Implementation Roadmap
 
 ```
@@ -985,3 +1051,5 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
     - **(e) `~/.claude/CLAUDE.md` is loaded regardless.** Claude Code's startup sequence loads `~/.claude/CLAUDE.md` and project-level `CLAUDE.md` files automatically, independent of `--system-prompt` or directory sandbox settings. This has security implications for credentials — see [Relationship to Claude Code's Built-in Memory](#relationship-to-claude-codes-built-in-memory).
 
     **Design decision:** The `spawn_agent` tool uses `--system-prompt` (not `--append-system-prompt`) to pass the default preamble plus any task-specific instructions. This gives complete control over sub-agent personality and constraints with no conflicting base prompt. The Sub-Agent Architecture section has been updated throughout to reflect this.
+
+19. **~~Contents of my CLAUDE.md~~** *(Resolved — see [Recommended CLAUDE.md Content for Sub-Agents](#recommended-claudemd-content-for-sub-agents)):* The current `CLAUDE.md` was written for interactive Claude Code CLI use as a primary UI. In the B1 architecture, Claude Code CLI is used exclusively as a sub-agent runtime, so the file should be optimized for that use case. The current file (~1,500–2,000 tokens) contains credential references, interactive instructions ("confirm with the user"), and service-specific content (Bluesky posting conventions, GitHub profile) that are unnecessary or counterproductive for sub-agents. A new section in the Sub-Agent Architecture provides a recommended lean CLAUDE.md (~350 tokens) focused on OS environment, pathname conventions, available tools, and source code conventions. Niche and service-specific content should move to `spawn_agent`'s `system_prompt` parameter or project-level CLAUDE.md files.
