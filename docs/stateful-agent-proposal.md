@@ -29,7 +29,7 @@
 - [Sub-Agent Architecture](#sub-agent-architecture)
   - [Design Constraints](#design-constraints)
   - [The spawn_agent Tool](#the-spawn_agent-tool)
-  - [Execution Model: Synchronous with Sequential Spawning](#execution-model-synchronous-with-sequential-spawning)
+  - [Execution Model: Hybrid Sync/Async with Sequential Spawning](#execution-model-hybrid-syncasync-with-sequential-spawning)
   - [Default System Preamble](#default-system-preamble)
   - [Sub-Agent Memory Access](#sub-agent-memory-access)
   - [Relationship to Claude Code's Built-in Memory](#relationship-to-claude-codes-built-in-memory)
@@ -676,7 +676,7 @@ The sub-agent design follows these principles:
 
 The MCP bridge exposes a `spawn_agent` tool that the primary Claude conversation can call like any other tool. Under the hood, it invokes Claude Code CLI in non-interactive mode.
 
-**Tool interface:**
+**Tool interfaces:**
 
 ```
 spawn_agent(
@@ -696,7 +696,9 @@ spawn_agent(
   additional_dirs: string[] | null, // Additional directories the sub-agent may access (default: none)
                                    //   Each entry is passed as --add-dir to claude -p
                                    //   Use when the sub-agent needs to read/write across multiple repos
-  timeout_seconds: number | null,  // Maximum execution time (default: 120)
+  timeout_seconds: number | null,  // Maximum execution time for the sub-agent process (default: 300)
+                                   //   This is the sub-agent's own timeout, NOT the MCP timeout.
+                                   //   The bridge handles the MCP timeout separately (see below).
   max_output_tokens: number | null, // Truncate sub-agent response to this many tokens (default: 4000)
                                    //   Approximate: uses chars/4 heuristic, not a tokenizer
                                    //   Truncated responses get a marker appended
@@ -704,10 +706,24 @@ spawn_agent(
                                    //   When true, adds --add-dir ~/.claude-agent-memory to the
                                    //   invocation, granting read access via the directory sandbox.
                                    //   Write protection is preamble-based (compliance), not enforced.
-) -> string                        // The sub-agent's text response (possibly truncated)
+) -> {                             // Returns immediately OR after completion (see hybrid execution below)
+  status: "complete" | "running",  //   "complete" if the sub-agent finished within the sync window
+  job_id: string | null,           //   Non-null if status is "running" (use with check_agent to poll)
+  result: string | null            //   The sub-agent's text response if status is "complete"
+}
+
+check_agent(
+  job_id: string                   // Job ID returned by spawn_agent when status was "running"
+) -> {
+  status: "running" | "complete" | "failed" | "timed_out",
+  result: string | null,           // The sub-agent's text response if status is "complete"
+  error: string | null             // Error description if status is "failed" or "timed_out"
+}
 ```
 
-**Execution flow:**
+**Execution flow (hybrid sync/async):**
+
+Claude Desktop has a **hardcoded ~60-second timeout** for MCP tool calls (see [Open Question #3](#open-questions)). Tool calls completing under ~30 seconds reliably succeed; 30–60 seconds is unreliable; 60+ seconds consistently fails with the server's response silently dropped. Since sub-agent tasks can easily exceed this limit, the bridge uses a **hybrid sync/async execution model** that transparently handles both fast and slow sub-agents:
 
 1. The primary agent calls `spawn_agent(task, ...)` via the MCP bridge.
 2. The bridge constructs a `claude -p` invocation:
@@ -716,74 +732,74 @@ spawn_agent(
    - `working_directory` sets the CWD for the subprocess **and** activates Claude Code's directory sandbox (the sub-agent cannot access files outside this directory or its children).
    - If `allow_memory_read` is `true`, `--add-dir ~/.claude-agent-memory` is added.
    - Each entry in `additional_dirs` is added as a separate `--add-dir` flag.
-3. The bridge launches the Claude Code CLI subprocess, waits for it to complete (or times out), and captures stdout.
-4. If the captured output exceeds `max_output_tokens` (estimated via a chars/4 heuristic), the bridge truncates from the end and appends: `\n\n[Output truncated at ~{N} tokens. Original output was ~{M} tokens.]`
-5. The bridge returns the (possibly truncated) text response to the primary agent as the tool result.
-6. The primary agent incorporates the result into its conversation — summarizing it, acting on it, or persisting relevant findings to Layer 2 memory.
+3. The bridge launches the Claude Code CLI subprocess and starts a **sync window timer** (default: 25 seconds — safely under the ~30-second reliability threshold for Claude Desktop's MCP timeout).
+4. **If the sub-agent completes within the sync window:** The bridge applies output truncation if needed (see step 7) and returns `{ status: "complete", job_id: null, result: "..." }` directly. The primary agent receives the result in a single tool call — no polling needed. This is the fast path for simple tasks.
+5. **If the sub-agent is still running when the sync window expires:** The bridge assigns a job ID, lets the subprocess continue running in the background, and immediately returns `{ status: "running", job_id: "abc123", result: null }`. This response reaches Claude Desktop well within the MCP timeout.
+6. **For running jobs:** The primary agent calls `check_agent(job_id)` to poll for the result. Each `check_agent` call returns immediately with the current status (`"running"`, `"complete"`, `"failed"`, or `"timed_out"`). When `status` is `"complete"`, the `result` field contains the sub-agent's output. The primary agent may need to poll multiple times for long-running tasks; each poll is a fast MCP round-trip.
+7. **Output truncation:** When the sub-agent completes (whether via the sync path or async path), if the captured output exceeds `max_output_tokens` (estimated via a chars/4 heuristic), the bridge truncates from the end and appends: `\n\n[Output truncated at ~{N} tokens. Original output was ~{M} tokens.]`
+8. The primary agent incorporates the result into its conversation — summarizing it, acting on it, or persisting relevant findings to Layer 2 memory.
+
+**Bridge implementation notes:** The bridge maintains a map of active jobs (job ID → subprocess handle + captured output). Jobs are cleaned up after the result is retrieved via `check_agent`, or after a configurable expiry period (e.g., 10 minutes) if never retrieved. The `timeout_seconds` parameter controls how long the subprocess is allowed to run (default: 300 seconds) — this is independent of the MCP timeout and the sync window.
 
 **Example invocations from the primary agent's perspective:**
 
-Simple file search (no system prompt needed):
+Simple file search (completes within sync window — single tool call):
 ```
+// Primary agent calls spawn_agent:
 spawn_agent(
   task: "Find all Python files under ~/projects/foo that import the `requests` library. List each file with the line number of the import.",
-  working_directory: "~/projects/foo",
-  timeout_seconds: 60
+  working_directory: "~/projects/foo"
 )
+// Bridge returns in ~10 seconds (sync path):
+// -> { status: "complete", job_id: null, result: "Found 3 files:\n  src/api.py:4 ..." }
 ```
 
-Architecture review with memory read access:
+Architecture review with memory read access (may exceed sync window):
 ```
+// Primary agent calls spawn_agent:
 spawn_agent(
   task: "Review the architecture described in ~/.claude-agent-memory/blocks/mcp-bridge.md and identify any gaps in error handling. Focus on the command execution tools.",
   system_prompt: "Return your analysis as a markdown list. Each finding should have a severity (high/medium/low) and a one-line recommendation.",
-  allow_memory_read: true,
-  timeout_seconds: 300
+  allow_memory_read: true
 )
+// Bridge returns after 25 seconds (async path — sub-agent still running):
+// -> { status: "running", job_id: "review-a1b2c3", result: null }
+
+// Primary agent polls:
+check_agent(job_id: "review-a1b2c3")
+// -> { status: "running", result: null, error: null }
+
+// Primary agent polls again after a delay:
+check_agent(job_id: "review-a1b2c3")
+// -> { status: "complete", result: "## Error Handling Gaps\n\n- **High:** ...", error: null }
 ```
 
-Test suite runner:
+Test suite runner (long-running, will use async path):
 ```
+// Primary agent calls spawn_agent:
 spawn_agent(
   task: "Run `npm test` in this directory. If any tests fail, analyze the failures and suggest fixes.",
   working_directory: "~/projects/mcp-bridge",
-  timeout_seconds: 180
+  timeout_seconds: 300
 )
+// Bridge returns after 25 seconds (async path):
+// -> { status: "running", job_id: "test-d4e5f6", result: null }
+
+// Primary agent polls periodically until complete or timed_out.
 ```
 
-### Execution Model: Synchronous with Sequential Spawning
+### Execution Model: Hybrid Sync/Async with Sequential Spawning
 
-MCP tool calls are **synchronous** — when the primary agent calls `spawn_agent`, the MCP bridge blocks until the sub-agent process completes (or times out), then returns the result. The primary agent cannot do anything else while waiting. This is a constraint of the MCP protocol, not a design choice.
+The execution model is driven by a hard platform constraint: Claude Desktop has a **hardcoded ~60-second timeout** for MCP tool calls, with reliability degrading above ~30 seconds (see [Open Question #3](#open-questions)). Since sub-agent tasks can easily exceed this, the bridge uses a **hybrid sync/async model** where `spawn_agent` transparently adapts based on how long the sub-agent takes:
 
-This means **multiple sub-agents run sequentially, not in parallel.** The primary agent can spawn as many sub-agents as it wants, but each one must complete before the next can start. If the primary agent spawns three sub-agents that each take 60 seconds, the total wall-clock time is ~180 seconds (the sum), not ~60 seconds (the max).
+- **Fast tasks (under ~25 seconds):** `spawn_agent` blocks, waits for the sub-agent to finish, and returns the result directly. The primary agent gets the result in a single tool call. This is the common case for simple file searches, quick data extraction, and other lightweight tasks.
+- **Slow tasks (over ~25 seconds):** `spawn_agent` returns a job ID after the sync window expires, and the sub-agent continues running in the background. The primary agent polls with `check_agent(job_id)` until the result is ready. Each poll is a fast MCP round-trip (well under the timeout). This handles complex code reviews, test suite runs, and other long-running tasks without hitting the MCP timeout.
 
-**When sequential execution is fine:**
+The primary agent does not need to predict which path will be taken. It always calls `spawn_agent` the same way and inspects the returned `status` field to decide whether to poll.
 
-- **Dependent tasks** — when the second sub-agent needs the first sub-agent's result as input (e.g., "find the relevant files" → "review those files for bugs"). These are inherently sequential regardless of the execution model.
-- **Low sub-agent count** — spawning 2–3 sub-agents sequentially adds a few minutes at most, which is tolerable in a human-in-the-loop conversation.
-- **Most real-world workflows** — in practice, the primary agent typically spawns one sub-agent for a focused task, incorporates the result, and continues the conversation.
+**Sequential spawning.** Even with the hybrid model, the primary agent typically spawns sub-agents one at a time and waits for results before proceeding. This is natural for most workflows where tasks are dependent or where the primary agent needs to reason about one result before deciding the next step.
 
-**When sequential execution hurts:**
-
-- **Embarrassingly parallel tasks** — like "search these 5 codebases for the same pattern" or "review these 4 independent files." These tasks have no dependencies and would complete much faster if run simultaneously.
-- **High sub-agent count** — spawning 10+ sequential sub-agents could mean 10+ minutes of waiting, which degrades the conversational experience.
-
-**Upgrade path — asynchronous execution:**
-
-If parallel sub-agents prove valuable, the MCP bridge could be extended with an async pattern:
-
-```
-// Launch without blocking
-spawn_agent_async(task: "...", ...) -> { job_id: "abc123", status: "running" }
-
-// Check status (non-blocking)
-check_agent(job_id: "abc123") -> { status: "running" } | { status: "complete", result: "..." }
-
-// Block until done
-wait_agent(job_id: "abc123") -> { status: "complete", result: "..." }
-```
-
-This would allow the primary agent to spawn several sub-agents, optionally continue the conversation while they run, then collect results. The tradeoff is significant added complexity in the bridge (process lifecycle management, result caching, cleanup of abandoned jobs) and in the primary agent's workflow (it must remember outstanding jobs and collect them). This is deferred unless sequential execution proves to be a bottleneck in practice.
+**Parallel spawning (future extension).** The hybrid model enables a natural extension for embarrassingly parallel tasks: the primary agent could call `spawn_agent` multiple times in succession, collecting job IDs for any that go async, then poll all of them. Since each `spawn_agent` call returns within the sync window (either with a result or a job ID), the MCP timeout is never hit. The bridge manages the subprocess lifecycle for all active jobs. If this pattern is implemented, a **configurable cap on concurrent sub-agents** should be enforced (e.g., `max_concurrent_agents: 5` in the bridge config) to limit API cost and system load (see [Open Question #14](#open-questions)).
 
 ### Default System Preamble
 
@@ -1002,7 +1018,17 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 2. **~~Custom connector limitations (B2 only)~~** *(Resolved — not applicable):* B1 is the chosen architecture. B1 uses the Desktop App's native local MCP support, not Claude.ai's custom connector feature. If B2 is pursued in the future, this question would need to be revisited.
 
-3. **Desktop App MCP limitations (B1 only):** Are there tool-count limits, timeout restrictions, or other constraints on local MCP servers in the Claude Desktop App? How does the Desktop App handle MCP server crashes or restarts? Can the Desktop App be configured to auto-reconnect to a restarted MCP server?
+3. **~~Desktop App MCP limitations (B1 only)~~** *(Resolved via research — significant timeout constraint identified):* Research into Claude Desktop's MCP behavior reveals several concrete limitations:
+
+    - **Hardcoded ~60-second tool call timeout.** Claude Desktop uses the MCP TypeScript SDK default of `DEFAULT_REQUEST_TIMEOUT_MSEC = 60000`. Tool calls completing under ~30 seconds reliably succeed; 30–60 seconds is unreliable; 60+ seconds consistently fails with "No result received from client-side tool execution." The MCP server's response is silently dropped — the server completes successfully but Claude Desktop has stopped listening. This timeout is **not configurable** in Claude Desktop (unlike Claude Code CLI, which supports `MCP_TIMEOUT`). Feature requests for configurability (GitHub issues #5221, #22542) have been closed as "not planned" or marked "external."
+
+    - **Impact on `spawn_agent`.** This is the most significant constraint. Sub-agents performing complex tasks (test suites, code reviews, large file searches) can easily exceed 60 seconds. **Mitigation:** The bridge's `spawn_agent` implementation must account for this. Options include: (a) setting the `spawn_agent` default `timeout_seconds` to 55 (under the 60s cliff) and documenting the limitation; (b) implementing a progress-reporting pattern where the bridge sends periodic MCP progress notifications to keep the connection alive (if Claude Desktop supports MCP progress tokens); (c) for long-running tasks, having the bridge return a "task started" acknowledgment quickly and provide a separate `check_result` tool for polling (similar to the async pattern in Open Question #14, but driven by the timeout constraint rather than parallelism). The best approach depends on whether Claude Desktop supports MCP progress notifications — this requires empirical testing during implementation.
+
+    - **No documented tool-count limit.** Multiple MCP servers can be configured simultaneously in `claude_desktop_config.json`, and each can expose multiple tools. No hard limit on tool count has been reported.
+
+    - **Known stability issues.** Bug reports describe tool call responses being dropped (race conditions in MCP message routing after handshake), UI freezing until user clicks/expands the tool panel, and stdio pipe failures when using `npx` as the command (workaround: use `node` directly or a compiled binary). These are active bugs being tracked by the community.
+
+    - **No documented auto-reconnect.** If the MCP server subprocess crashes, Claude Desktop does not appear to automatically restart it. The user must restart the Desktop App. The bridge should be designed for robustness (crash recovery, clean error messages) but cannot rely on the client to handle server failures gracefully.
 
 4. **~~Memory migration between layers~~** *(Resolved):* Reconciliation between Layer 1 (Anthropic's built-in memory) and Layer 2 (supplementary markdown files) is handled by a **periodic two-step audit**. First, a sub-agent is spawned with `allow_memory_read: true` to read all Layer 2 files and produce a structured digest of what Layer 2 contains — active projects, key facts, decisions, status summaries, and any Layer 2 bloat (blocks that could be summarized or archived). The sub-agent does not have access to Layer 1 (it runs as Claude Code CLI, which does not receive Anthropic's built-in memory). Second, the primary agent (Claude Desktop) receives the digest as a tool result. Because the primary agent already has Layer 1 in its context window (injected automatically), it can compare both layers and identify contradictions, gaps (important Layer 2 facts that Layer 1 should summarize), and stale entries (Layer 1 references completed/outdated projects). The primary agent then applies fixes — adding **steering edits** to Layer 1 via the `memory_user_edits` tool, and editing Layer 2 directly via MCP filesystem tools (`edit_file`, `write_file`). **Important:** Layer 1 edits are indirect. The `memory_user_edits` tool does not rewrite the Layer 1 summary directly — it adds steering instructions (e.g., "Fran completed the MCP bridge project in March 2026") that Anthropic's nightly background process incorporates when it regenerates the summary. This means Layer 1 corrections have up to ~24 hours of lag before they appear in the auto-generated summary. Layer 2 edits take effect immediately. The goal is *consistency*, not *parity*: Layer 1 is intentionally compact (~500–2,000 tokens) while Layer 2 is intentionally detailed. This reconciliation can run during an unattended wake period (see Open Question #17) to avoid blocking the user, or be triggered manually at the start of a session. For initial migration from Architecture A to Architecture B (where content in `core.md` should be reflected in Layer 1), the same process applies — the primary agent reads the existing `core.md` and adds steering edits to Layer 1 accordingly.
 
@@ -1012,7 +1038,17 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 7. **~~Memory skill as supplementary store~~** *(Resolved — see [Supplementary Memory Strategy](#supplementary-memory-strategy)):* Yes, the three-tier markdown memory system is valuable as a Layer 2 supplement to Anthropic's built-in Layer 1 memory. The new section details three options for implementing this, with Option 1 (filesystem-only) recommended as the starting point.
 
-8. **Supplementary memory skill compliance:** The Layer 2 memory system depends on Claude reliably following the skill's instructions to read memory at session start and persist updates at session end. How reliable is this in practice? What prompting strategies maximize compliance? Is there a way to detect when Claude has failed to persist changes (e.g., by comparing file timestamps before and after a session)?
+8. **~~Supplementary memory skill compliance~~** *(Resolved — strategies defined, empirical validation deferred to implementation):* The Layer 2 memory system depends on Claude reliably following the skill's instructions. Full empirical validation requires building and testing the skill, but the following compliance strategies are planned:
+
+    - **Session-start loading.** The skill's instructions should be front-loaded and explicit: "At the start of every conversation, read `core.md` and `index.md` via the MCP bridge before responding to the user's first message." This is high-compliance because it's a concrete, verifiable action at a natural trigger point (conversation start).
+
+    - **Session-end persistence.** This is the harder compliance challenge — conversations often end abruptly (user closes the window, context fills up, network disconnects). Strategies: (a) instruct Claude to persist incrementally during the conversation (after significant decisions, discoveries, or topic changes), not just at session end; (b) include a standing instruction: "If the user says goodbye or the conversation is winding down, persist any pending memory updates before your final response"; (c) the bridge could log `write_file` timestamps for memory files, allowing the user to verify after a session whether memory was updated.
+
+    - **Incremental persistence over batch persistence.** Rather than accumulating changes and writing everything at session end, the skill should instruct Claude to update memory files as significant information emerges. This reduces the risk of losing an entire session's worth of updates if the conversation ends unexpectedly.
+
+    - **Detection of compliance failures.** The bridge can log all `read_file` and `write_file` operations on `~/.claude-agent-memory/`. A simple post-session check: if the bridge log shows memory files were read at session start but never written during the session, and the conversation lasted more than a few turns, compliance likely failed. This could be surfaced as a notification or log entry for the user to review.
+
+    - **Empirical tuning.** The specific wording of skill instructions, the frequency of persistence prompts, and the triggers for memory updates will need iterative tuning based on observed behavior during implementation. This is expected and normal for skill development.
 
 9. **~~Layer 1 / Layer 2 content boundary~~** *(Resolved):* The boundary between Layer 1 and Layer 2 does not need to be explicitly managed because the two layers have fundamentally different control models. **Layer 1 is not directly editable.** Its auto-generated summary is produced by Anthropic's nightly background process, which decides what to extract from conversations using its own heuristics. The user and Claude can only influence Layer 1 indirectly via steering edits (the `memory_user_edits` tool), which the nightly process incorporates at regeneration time. **Layer 2 is fully under our control** — it's markdown files on disk, readable and writable at any time via the MCP bridge. Given this, the right approach is: let Layer 1's automatic system do what it does well (extracting identity, preferences, and high-level project awareness from conversations), and use Layer 2 for everything that needs more depth, structure, precision, or immediacy than Layer 1 provides. Overlap between layers is harmless — if both layers note that "Fran is working on an MCP bridge server," that's redundancy, not a conflict. Contradictions (e.g., Layer 1 says a project is active, Layer 2 says it's completed) are handled by the periodic reconciliation process (see Open Question #4), where the primary agent adds a steering edit to correct Layer 1. The memory skill does not need to instruct Claude on how to allocate content between layers — it only needs to instruct Claude on how to manage Layer 2, since Layer 1 manages itself.
 
@@ -1024,7 +1060,7 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 13. **~~Sub-agent model selection~~** *(Resolved):* The `spawn_agent` tool includes an optional `model` parameter. The primary agent (running in Claude Desktop, typically on a capable model like Opus) selects the appropriate model for each sub-agent based on the task's complexity — e.g., Haiku or Sonnet for simple file searches and data extraction, Opus for complex analysis or code review. The bridge passes this to `claude -p` via the `--model` flag. This pattern — a smarter orchestrator model delegating to less capable (faster, cheaper) models for routine sub-tasks — is a well-established practice in multi-agent systems. If `model` is omitted, the sub-agent uses whatever model Claude Code is configured to use by default.
 
-14. **~~Sub-agent parallelism~~** *(Partially resolved — see [Execution Model](#execution-model-synchronous-with-sequential-spawning)):* The design is synchronous/sequential for now. Multiple sub-agents can be spawned but each must complete before the next starts. An async upgrade path (`spawn_agent_async` / `check_agent` / `wait_agent`) is sketched for future use if embarrassingly parallel tasks prove common enough to justify the added bridge complexity. Remaining question: if the async pattern is implemented, should there be a cap on concurrent sub-agents to limit API cost and system load?
+14. **~~Sub-agent parallelism~~** *(Resolved — see [Execution Model](#execution-model-hybrid-syncasync-with-sequential-spawning)):* The hybrid sync/async execution model (required to work around Claude Desktop's ~60-second MCP timeout — see Open Question #3) provides the async infrastructure needed for parallel sub-agents as a natural extension. The primary agent can call `spawn_agent` multiple times in succession, collecting job IDs for any that go async, then poll all of them with `check_agent`. Each `spawn_agent` call returns within the sync window, so the MCP timeout is never hit. If parallel spawning is used, **yes, there should be a cap on concurrent sub-agents** to limit API cost and system load. The cap should be configurable in the bridge (e.g., `max_concurrent_agents: 5` in the bridge config), with `spawn_agent` returning an error if the cap is reached. The specific default value is deferred to implementation.
 
 15. **~~Sub-agent output size~~** *(Resolved):* The `spawn_agent` tool includes a `max_output_tokens` parameter (default: 4,000 tokens, estimated via a chars/4 heuristic). If a sub-agent's output exceeds this limit, the bridge truncates from the end and appends a marker indicating the truncation and original size. The default system preamble also includes a soft instruction ("keep your response under 2,000 words") so sub-agents self-limit before the hard truncation kicks in. The two mechanisms are complementary: the preamble is a soft hint, `max_output_tokens` is the hard ceiling that protects the primary agent's context window regardless of sub-agent behavior.
 
