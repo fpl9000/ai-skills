@@ -1089,3 +1089,17 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
     **Design decision:** The `spawn_agent` tool uses `--system-prompt` (not `--append-system-prompt`) to pass the default preamble plus any task-specific instructions. This gives complete control over sub-agent personality and constraints with no conflicting base prompt. The Sub-Agent Architecture section has been updated throughout to reflect this.
 
 19. **~~Contents of my CLAUDE.md~~** *(Resolved — see [Recommended CLAUDE.md Content for Sub-Agents](#recommended-claudemd-content-for-sub-agents)):* The current `CLAUDE.md` was written for interactive Claude Code CLI use as a primary UI. In the B1 architecture, Claude Code CLI is used exclusively as a sub-agent runtime, so the file should be optimized for that use case. The current file (~1,500–2,000 tokens) contains credential references, interactive instructions ("confirm with the user"), and service-specific content (Bluesky posting conventions, GitHub profile) that are unnecessary or counterproductive for sub-agents. A new section in the Sub-Agent Architecture provides a recommended lean CLAUDE.md (~350 tokens) focused on OS environment, pathname conventions, available tools, and source code conventions. Niche and service-specific content should move to `spawn_agent`'s `system_prompt` parameter or project-level CLAUDE.md files.
+
+20. What is the precise format for individual memory entries?  Should memories be JSON for structure?
+
+21. Claude Desktop already has built-in filesystem access: it was used to write this file. What benefits/drawbacks does MCP filesystem access have compared to the built-in functionality?
+
+22. How to guarantee that network access happens from the local machine (via MCP) instead of from the cloud VM, where egress restrictions exist?
+
+23. Same question as #22 for GitHub access: how to require use of the local `git` command instead of the `github` skill?
+
+24. Will folder `~/.claude-agent-memory/blocks/` contain both files named `episodic-YYYY-MM.md` (for each month) and files named `episodic-YYYY-MM-DD.md` (for each day)?
+
+25. Under what condition will Claude create new memory block files not named in this proposal?
+
+26. What exactly is a 'block reference' in `index.md`?
