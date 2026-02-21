@@ -1100,6 +1100,6 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 24. Will folder `~/.claude-agent-memory/blocks/` contain both files named `episodic-YYYY-MM.md` (for each month) and files named `episodic-YYYY-MM-DD.md` (for each day)?
 
-25. Under what condition will Claude create new memory block files not named in this proposal?
+25. Under what conditions will Claude create new memory block files not named in this proposal?
 
 26. What exactly is a 'block reference' in `index.md`?
