@@ -1090,16 +1090,16 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 19. **~~Contents of my CLAUDE.md~~** *(Resolved — see [Recommended CLAUDE.md Content for Sub-Agents](#recommended-claudemd-content-for-sub-agents)):* The current `CLAUDE.md` was written for interactive Claude Code CLI use as a primary UI. In the B1 architecture, Claude Code CLI is used exclusively as a sub-agent runtime, so the file should be optimized for that use case. The current file (~1,500–2,000 tokens) contains credential references, interactive instructions ("confirm with the user"), and service-specific content (Bluesky posting conventions, GitHub profile) that are unnecessary or counterproductive for sub-agents. A new section in the Sub-Agent Architecture provides a recommended lean CLAUDE.md (~350 tokens) focused on OS environment, pathname conventions, available tools, and source code conventions. Niche and service-specific content should move to `spawn_agent`'s `system_prompt` parameter or project-level CLAUDE.md files.
 
-20. What is the precise format for individual memory entries?  Should memories be JSON for structure?
+20. **Format of individual memories:** What is the precise format for individual memory entries?  Should memories be JSON for structure?
 
-21. Claude Desktop already has built-in filesystem access: it was used to write this file. What benefits/drawbacks does MCP filesystem access have compared to the built-in functionality?
+21. **Two kinds of filesystem access:** Claude Desktop already has built-in filesystem access: it was used to write this file. What benefits/drawbacks does MCP filesystem access have compared to the built-in functionality?
 
-22. How to guarantee that network access happens from the local machine (via MCP) instead of from the cloud VM, where egress restrictions exist?
+22. **Network access only from local machine:** How to guarantee that network access happens only from the local machine (via MCP) instead of from the cloud VM, where varioous egress restrictions exist?
 
-23. Same question as #22 for GitHub access: how to guarantee use of the local `git` command instead of the `github` skill's scripts in the cloud VM?
+23. **GitHub access only from local machine:** How to guarantee use of the local `git` command instead of using the `github` skill's scripts in the cloud VM?
 
-24. Will folder `~/.claude-agent-memory/blocks/` contain both files named `episodic-YYYY-MM.md` (for each month) and files named `episodic-YYYY-MM-DD.md` (for each day)?
+24. **Daily vs. monthly episodic memory blocks:** Will folder `~/.claude-agent-memory/blocks/` contain both files named `episodic-YYYY-MM.md` (for each month) and files named `episodic-YYYY-MM-DD.md` (for each day)?
 
-25. Under what conditions will Claude create new memory block files not named in this proposal?
+25. **Creation of new memory blocks:** Under what conditions will Claude create new memory block files not named in this proposal?
 
-26. What exactly is a 'block reference' in `index.md`?
+26. **Block reference clarification:** What exactly is a 'block reference' in `index.md`?
