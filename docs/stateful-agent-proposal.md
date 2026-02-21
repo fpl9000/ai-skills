@@ -1090,7 +1090,7 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 19. **~~Contents of my CLAUDE.md~~** *(Resolved — see [Recommended CLAUDE.md Content for Sub-Agents](#recommended-claudemd-content-for-sub-agents)):* The current `CLAUDE.md` was written for interactive Claude Code CLI use as a primary UI. In the B1 architecture, Claude Code CLI is used exclusively as a sub-agent runtime, so the file should be optimized for that use case. The current file (~1,500–2,000 tokens) contains credential references, interactive instructions ("confirm with the user"), and service-specific content (Bluesky posting conventions, GitHub profile) that are unnecessary or counterproductive for sub-agents. A new section in the Sub-Agent Architecture provides a recommended lean CLAUDE.md (~350 tokens) focused on OS environment, pathname conventions, available tools, and source code conventions. Niche and service-specific content should move to `spawn_agent`'s `system_prompt` parameter or project-level CLAUDE.md files.
 
-20. **Format of individual memories:** What is the precise format for individual memory entries?  Should memories be JSON for structure?
+20. **Format of individual memories:** What is the precise format for individual memory entries?  Should memories be stored in JSON rather than plain text to speed parsing?
 
 21. **Two kinds of filesystem access:** Claude Desktop already has built-in filesystem access: it was used to write this file. What benefits/drawbacks does MCP filesystem access have compared to the built-in functionality?
 
