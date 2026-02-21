@@ -595,7 +595,7 @@ Backend Storage:
 
 ### Concurrent Conversation Writes
 
-A subtle but important issue arises when **multiple conversations are active simultaneously** and both attempt to update the supplementary memory. This can happen when you have two Claude windows open (e.g., a Desktop App session and a Claude.ai session, or two Desktop App windows), or even when a long-running conversation overlaps with a quick one.
+A subtle but important issue arises when **multiple conversations are active simultaneously** and both attempt to update the supplementary memory. This can happen when you have two Claude windows open (e.g., a Desktop App session and a Claude.ai session), or even when a long-running conversation overlaps with a quick one.
 
 **The problem is not torn writes** — a mutex or file lock in the MCP bridge can prevent two writes from interleaving at the byte level. The problem is **semantic divergence**: each conversation loads memory files at session start, works with a stale snapshot while the other conversation evolves, and then writes back its version of the files. The second write may silently overwrite changes from the first.
 
@@ -709,7 +709,8 @@ spawn_agent(
 ) -> {                             // Returns immediately OR after completion (see hybrid execution below)
   status: "complete" | "running",  //   "complete" if the sub-agent finished within the sync window
   job_id: string | null,           //   Non-null if status is "running" (use with check_agent to poll)
-  result: string | null            //   The sub-agent's text response if status is "complete"
+  result: string | null,           //   The sub-agent's text response if status is "complete"
+  started_at: string               //   ISO 8601 timestamp of when the sub-agent process was launched
 }
 
 check_agent(
@@ -717,7 +718,12 @@ check_agent(
 ) -> {
   status: "running" | "complete" | "failed" | "timed_out",
   result: string | null,           // The sub-agent's text response if status is "complete"
-  error: string | null             // Error description if status is "failed" or "timed_out"
+  error: string | null,            // Error description if status is "failed" or "timed_out"
+  started_at: string,              // ISO 8601 timestamp of when the sub-agent process was launched
+  elapsed_seconds: number           // Wall-clock seconds since the sub-agent was launched
+                                   //   Computed by the bridge so the primary agent doesn't need to
+                                   //   do time math. Useful for deciding whether to keep polling
+                                   //   or assume something is wrong.
 }
 ```
 
@@ -1090,16 +1096,104 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 19. **~~Contents of my CLAUDE.md~~** *(Resolved — see [Recommended CLAUDE.md Content for Sub-Agents](#recommended-claudemd-content-for-sub-agents)):* The current `CLAUDE.md` was written for interactive Claude Code CLI use as a primary UI. In the B1 architecture, Claude Code CLI is used exclusively as a sub-agent runtime, so the file should be optimized for that use case. The current file (~1,500–2,000 tokens) contains credential references, interactive instructions ("confirm with the user"), and service-specific content (Bluesky posting conventions, GitHub profile) that are unnecessary or counterproductive for sub-agents. A new section in the Sub-Agent Architecture provides a recommended lean CLAUDE.md (~350 tokens) focused on OS environment, pathname conventions, available tools, and source code conventions. Niche and service-specific content should move to `spawn_agent`'s `system_prompt` parameter or project-level CLAUDE.md files.
 
-20. **Format of individual memories:** What is the precise format for individual memory entries?  Should memories be stored in JSON rather than plain text to speed parsing?
+20. **~~Format of individual memories~~** *(Resolved):* Memory files use **markdown with optional YAML frontmatter**, not JSON. This is consistent with the design principle of human-readable, editable, Git-friendly files throughout the proposal. Claude reads text into its context window natively — markdown is the format it processes most naturally, and there is no programmatic parsing step where JSON would offer a speed advantage. Content blocks use a light structure:
 
-21. **Two kinds of filesystem access:** Claude Desktop already has built-in filesystem access: it was used to write this file. What benefits/drawbacks does MCP filesystem access have compared to the built-in functionality?
+    ```markdown
+    ---
+    created: 2026-02-15
+    updated: 2026-02-21
+    tags: [project, mcp-bridge]
+    ---
 
-22. **Network access only from local machine:** How to guarantee that network access happens only from the local machine (via MCP) instead of from the cloud VM, where varioous egress restrictions exist?
+    # MCP Bridge Server
 
-23. **GitHub access only from local machine:** How to guarantee use of the local `git` command instead of using the `github` skill's scripts in the cloud VM?
+    ## Status
+    Implementation in progress. Core filesystem tools complete, command execution in testing.
 
-24. **Daily vs. monthly episodic memory blocks:** Will folder `~/.claude-agent-memory/blocks/` contain both files named `episodic-YYYY-MM.md` (for each month) and files named `episodic-YYYY-MM-DD.md` (for each day)?
+    ## Key Decisions
+    - Language: Go (single static binary, no runtime deps)
+    - SDK: mark3labs/mcp-go
+    ...
+    ```
 
-25. **Creation of new memory blocks:** Under what conditions will Claude create new memory block files not named in this proposal?
+    The YAML frontmatter provides machine-readable metadata (creation date, last update, tags) that the bridge's future FTS5 search index (Option 3) can use for filtering, while the markdown body is free-form and optimized for Claude's comprehension. The `index.md` file uses a markdown table for structured scanning:
 
-26. **Block reference clarification:** What exactly is a 'block reference' in `index.md`?
+    ```markdown
+    | Block | Summary | Updated |
+    |-------|---------|----------|
+    | project-mcp-bridge.md | MCP bridge server implementation status and decisions | 2026-02-21 |
+    | decisions.md | Cross-project architectural decisions | 2026-02-19 |
+    | episodic-2026-02.md | Conversation log for February 2026 | 2026-02-21 |
+    ```
+
+    The `core.md` file is pure prose markdown (no frontmatter needed) — it is a compact narrative summary of identity, active projects, and key facts, analogous to what Anthropic's Layer 1 stores but under our control.
+
+21. **~~Two kinds of filesystem access~~** *(Resolved):* Claude Desktop already has local filesystem access via the official **Anthropic Filesystem extension** (`@modelcontextprotocol/server-filesystem`). This is itself an MCP server — it provides 11 tools (`read_file`, `read_multiple_files`, `write_file`, `edit_file`, `create_directory`, `list_directory`, `directory_tree`, `move_file`, `search_files`, `get_file_info`, `list_allowed_directories`) scoped to configured allowed directories (currently `C:\franl`, `C:\temp`, `C:\apps`). Claude Desktop can run multiple MCP servers simultaneously, so our custom bridge does **not** need to duplicate these basic filesystem tools. The bridge should focus on capabilities the existing extension lacks:
+
+    - **`spawn_agent` / `check_agent`** — sub-agent lifecycle management (unique to our bridge).
+    - **`append_file`** — not provided by the Anthropic Filesystem extension. Needed for episodic memory logs and activity trails.
+    - **Memory-aware tools (future)** — e.g., `update_memory_block` that auto-updates `index.md`, manages YAML frontmatter timestamps, enforces naming conventions. These add value beyond raw filesystem operations.
+    - **FTS5 search (Option 3)** — semantic search across memory file contents, beyond the filename-based `search_files` in the existing extension.
+
+    **Recommended approach (Path A — lean bridge):** For the initial B1 implementation, the bridge provides only `spawn_agent`, `check_agent`, `append_file`, and any memory-specific tools. All basic filesystem access (reading memory files, writing memory files, listing directories) uses the existing Anthropic Filesystem extension. The memory directory should live under an already-allowed directory (e.g., `C:\franl\.claude-agent-memory`). This minimizes what we build and leverages what's already working.
+
+    **Fallback (Path B — self-contained bridge):** If tool name collisions between the two MCP servers cause problems, or if depending on the Anthropic extension for memory operations proves fragile, the bridge can be extended to provide its own full set of filesystem tools scoped to the memory directory. This is more code but eliminates the dependency. Migration from Path A to Path B is straightforward since the underlying file format and directory structure are unchanged.
+
+    **Note:** The memory directory must be accessible to the Anthropic Filesystem extension (Path A) or our bridge (Path B), but not necessarily both. In Path A, adding `C:\franl\.claude-agent-memory` (or its parent `C:\franl`) to the extension's allowed directories is sufficient.
+
+22. **~~Network access only from local machine~~** *(Resolved — same root cause as #23):* Claude Desktop operates in a **hybrid environment**: the LLM runs on Anthropic's servers with access to a cloud VM (its own filesystem at `/home/claude/`, bash tools, egress-restricted network), while simultaneously having access to the user's local machine via MCP tools (Filesystem extension, custom bridge, sub-agents). When Claude decides to perform a network operation, it chooses between cloud VM tools (e.g., `bash_tool` running `curl`) and local tools (e.g., a sub-agent running `curl` via `claude -p`, or an MCP tool that makes HTTP requests). There is no enforcement-level mechanism to force the choice — Claude's tool selection is a compliance-based decision.
+
+    **The same ambiguity affects file writes.** Claude can write to the cloud VM (via `create_file`, `bash_tool`) or to the local machine (via `Filesystem:write_file`, MCP bridge tools). If Claude writes a memory update to `/home/claude/` instead of `C:\franl\.claude-agent-memory/` via MCP, the update is lost when the VM resets. This is the deeper version of the problem: it's not just about network access, it's about ensuring Claude routes all persistent operations through MCP tools that operate locally.
+
+    **Resolution — three complementary strategies:**
+
+    - **(a) Preamble/skill instructions (compliance).** The Layer 2 memory skill should include explicit instructions: "ALWAYS use MCP Filesystem tools or the MCP bridge for memory operations and local file access. NEVER use cloud VM tools (`bash_tool`, `create_file`) for persistent data. The cloud VM filesystem is ephemeral and resets between sessions." Similarly for network operations: "For operations requiring local network identity (SSH, VPN, internal services), use sub-agents or MCP tools, not cloud VM bash."
+
+    - **(b) Unambiguous tool names (design).** Memory-specific tools with distinctive names (e.g., `update_memory_block`, `append_episodic_log`) are unambiguous — they exist only in the MCP bridge and always operate locally. This is stronger than relying on Claude to choose `Filesystem:write_file` over `create_file` for the right target path. This strengthens the case for Path B (self-contained bridge) from Open Question #21 for memory operations specifically, even if Path A is used for general filesystem access.
+
+    - **(c) Sub-agents for network operations (enforcement).** Sub-agents spawned via `spawn_agent` run as local `claude -p` processes on the user's machine. All their bash commands, git operations, curl calls, and API requests use the local network with no cloud VM involvement. This is the strongest guarantee: if a task requires local network access (e.g., `git push` with SSH keys, accessing internal services), delegate it to a sub-agent. The sub-agent has no cloud VM — it only has the local machine.
+
+    In practice, strategies (a) and (b) handle the common case (memory reads/writes), and strategy (c) handles the network-specific case (git, API calls, internal services).
+
+23. **~~GitHub access only from local machine~~** *(Resolved — same root cause as #22):* This is a specific instance of the hybrid environment ambiguity described in #22. Claude could run `git push` via the cloud VM's `bash_tool` (which may lack SSH keys, has egress restrictions, and uses Anthropic's network) or via a sub-agent's bash (which runs locally with the user's SSH keys and unrestricted network). **Resolution:** Git operations that require authentication or push access should be performed via sub-agents (strategy (c) from #22). The sub-agent runs locally as `claude -p`, has access to the user's SSH configuration, and uses the local network. The `spawn_agent` system_prompt can include GitHub-specific context (username, repo URLs) as needed. For read-only git operations (cloning public repos, viewing logs), either path works, but sub-agents are preferred for consistency.
+
+24. **~~Daily vs. monthly episodic memory blocks~~** *(Resolved):* **Monthly only** (`episodic-YYYY-MM.md`), with daily entries as dated sections within the monthly file. Each conversation gets a date heading and a brief summary. This keeps the file count manageable (12 files per year vs. 365) and lets Claude load an entire month's context in one `read_file` call. Daily files would create clutter and fragment context unnecessarily.
+
+    Example structure:
+
+    ```markdown
+    ---
+    created: 2026-02-01
+    updated: 2026-02-21
+    ---
+
+    # February 2026
+
+    ## 2026-02-21 — Stateful agent proposal session 9
+    Resolved open questions #18, #4, #10, #9. Discovered Claude Desktop's 60-second MCP timeout.
+    Redesigned spawn_agent as hybrid sync/async. Added recommended CLAUDE.md for sub-agents.
+
+    ## 2026-02-19 — MCP bridge Go implementation
+    Discussed mcp-go SDK, filesystem tool design. Decided on edit_file find-and-replace pattern.
+
+    ## 2026-02-15 — Memory architecture deep dive
+    Chose three-tier markdown structure. Resolved Layer 1/Layer 2 boundary question.
+    ```
+
+    New entries are appended to the current month's file (via `append_file`). If a month gets very large due to heavy usage, it can be split retroactively by the reconciliation process (Open Question #4), but monthly is the sensible default granularity.
+
+25. **~~Creation of new memory blocks~~** *(Resolved):* Claude should create new block files **when a new project or significant topic emerges that warrants its own structured tracking**. The skill instructions should provide naming conventions and guidance on when creation is appropriate:
+
+    **Naming conventions:**
+    - `project-<name>.md` — for projects (e.g., `project-mcp-bridge.md`, `project-website-redesign.md`)
+    - `reference-<topic>.md` — for persistent reference material (e.g., `reference-coding-standards.md`, `reference-deployment-checklist.md`)
+    - `episodic-YYYY-MM.md` — auto-created monthly (see Open Question #24)
+    - `decisions.md` — single file for cross-project architectural decisions
+
+    **Skill preamble guidance:** "If a conversation introduces a significant new project or topic that doesn't fit into existing blocks, create a new block file following the naming conventions above and add an entry to `index.md` for it. Do not create blocks for trivial or one-off topics — those belong as entries in the current month's episodic log."
+
+    The key is balancing signal vs. noise: too few blocks means overloaded files that consume excessive context tokens, too many means fragmented context that requires multiple reads. The reconciliation process (Open Question #4) can clean up or merge blocks that turn out to be unnecessary.
+
+26. **~~Block reference clarification~~** *(Resolved):* A "block reference" in `index.md` is a row in the markdown table that maps a block filename to its summary and last-updated date (see the `index.md` format in Open Question #20). It is how Claude discovers what blocks exist and what they contain without reading every file. At session start, Claude reads `core.md` (always) and `index.md` (always), then selectively reads individual block files based on the index entries and the current conversation's topic. When Claude creates or updates a block file, it must also update the corresponding row in `index.md` (or add a new row if the block is new).
+
+27. **~~Sub-agent start time~~** *(Resolved — tool interfaces updated):* Yes. Both `spawn_agent` and `check_agent` return a `started_at` field (ISO 8601 timestamp of when the sub-agent process was launched). `check_agent` additionally returns `elapsed_seconds` (wall-clock seconds since launch, computed by the bridge) so the primary agent can reason about whether a sub-agent is taking unexpectedly long without doing time math itself. This helps the primary agent make informed decisions like "this sub-agent has been running for 4 minutes on a task I expected to take 1 minute — something may be wrong."
