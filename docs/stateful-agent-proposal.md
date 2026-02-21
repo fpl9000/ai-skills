@@ -1096,7 +1096,7 @@ The [Supplementary Memory Strategy](#supplementary-memory-strategy) section abov
 
 22. How to guarantee that network access happens from the local machine (via MCP) instead of from the cloud VM, where egress restrictions exist?
 
-23. Same question as #22 for GitHub access: how to require use of the local `git` command instead of using the `github` skill's scripts in the cloud VM?
+23. Same question as #22 for GitHub access: how to guarantee use of the local `git` command instead of the `github` skill's scripts in the cloud VM?
 
 24. Will folder `~/.claude-agent-memory/blocks/` contain both files named `episodic-YYYY-MM.md` (for each month) and files named `episodic-YYYY-MM-DD.md` (for each day)?
 
