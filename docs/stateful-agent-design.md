@@ -1746,7 +1746,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 ## 11. Open Questions and Requested Changes
 
-1. Are you sure that Anthropic's filesystem MCP tool does have the option to append to a file?  I
+1. Are you sure that Anthropic's filesystem MCP tool does not have the option to append to a file?  I
    was unable to find the definition of the `write_file` tool online to check this.  Can you find
    it?
 
