@@ -1746,34 +1746,21 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 ## 11. Open Questions and Requested Changes
 
-1. Are you sure that Anthropic's filesystem MCP tool does not have the option to append to a file?  I
-   was unable to find the definition of the `write_file` tool online to check this.  Can you find
-   it?
+1. In section 1.2, "Component Inventory", item #6 says that the single-writer model "eliminates concurrent write issues for the B1 single-instance architecture", but doesn't this design have the problem that concurrent conversations can overwrite memories?  Can that be avoided somehow when using Anthropic's filesystem MCP server for memory writes?
 
-2. In section 1.2, "Component Inventory", add a note that the memory skill's source will be in
-   `C:\franl\git\ai-skill\agent-memory`, since its source files should be under source control.
+2. In section 1.2, "Component Inventory", add a note that the memory skill's source will be in `C:\franl\git\ai-skill\agent-memory`, since its source files should be under source control.
 
-3. In section 1.2, "Component Inventory", item #6 says that the single-writer model "eliminates
-   concurrent write issues for the B1 single-instance architecture", but doesn't this design have
-   the problem that concurrent conversations can overwrite memories?  Can that be avoided somehow
-   when using Anthropic's filesystem MCP server for memory writes?
+3. I tried to verify that Anthropic's MCP `Filesystem:write_file` tool has no option to append to a file, but I could not find the definition online.  Can you find it to verify this?
 
-4. Section 2.2, "Data Flow", under heading "Memory write (during session)", the entry "→ calls
-   Filesystem:write_file (for core.md, index.md, or block updates)" implies that memory writes to
-   `core.md` and `index.md` are always full file writes, rather than edits.  Wouldn't edits be
-   safer, because Claude does not need to keep the entirety of those files unaltered in its context
-   window, which reduces the risk of hallucination distoring the memories?
+4. Section 2.2, "Data Flow", under heading "Memory write (during session)", the entry "→ calls Filesystem:write_file (for core.md, index.md, or block updates)" implies that memory writes to `core.md` and `index.md` are always full file writes, rather than edits.  Wouldn't edits be safer, because Claude does not need to keep the entirety of those files unaltered in its context window, which reduces the risk of hallucination distoring the memories?
 
-5. Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool,
-   but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens
-   (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
+5. Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool, but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
 
-6. What exactly does the bridge configuration parameter `job_expiry_seconds` mean?
+6. What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
 
-7. Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on
-   Windows?  How does the Go runtime deal with UNIX signals on Windows?
+7. Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
 
-8. In section 4.2, "Three-Tier File Structure", add the following memory block files:
+8. In section 4.2, "Three-Tier File Structure", add memory block files named `humans.md` and `interests.md`, as follows:
 
    ```
    C:\franl\.claude-agent-memory\
@@ -1783,31 +1770,20 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
        └── interests.md             # Long-term interests of the primary agent
    ```
 
-   File `interests.md` should contain the primary agent's long-term interests, which will be updated
-   over time as the primary agent learns more about itself and the world.
+   File `humans.md` should contain memories about humans known to the primary agent, including the user, his family/friends, and others.  File `interests.md` should contain the primary agent's long-term interests, which will be updated over time as the primary agent learns more about itself and the world.
 
-9. In section 4.6, "File Format: Episodic Logs", should entries include the time-of-day as well as
-   the date?  What happens when two episodic updates happen on the same day?
+9. In section 4.6, "File Format: Episodic Logs", should entries include the time-of-day as well as the date, in case two episodic updates happen on the same day?
 
-10. Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop
-    also have these?  If so, can we use it to trigger memory writes?
+10. Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions?
 
-11. In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the
-    bridge could launch the subprocess with the memory directory mounted read-only at the OS level
-    (platform-specific)."  Can this be done on Windows 11?
+11. In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
-12. In section 6.5, "CLAUDE.md Recommendations", please include the actual CLAUDE.md file contents.
-    I prefer to have the design document as self-contained as possible.
+12. In section 6.5, "CLAUDE.md Recommendations", please include the actual `CLAUDE.md` file contents. I prefer to have the design document as self-contained as possible.
 
-13. In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem
-    extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but
-    that file contains this instead:
+13. In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
 
-    ```
-    {
-      "globalShortcut": "Alt+Ctrl+Enter",
-      "preferences": {
-        "coworkScheduledTasksEnabled": false,
-        "sidebarMode": "code"
-      }
-    }```
+    ``` {"globalShortcut": "Alt+Ctrl+Enter", "preferences": {"coworkScheduledTasksEnabled": false, "sidebarMode": "code"}} ```
+
+14. Once this design stabilizes, do you see any issues with using Claude Code CLI to implement it?
+
+15. Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
