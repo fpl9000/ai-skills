@@ -1778,6 +1778,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
    ```
    C:\franl\.claude-agent-memory\
    └── blocks\                      # Tier 3: Content (loaded on demand)
+       ├── ...
        ├── humans.md                # Info about humans (the user, his family/friends, etc.)
        └── interests.md             # Long-term interests of the primary agent
    ```
