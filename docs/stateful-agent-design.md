@@ -94,7 +94,7 @@ The stateful agent system consists of three components that together give Claude
 | Anthropic Filesystem Extension | MCP server (npm) | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) |
 | Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage |
 | Memory skill | .zip file | Uploaded via Claude Desktop Settings | Instructions for memory lifecycle |
-| CLAUDE.md | Markdown file | `C:\Users\franl\.claude\CLAUDE.md` | Sub-agent environment context |
+| CLAUDE.md | Markdown file | `C:\Users\flitt\.claude\CLAUDE.md` | Sub-agent environment context |
 | Bridge config | YAML file | `C:\franl\.claude-agent-memory\bridge-config.yaml` | Bridge runtime settings |
 
 ### 1.3 Design Principles
@@ -946,12 +946,12 @@ runtime dependencies means installation is just copying the .exe.
 
 This decision is fundamental and is not revisited in the design. The rationale:
 
-| Format | Rejected because |
+| Format | Decision |
 |--------|-----------------|
-| **JSON** | Not human-readable at scale. Requires programmatic tooling to inspect or edit. Not Git-diff-friendly for prose content. Claude reads text natively — markdown is optimal. |
-| **SQLite** | Opaque binary format. Cannot be inspected in a text editor or GitHub web UI. Merge conflicts are unresolvable. Overkill for the expected data volume (dozens of files, hundreds of KB). |
-| **YAML** | Fragile whitespace sensitivity. Poor for long-form prose. Acceptable for metadata (hence the optional YAML frontmatter), but not for content bodies. |
-| **Markdown** | Human-readable, human-editable, Git-friendly diffs, viewable in any text editor or GitHub, Claude-native format, no parsing dependencies. Trade-off: lookups require reading files, not querying an index — acceptable at our scale. |
+| **JSON** | *Rejected:* Not human-readable at scale. Requires programmatic tooling to inspect or edit. Not Git-diff-friendly for prose content. Claude reads text natively — markdown is optimal. |
+| **SQLite** | *Rejected:* Opaque binary format. Cannot be inspected in a text editor or GitHub web UI. Merge conflicts are unresolvable. Overkill for the expected data volume (dozens of files, hundreds of KB). |
+| **YAML** | *Rejected:* Fragile whitespace sensitivity. Poor for long-form prose. Acceptable for metadata (hence the optional YAML frontmatter), but not for content bodies. |
+| **Markdown** | *Accepted:* Human-readable, human-editable, Git-friendly diffs, viewable in any text editor or GitHub, Claude-native format, no parsing dependencies. Trade-off: lookups require reading files, not querying an index — acceptable at our scale. |
 
 ---
 
@@ -981,11 +981,11 @@ about the user, their projects, and your shared history.
 
 ## CRITICAL: Use Local MCP Tools for All Persistent Operations
 
-ALWAYS use MCP Filesystem tools (Filesystem:read_file, Filesystem:write_file,
-Filesystem:edit_file) or Bridge tools (Bridge:append_file) for memory operations.
-NEVER use cloud VM tools (bash_tool, create_file, str_replace) for persistent data.
+ALWAYS use MCP Filesystem tools (`Filesystem:read_file`, `Filesystem:write_file`,
+`Filesystem:edit_file`) or Bridge tools (`Bridge:append_file`) for memory operations.
+NEVER use cloud VM tools (`bash_tool`, `create_file`, `str_replace`) for persistent data.
 The cloud VM filesystem is ephemeral and resets between sessions. Memory files live
-at C:\franl\.claude-agent-memory\ — always access them via MCP tools.
+at `C:\franl\.claude-agent-memory\` — always access them via MCP tools.
 
 ## Memory Directory
 
@@ -1000,10 +1000,10 @@ Structure:
 
 At the start of every conversation, BEFORE responding to the user's first message:
 
-1. Read core.md via Filesystem:read_file
-2. Read index.md via Filesystem:read_file
+1. Read core.md via `Filesystem:read_file`
+2. Read index.md via `Filesystem:read_file`
 3. Scan the index for blocks relevant to the user's opening message
-4. If a relevant block exists, read it via Filesystem:read_file
+4. If a relevant block exists, read it via `Filesystem:read_file`
 5. Now respond to the user, informed by your loaded context
 
 If core.md does not exist, this is a first-run scenario. Create the memory directory
@@ -1021,27 +1021,27 @@ and the current conversation.
 Write memory updates incrementally as significant information emerges. Do NOT
 accumulate changes and batch-write at session end — sessions can end abruptly.
 
-**Write to core.md** (via Filesystem:write_file or Filesystem:edit_file) when:
+**Write to core.md** (via `Filesystem:write_file` or `Filesystem:edit_file`) when:
 - A new project starts or an existing project's status changes significantly
 - Key facts about the user change (role, location, preferences)
 - Keep core.md under ~1,000 tokens. Move detailed content to blocks.
 
-**Write to index.md** (via Filesystem:edit_file) when:
+**Write to index.md** (via `Filesystem:edit_file`) when:
 - You create a new block (add a row)
 - A block's summary needs updating (edit the Summary column)
 - A block's content changes (update the Updated column)
 
-**Write to blocks** (via Filesystem:write_file or Filesystem:edit_file) when:
+**Write to blocks** (via `Filesystem:write_file` or `Filesystem:edit_file`) when:
 - Significant project decisions are made
 - Technical details worth remembering emerge
 - The user shares information that will be useful in future sessions
 
-**Append to episodic log** (via Bridge:append_file) when:
+**Append to episodic log** (via `Bridge:append_file`) when:
 - Periodically during long sessions (every 30–60 minutes)
 - At natural breakpoints in the conversation
 - Before the session ends (if you sense the user is wrapping up)
-- Format: ## YYYY-MM-DD — Brief Title\nSummary paragraph.\n\n
-- Target file: blocks\episodic-YYYY-MM.md (current month)
+- Format: `## YYYY-MM-DD — Brief Title\nSummary paragraph.\n\n`
+- Target file: `blocks\episodic-YYYY-MM.md` (current month)
 
 ### When to Create New Blocks
 If a conversation introduces a significant new project or topic that doesn't fit
@@ -1057,7 +1057,7 @@ into existing blocks, create a new block file:
   deployment" is better than "We discussed several languages and eventually decided
   on Go because..."
 - Date-stamp significant decisions and status changes.
-- When updating blocks, use Filesystem:edit_file for surgical changes rather than
+- When updating blocks, use `Filesystem:edit_file` for surgical changes rather than
   rewriting the entire file.
 - Re-read a file before writing if you haven't accessed it recently, to avoid
   overwriting changes from other sessions.
@@ -1079,12 +1079,12 @@ If the user asks "what do you remember about X?":
 4. Respond naturally, as if recalling from your own knowledge
 
 If the user asks to correct or delete a memory:
-1. Use Filesystem:edit_file to make the correction in the relevant file
+1. Use `Filesystem:edit_file` to make the correction in the relevant file
 2. Acknowledge the correction
 
 If the user asks to see their memory files:
 1. You can show them the contents of specific files
-2. Remind them that the files are plain markdown at C:\franl\.claude-agent-memory\
+2. Remind them that the files are plain markdown at `C:\franl\.claude-agent-memory\`
    and can be edited with any text editor
 ```
 
@@ -1741,3 +1741,72 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 - **MCP specification:** [modelcontextprotocol.io](https://modelcontextprotocol.io) — Protocol specification for tool registration, stdio transport, and Streamable HTTP transport.
 - **Claude Code system prompts:** [Piebald-AI/claude-code-system-prompts](https://github.com/Piebald-AI/claude-code-system-prompts) — Community-maintained extraction of Claude Code's default system prompt fragments.
 - **Anthropic Filesystem extension:** [@modelcontextprotocol/server-filesystem](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) — Official MCP server providing 11 filesystem tools.
+
+---
+
+## 11. Open Questions and Requested Changes
+
+1. Are you sure that Anthropic's filesystem MCP tool does have the option to append to a file?  I
+   was unable to find the definition of the `write_file` tool online to check this.  Can you find
+   it?
+
+2. In section 1.2, "Component Inventory", add a note that the memory skill's source will be in
+   `C:\franl\git\ai-skill\agent-memory`, since its source files should be under source control.
+
+3. In section 1.2, "Component Inventory", item #6 says that the single-writer model "eliminates
+   concurrent write issues for the B1 single-instance architecture", but doesn't this design have
+   the problem that concurrent conversations can overwrite memories?  Can that be avoided somehow
+   when using Anthropic's filesystem MCP server for memory writes?
+
+4. Section 2.2, "Data Flow", under heading "Memory write (during session)", the entry "→ calls
+   Filesystem:write_file (for core.md, index.md, or block updates)" implies that memory writes to
+   `core.md` and `index.md` are always full file writes, rather than edits.  Wouldn't edits be
+   safer, because Claude does not need to keep the entirety of those files unaltered in its context
+   window, which reduces the risk of hallucination distoring the memories?
+
+5. Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool,
+   but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens
+   (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
+
+6. What exactly does the bridge configuration parameter `job_expiry_seconds` mean?
+
+7. Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on
+   Windows?  How does the Go runtime deal with UNIX signals on Windows?
+
+8. In section 4.2, "Three-Tier File Structure", add the following memory block files:
+
+   ```
+   C:\franl\.claude-agent-memory\
+   └── blocks\                      # Tier 3: Content (loaded on demand)
+       ├── humans.md                # Info about humans (the user, his family/friends, etc.)
+       └── interests.md             # Long-term interests of the primary agent
+   ```
+
+   File `interests.md` should contain the primary agent's long-term interests, which will be updated
+   over time as the primary agent learns more about itself and the world.
+
+9. In section 4.6, "File Format: Episodic Logs", should entries include the time-of-day as well as
+   the date?  What happens when two episodic updates happen on the same day?
+
+10. Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop
+    also have these?  If so, can we use it to trigger memory writes?
+
+11. In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the
+    bridge could launch the subprocess with the memory directory mounted read-only at the OS level
+    (platform-specific)."  Can this be done on Windows 11?
+
+12. In section 6.5, "CLAUDE.md Recommendations", please include the actual CLAUDE.md file contents.
+    I prefer to have the design document as self-contained as possible.
+
+13. In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem
+    extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but
+    that file contains this instead:
+
+    ```
+    {
+      "globalShortcut": "Alt+Ctrl+Enter",
+      "preferences": {
+        "coworkScheduledTasksEnabled": false,
+        "sidebarMode": "code"
+      }
+    }```
