@@ -1955,7 +1955,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 ## 11. Open Questions
 
-1. ~~**Race condition with memory writes**~~ — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this only prevents torn writes. It doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
+1. **Race condition with memory writes** — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this only prevents torn writes. It doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
 
    - *Resolution:* Last-writer-wins is the accepted concurrency model for v1. A `safe_edit_file` tool would not solve this because the race is about stale reads, not unprotected writes. The mutex prevents data corruption; semantic divergence from concurrent read-modify-write is accepted as rare and tolerable. Optimistic locking via version counters is the identified upgrade path if this proves insufficient. See updated [Section 3.8](#38-write-mutex).
 
