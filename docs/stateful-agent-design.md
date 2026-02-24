@@ -22,13 +22,15 @@
   - [3.3 Tool Summary](#33-tool-summary)
   - [3.4 Tool: spawn_agent](#34-tool-spawn_agent)
   - [3.5 Tool: check_agent](#35-tool-check_agent)
-  - [3.6 Tool: safe_write_file](#36-tool-safe_write_file)
-  - [3.7 Tool: safe_append_file](#37-tool-safe_append_file)
-  - [3.8 Write Mutex](#38-write-mutex)
-  - [3.9 Job Lifecycle Manager](#39-job-lifecycle-manager)
-  - [3.10 Logging](#310-logging)
-  - [3.11 Error Handling](#311-error-handling)
-  - [3.12 Graceful Shutdown](#312-graceful-shutdown)
+  - [3.6 Tool: run_command](#36-tool-run_command)
+  - [3.7 Tool: safe_write_file](#37-tool-safe_write_file)
+  - [3.8 Tool: safe_append_file](#38-tool-safe_append_file)
+  - [3.9 Write Mutex](#39-write-mutex)
+  - [3.10 Async Executor](#310-async-executor)
+  - [3.11 Job Lifecycle Manager](#311-job-lifecycle-manager)
+  - [3.12 Logging](#312-logging)
+  - [3.13 Error Handling](#313-error-handling)
+  - [3.14 Graceful Shutdown](#314-graceful-shutdown)
 - [4. Memory System (Layer 2)](#4-memory-system-layer-2)
   - [4.1 Two-Layer Memory Model](#41-two-layer-memory-model)
   - [4.2 Three-Tier File Structure](#42-three-tier-file-structure)
@@ -110,7 +112,7 @@ These principles are inherited from the proposal and govern all design decisions
 
 3. **Single binary.** The MCP bridge compiles to a single static Go binary with no runtime dependencies. Installation is copying the `.exe` file.
 
-4. **Lean bridge with safe writes.** The bridge provides sub-agent lifecycle management (`spawn_agent`, `check_agent`) and mutex-protected memory file writes (`safe_write_file`, `safe_append_file`). The memory write tools intentionally overlap with the Filesystem extension's `write_file` — this is by design, not redundancy. The bridge tools are scoped to the memory directory and serialized via an in-process mutex, preventing concurrent conversations from overwriting each other's memory updates. All other filesystem operations (read, list, search, and non-memory writes) are handled by the Filesystem extension. This is "Path A" from the proposal, enhanced with safe memory writes.
+4. **Lean bridge with safe writes and local command execution.** The bridge provides sub-agent lifecycle management (`spawn_agent`, `check_agent`), direct local command execution (`run_command`), and mutex-protected memory file writes (`safe_write_file`, `safe_append_file`). The `run_command` tool executes shell commands on the local machine and returns stdout/stderr directly — no LLM inference involved — making it far cheaper than spawning a sub-agent for simple commands like `curl`, `grep`, or `git status`. The memory write tools intentionally overlap with the Filesystem extension's `write_file` — this is by design, not redundancy. The bridge tools are scoped to the memory directory and serialized via an in-process mutex, preventing concurrent conversations from overwriting each other's memory updates. All other filesystem operations (read, list, search, and non-memory writes) are handled by the Filesystem extension. This is "Path A" from the proposal, enhanced with safe memory writes and local command execution.
 
 5. **Compliance-based memory management.** Claude's memory updates are guided by skill instructions (compliance), not enforced by tool constraints. This is pragmatic — the alternative (a dedicated memory server with structured CRUD) is more complex and can be added later if compliance proves insufficient.
 
@@ -124,11 +126,11 @@ These principles are inherited from the proposal and govern all design decisions
 | **Sub-agent** | An ephemeral Claude Code CLI instance (`claude -p`) spawned by the bridge. One-shot, stateless, no Layer 1 memory. |
 | **Layer 1** | Anthropic's built-in memory. Auto-generated summary (~500–2,000 tokens) injected into every conversation. Influenced indirectly via `memory_user_edits` steering instructions. ~24-hour lag for updates. |
 | **Layer 2** | Our supplementary memory system. Markdown files at `~/.claude-agent-memory/`. Under our full control. Updates are immediate. |
-| **MCP bridge** | The Go binary that serves as an MCP server, providing `spawn_agent`, `check_agent`, `safe_write_file`, and `safe_append_file` tools. |
+| **MCP bridge** | The Go binary that serves as an MCP server, providing `spawn_agent`, `check_agent`, `run_command`, `safe_write_file`, and `safe_append_file` tools. |
 | **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for reading memory files and all non-memory file operations. |
 | **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file writes (`safe_write_file` and `safe_append_file`). Prevents concurrent conversations from interleaving or overwriting each other's memory updates. |
 | **Memory skill** | The .zip file uploaded to Claude Desktop containing SKILL.md — instructions for managing Layer 2 memory. |
-| **Sync window** | The 25-second window during which `spawn_agent` waits for the sub-agent to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. |
+| **Sync window** | The 25-second window during which `spawn_agent` and `run_command` wait for their subprocess to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. Shared implementation via the async executor (see [Section 3.10](#310-async-executor)). |
 | **Block** | An individual markdown file in the `blocks/` directory. Each block covers a project, topic, or time period. |
 | **Block reference** | A row in `index.md` mapping a block filename to its summary and last-updated date. |
 
@@ -159,10 +161,11 @@ These principles are inherited from the proposal and govern all design decisions
 │  │  Tools:              │  │                              │      │
 │  │  • spawn_agent       │  │  Tools:                      │      │
 │  │  • check_agent       │  │  • read_file                 │      │
-│  │  • safe_write_file   │  │  • write_file                │      │
-│  │  • safe_append_file  │  │  • edit_file                 │      │
-│  │       │              │  │  • create_directory          │      │
-│  │       │ subprocess   │  │  • list_directory            │      │
+│  │  • run_command        │  │  • write_file                │      │
+│  │  • safe_write_file   │  │  • edit_file                 │      │
+│  │  • safe_append_file  │  │  • create_directory          │      │
+│  │       │              │  │  • list_directory            │      │
+│  │       │ subprocess   │  │  • search_files              │      │
 │  │       ▼              │  │  • search_files              │      │
 │  │  ┌────────────┐      │  │  • ... (11 tools total)      │      │
 │  │  │ claude -p  │      │  │                              │      │
@@ -214,16 +217,28 @@ Claude LLM
   → (if async) Claude LLM polls with Bridge:check_agent(job_id)
 ```
 
+**Local command execution:**
+```
+Claude LLM
+  → calls Bridge:run_command("grep -r 'TODO' src/", ...)
+  → Bridge launches shell subprocess locally (Cygwin bash)
+  → No LLM involved — direct command execution, stdout/stderr captured
+  → Bridge returns result (sync) or job_id (async)
+  → (if async) Claude LLM polls with Bridge:check_agent(job_id)
+  Note: run_command uses the same hybrid sync/async model as spawn_agent,
+  sharing the async executor and job lifecycle manager. Use run_command
+  for simple commands; use spawn_agent when the task requires LLM reasoning.
+```
+
 ### 2.3 What the Bridge Does NOT Do
 
 The bridge is deliberately minimal. It does **not** provide:
 
 - Basic filesystem tools (read, list, search) — handled by the Filesystem extension. The bridge provides `safe_write_file` and `safe_append_file` specifically for memory files; all non-memory file writes use the Filesystem extension.
-- Network request tools (http_get, http_post) — deferred. Sub-agents can perform network operations directly. Can be added to the bridge later if needed.
-- Command execution tools (run_command, run_script) — deferred. Sub-agents provide this capability. A direct `run_command` tool can be added later.
+- Network request tools (http_get, http_post) — deferred. Sub-agents or `run_command` (e.g., `run_command("curl ...")`) can perform network operations. Dedicated network tools can be added to the bridge later if needed.
 - Memory-aware tools (update_memory_block, memory_search) — deferred to future enhancement. See [Section 9.2](#92-memory-aware-tools).
 
-This keeps the initial bridge small: four tool handlers, a write mutex, and the job lifecycle manager.
+This keeps the initial bridge small: five tool handlers, a write mutex, the async executor, and the job lifecycle manager.
 
 ---
 
@@ -238,8 +253,11 @@ mcp-bridge/
 ├── main.go                   # Entry point: loads config, registers tools, starts stdio server
 ├── config.go                 # Configuration loading and validation
 ├── tools.go                  # Tool handler registration
-├── spawn.go                  # spawn_agent tool handler + subprocess management
+├── async.go                  # Shared async executor: sync window, async handoff, output truncation
+│                             #   Used by both spawn_agent and run_command
+├── spawn.go                  # spawn_agent tool handler: builds claude -p command, delegates to async executor
 ├── check.go                  # check_agent tool handler
+├── run_command.go            # run_command tool handler: builds shell command, delegates to async executor
 ├── safe_write.go             # safe_write_file tool handler (mutex-protected atomic write)
 ├── safe_append.go            # safe_append_file tool handler (mutex-protected append)
 ├── writemutex.go             # Write mutex shared by safe_write_file and safe_append_file
@@ -267,16 +285,26 @@ The bridge reads its configuration from a YAML file. The config file location is
 ```yaml
 # bridge-config.yaml
 
-# Sub-agent defaults
-sub_agent:
-  sync_window_seconds: 25         # How long spawn_agent waits before going async
+# Async executor settings (shared by spawn_agent and run_command)
+async:
+  sync_window_seconds: 25         # How long to wait before going async
                                   # Must be < 30 (Claude Desktop reliability threshold)
+  job_expiry_seconds: 600         # Uncollected jobs cleaned up after this
+
+# Sub-agent defaults (for spawn_agent tool)
+sub_agent:
   default_timeout_seconds: 300    # Max subprocess runtime (kills after this)
   default_max_output_tokens: 4000 # Truncation threshold (chars/4 heuristic)
   max_concurrent_agents: 5        # Cap on simultaneous running sub-agents
-  job_expiry_seconds: 600         # Uncollected jobs cleaned up after this
 
-# Memory directory (used by append_file for path validation)
+# Local command execution (for run_command tool)
+run_command:
+  shell: "C:\\apps\\cygwin\\bin\\bash.exe"   # Shell to execute commands
+  shell_args: ["-c"]                         # Arguments before the command string
+  default_timeout_seconds: 120    # Max command runtime (kills after this)
+  default_max_output_bytes: 51200 # Truncate output beyond 50 KB (~12,500 tokens)
+
+# Memory directory (used by safe_write_file and safe_append_file for path validation)
 memory:
   directory: "C:\\franl\\.claude-agent-memory"
 
@@ -299,10 +327,11 @@ func LoadConfig(path string) Config:
     // Read YAML file
     // Apply defaults for any missing fields
     // Validate:
-    //   - sync_window_seconds < 30
+    //   - async.sync_window_seconds < 30
     //   - memory.directory exists (or create it)
     //   - logging.file parent directory exists
     //   - claude_cli.path is executable
+    //   - run_command.shell is executable
     // Return validated config
 ```
 
@@ -311,13 +340,14 @@ func LoadConfig(path string) Config:
 | Tool | MCP Name | Purpose |
 |------|----------|---------|
 | `spawn_agent` | `spawn_agent` | Launch a sub-agent (`claude -p`) with a task. Returns result (sync) or job_id (async). |
-| `check_agent` | `check_agent` | Poll a running sub-agent by job_id. Returns status and result. |
+| `check_agent` | `check_agent` | Poll a running async job by job_id. Returns status and result. Used for both `spawn_agent` and `run_command` async jobs. |
+| `run_command` | `run_command` | Execute a shell command on the local machine. No LLM involved — direct subprocess execution. Uses the same hybrid sync/async model as `spawn_agent`. Far cheaper than spawning a sub-agent for simple commands. |
 | `safe_write_file` | `safe_write_file` | Mutex-protected atomic write (full file replacement) for memory files. Uses temp-file-then-rename. |
 | `safe_append_file` | `safe_append_file` | Mutex-protected append for memory files. Primary use: episodic log entries. |
 
 ### 3.4 Tool: spawn_agent
 
-This is the most complex tool in the bridge. It manages the hybrid sync/async execution model required by Claude Desktop's ~60-second MCP timeout.
+This is the most complex tool in the bridge. It launches a Claude Code CLI sub-agent with a task. The subprocess lifecycle (sync window, async handoff, output truncation) is managed by the shared async executor (see [Section 3.10](#310-async-executor)).
 
 **MCP tool definition (registered with mcp-go):**
 
@@ -347,11 +377,11 @@ Output Schema:
 **Handler pseudo-code:**
 
 ```
-func HandleSpawnAgent(params SpawnAgentParams) SpawnAgentResult:
+func HandleSpawnAgent(params SpawnAgentParams) AsyncResult:
 
     // 1. Check concurrent agent cap
-    if jobManager.ActiveCount() >= config.MaxConcurrentAgents:
-        return error("Maximum concurrent sub-agents reached ({config.MaxConcurrentAgents}). 
+    if jobManager.ActiveCount() >= config.SubAgent.MaxConcurrentAgents:
+        return error("Maximum concurrent sub-agents reached ({config.SubAgent.MaxConcurrentAgents}). 
                       Wait for a running agent to complete, or check/cancel an existing job.")
 
     // 2. Build the system prompt
@@ -378,77 +408,37 @@ func HandleSpawnAgent(params SpawnAgentParams) SpawnAgentResult:
     for dir in params.AdditionalDirs:
         args += ["--add-dir", dir]
 
-    // 4. Launch the subprocess
-    startedAt = time.Now()
-    proc = exec.Command(config.ClaudeCLI.Path, args...)
-    proc.Dir = params.WorkingDirectory or os.UserHomeDir()
-    proc.Stdin = strings.NewReader(params.Task)  // Task goes to stdin
+    // 4. Build the exec.Cmd
+    cmd = exec.Command(config.ClaudeCLI.Path, args...)
+    cmd.Dir = params.WorkingDirectory or os.UserHomeDir()
+    cmd.Stdin = strings.NewReader(params.Task)  // Task goes to stdin
 
-    // Capture stdout and stderr
-    outputBuffer = new ConcurrentBuffer()
-    proc.Stdout = outputBuffer
-    proc.Stderr = outputBuffer  // Merge stderr into output for visibility
+    // 5. Determine timeout
+    timeout = params.TimeoutSeconds or config.SubAgent.DefaultTimeoutSeconds
 
-    err = proc.Start()
-    if err:
-        return error("Failed to start sub-agent: " + err)
+    // 6. Determine truncation threshold (in tokens)
+    maxOutput = params.MaxOutputTokens or config.SubAgent.DefaultMaxOutputTokens
 
-    // 5. Start the sync window timer
-    syncDeadline = startedAt.Add(config.SyncWindowSeconds * time.Second)
-    processTimeout = startedAt.Add(params.TimeoutSeconds * time.Second)
-
-    // 6. Wait for completion OR sync window expiry
-    done = make(chan error, 1)
-    go func():
-        done <- proc.Wait()
-
-    select:
-        case err = <-done:
-            // Sub-agent completed within sync window
-            output = outputBuffer.String()
-            output = truncateIfNeeded(output, params.MaxOutputTokens)
-
-            if err != nil:
-                return {
-                    status: "complete",
-                    job_id: null,
-                    result: "Sub-agent exited with error: " + err + "\nOutput:\n" + output,
-                    started_at: startedAt.Format(ISO8601)
-                }
-
-            return {
-                status: "complete",
-                job_id: null,
-                result: output,
-                started_at: startedAt.Format(ISO8601)
-            }
-
-        case <-time.After(time.Until(syncDeadline)):
-            // Sync window expired — go async
-            jobID = jobManager.Register(proc, outputBuffer, startedAt, processTimeout, 
-                                         params.MaxOutputTokens, done)
-
-            log.Info("Sub-agent exceeded sync window, assigned job_id=%s", jobID)
-
-            return {
-                status: "running",
-                job_id: jobID,
-                result: null,
-                started_at: startedAt.Format(ISO8601)
-            }
+    // 7. Delegate to the shared async executor
+    //    This handles: subprocess start, sync window, async handoff, output capture,
+    //    timeout enforcement, and output truncation.
+    return asyncExecutor.Run(cmd, timeout, maxOutput, "spawn_agent")
 ```
 
 ### 3.5 Tool: check_agent
+
+This tool polls the status of any async job, whether spawned by `spawn_agent` or `run_command`. Both tools use the same job lifecycle manager, so `check_agent` is the unified polling interface.
 
 **MCP tool definition:**
 
 ```
 Name:        "check_agent"
-Description: "Check the status of a running sub-agent by job ID.
+Description: "Check the status of a running async job by job ID.
+             Works for jobs created by both spawn_agent and run_command.
              Returns the current status and result if complete."
 
 Input Schema:
-  job_id:  string, required  — Job ID from spawn_agent
+  job_id:  string, required  — Job ID from spawn_agent or run_command
 
 Output Schema:
   status:          "running" | "complete" | "failed" | "timed_out"
@@ -456,6 +446,7 @@ Output Schema:
   error:           string | null
   started_at:      string (ISO 8601)
   elapsed_seconds: number
+  source:          "spawn_agent" | "run_command"  — Which tool created this job
 ```
 
 **Handler pseudo-code:**
@@ -475,7 +466,7 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
         case err = <-job.Done:
             // Process finished — collect result
             output = job.OutputBuffer.String()
-            output = truncateIfNeeded(output, job.MaxOutputTokens)
+            output = truncateIfNeeded(output, job.MaxOutput)
 
             // Mark job as collected (will be cleaned up by lifecycle manager)
             jobManager.MarkCollected(params.JobID)
@@ -486,7 +477,8 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
                     result: output,
                     error: err.String(),
                     started_at: job.StartedAt.Format(ISO8601),
-                    elapsed_seconds: elapsed
+                    elapsed_seconds: elapsed,
+                    source: job.Source
                 }
 
             return {
@@ -494,7 +486,8 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
                 result: output,
                 error: null,
                 started_at: job.StartedAt.Format(ISO8601),
-                elapsed_seconds: elapsed
+                elapsed_seconds: elapsed,
+                source: job.Source
             }
 
         default:
@@ -502,15 +495,16 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
             if time.Now().After(job.Deadline):
                 job.Process.Kill()
                 output = job.OutputBuffer.String()
-                output = truncateIfNeeded(output, job.MaxOutputTokens)
+                output = truncateIfNeeded(output, job.MaxOutput)
                 jobManager.MarkCollected(params.JobID)
 
                 return {
                     status: "timed_out",
                     result: output,
-                    error: "Sub-agent exceeded timeout of " + job.TimeoutSeconds + "s",
+                    error: "Process exceeded timeout of " + job.TimeoutSeconds + "s",
                     started_at: job.StartedAt.Format(ISO8601),
-                    elapsed_seconds: elapsed
+                    elapsed_seconds: elapsed,
+                    source: job.Source
                 }
 
             // Still running and within timeout
@@ -519,11 +513,126 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
                 result: null,
                 error: null,
                 started_at: job.StartedAt.Format(ISO8601),
-                elapsed_seconds: elapsed
+                elapsed_seconds: elapsed,
+                source: job.Source
             }
 ```
 
-### 3.6 Tool: safe_write_file
+### 3.6 Tool: run_command
+
+This tool executes a shell command on the local machine and returns its output. No LLM is involved — this is direct subprocess execution, making it dramatically cheaper than `spawn_agent` for simple operations like `curl`, `git status`, `grep`, `find`, `cat`, `ls`, directory listings, and short scripts. It uses the same hybrid sync/async model as `spawn_agent` via the shared async executor (see [Section 3.10](#310-async-executor)), so long-running commands (e.g., a recursive `grep` of a large codebase) are handled correctly without hitting the MCP timeout.
+
+**When to use `run_command` vs. `spawn_agent`:**
+- Use `run_command` when the task can be expressed as a single shell command or short pipeline and requires no LLM reasoning. Examples: `git status`, `curl https://api.example.com/data`, `grep -r 'TODO' src/`, `wc -l *.go`, `find . -name '*.md' -mtime -7`.
+- Use `spawn_agent` when the task requires LLM reasoning, multi-step problem solving, or iterative refinement. Examples: "Refactor the error handling in server.go", "Write unit tests for the auth module", "Read this log file and summarize the errors".
+
+**Security model:** No restrictions beyond the OS-level permissions of the bridge process. The primary agent already has equivalent local access via `spawn_agent` (which can run arbitrary commands through Claude Code CLI), so `run_command` does not expand the attack surface — it just makes the common case cheaper. All commands are logged (command text, working directory, exit code, truncated output) for auditability.
+
+**Shell configuration:** Commands are executed via a configurable shell, defaulting to Cygwin bash (`C:\apps\cygwin\bin\bash.exe -c "<command>"`). This ensures consistent UNIX-like behavior for commands like `grep`, `find`, `curl`, etc. The shell and its arguments are configurable in `bridge-config.yaml` (see [Section 3.2](#32-configuration)).
+
+**MCP tool definition:**
+
+```
+Name:        "run_command"
+Description: "Execute a shell command on the local machine and return its output.
+             No LLM involved — direct subprocess execution. Uses the same hybrid
+             sync/async model as spawn_agent: commands completing within the sync
+             window return results immediately; longer commands return a job_id
+             for polling via check_agent. Use this for simple operations (curl,
+             grep, git, ls, etc.); use spawn_agent when LLM reasoning is needed."
+
+Input Schema:
+  command:            string, required   — Shell command to execute
+  working_directory:  string, optional   — CWD for the command (default: user's home dir)
+  timeout_seconds:    integer, optional  — Max runtime in seconds (default: from config, typically 120)
+  max_output_bytes:   integer, optional  — Truncate combined stdout+stderr beyond this
+                                           (default: from config, typically 50 KB)
+
+Output Schema:
+  status:          "complete" | "running"    — "complete" if finished within sync window
+  job_id:          string | null             — Non-null only if async (status == "running")
+  exit_code:       integer | null            — Process exit code (null if still running)
+  stdout:          string | null             — Captured stdout (null if still running)
+  stderr:          string | null             — Captured stderr (null if still running)
+  timed_out:       boolean                   — True if killed due to timeout
+  truncated:       boolean                   — True if output was truncated to max_output_bytes
+  elapsed_ms:      integer                   — Wall-clock milliseconds
+  started_at:      string (ISO 8601)
+```
+
+**Handler pseudo-code:**
+
+```
+func HandleRunCommand(params RunCommandParams) AsyncResult:
+
+    // 1. Validate inputs
+    if params.Command == "":
+        return error("command is required and must be non-empty")
+
+    // 2. Resolve configuration defaults
+    timeout = params.TimeoutSeconds or config.RunCommand.DefaultTimeoutSeconds
+    maxOutputBytes = params.MaxOutputBytes or config.RunCommand.DefaultMaxOutputBytes
+    workDir = params.WorkingDirectory or os.UserHomeDir()
+
+    // 3. Construct the shell command
+    //    Wraps the command in the configured shell (Cygwin bash by default).
+    //    This ensures consistent UNIX-like behavior on Windows.
+    //    Example: ["C:\apps\cygwin\bin\bash.exe", "-c", "grep -r 'TODO' src/"]
+    shellPath = config.RunCommand.Shell          // e.g., "C:\apps\cygwin\bin\bash.exe"
+    shellArgs = config.RunCommand.ShellArgs      // e.g., ["-c"]
+    fullArgs = append(shellArgs, params.Command)
+
+    cmd = exec.Command(shellPath, fullArgs...)
+    cmd.Dir = workDir
+
+    // 4. Log the command for auditability
+    log.Info("run_command: command=%q, cwd=%s, timeout=%ds", params.Command, workDir, timeout)
+
+    // 5. Delegate to the shared async executor
+    //    Same hybrid sync/async model as spawn_agent:
+    //    - Waits up to sync_window_seconds for the command to finish
+    //    - If the command completes within the sync window, returns result immediately
+    //    - If not, registers an async job and returns job_id for check_agent polling
+    result = asyncExecutor.Run(cmd, timeout, maxOutputBytes, "run_command")
+
+    // 6. If sync completion, enrich with run_command-specific fields
+    if result.Status == "complete":
+        return {
+            status: "complete",
+            job_id: null,
+            exit_code: cmd.ProcessState.ExitCode(),
+            stdout: result.Stdout,
+            stderr: result.Stderr,
+            timed_out: false,
+            truncated: result.Truncated,
+            elapsed_ms: result.ElapsedMs,
+            started_at: result.StartedAt
+        }
+
+    // 7. Async handoff — return job_id for polling via check_agent
+    return {
+        status: "running",
+        job_id: result.JobID,
+        exit_code: null,
+        stdout: null,
+        stderr: null,
+        timed_out: false,
+        truncated: false,
+        elapsed_ms: result.ElapsedMs,
+        started_at: result.StartedAt
+    }
+```
+
+**Output truncation:** When combined stdout+stderr exceeds `max_output_bytes` (default 50 KB, ~12,500 tokens), the output is truncated from the middle, preserving the first and last portions with a marker:
+
+```
+[...output truncated: {total_bytes} bytes exceeded limit of {max_output_bytes} bytes.
+    Showing first {keep_bytes} and last {keep_bytes} bytes...]
+```
+
+Middle truncation is preferred over tail truncation because command output often has useful context at both the beginning (headers, initial progress) and the end (summary, final errors).
+
+### 3.7 Tool: safe_write_file
 
 This tool performs a mutex-protected, atomic full-file write. It is the primary tool for updating memory files (`core.md`, `index.md`, content blocks). It replaces the use of `Filesystem:write_file` and `Filesystem:edit_file` for all memory operations.
 
@@ -604,7 +713,7 @@ func HandleSafeWriteFile(params SafeWriteFileParams) SafeWriteFileResult:
 
 **Windows rename caveat:** On Windows, `os.Rename` cannot atomically overwrite an existing file on all filesystems. The pseudo-code above uses a remove-then-rename sequence, which introduces a tiny window where the file doesn't exist. For our use case (low-frequency memory writes, mutex-serialized), this is acceptable. If true atomicity is needed later, the Windows `ReplaceFile` API can be called via `syscall`.
 
-### 3.7 Tool: safe_append_file
+### 3.8 Tool: safe_append_file
 
 This tool performs a mutex-protected append to a memory file. Its primary use case is adding entries to episodic log files (`episodic-YYYY-MM.md`), where each conversation appends a timestamped entry and a full rewrite is unnecessary.
 
@@ -662,7 +771,7 @@ func HandleSafeAppendFile(params SafeAppendFileParams) SafeAppendFileResult:
     return { success: true, bytes_written: n }
 ```
 
-### 3.8 Write Mutex
+### 3.9 Write Mutex
 
 The write mutex is the mechanism that serializes all memory file writes. It is a single `sync.Mutex` shared by both `safe_write_file` and `safe_append_file`.
 
@@ -699,20 +808,122 @@ var writeMutex sync.Mutex
 
 That's it. The entire write mutex implementation is a single global variable. Both tool handlers call `writeMutex.Lock()` / `defer writeMutex.Unlock()` at the start of their write operations.
 
-### 3.9 Job Lifecycle Manager
+### 3.10 Async Executor
 
-The job manager is a background goroutine that tracks active sub-agent jobs and cleans up expired ones.
+The async executor is the shared component that implements the hybrid sync/async execution model. Both `spawn_agent` and `run_command` delegate to it for subprocess lifecycle management. Extracting this into a shared component avoids duplicating the sync-window / async-handoff logic across tool handlers.
+
+**Responsibilities:**
+- Start a subprocess from a prepared `exec.Cmd`
+- Capture stdout and stderr into a thread-safe buffer
+- Wait up to `sync_window_seconds` for the process to complete (sync path)
+- If the process completes within the sync window, return the result immediately
+- If the process exceeds the sync window, register an async job with the job lifecycle manager and return a `job_id` (async path)
+- Enforce the per-command timeout (kill process if it exceeds the deadline)
+- Truncate output to the configured limit
+
+**Why a separate component?** Before `run_command` was added, the sync/async logic lived inline in `spawn_agent`'s handler. With two tools now sharing the same pattern, extracting it prevents code duplication and ensures both tools have identical timeout, truncation, and async-handoff behavior. The async executor is purely internal — it is not an MCP tool and is not visible to the primary agent.
+
+**Pseudo-code (async.go):**
+
+```
+type AsyncResult struct {
+    Status    string    // "complete" or "running"
+    JobID     string    // Non-null only if Status == "running"
+    Stdout    string    // Captured stdout (sync path only)
+    Stderr    string    // Captured stderr (sync path only)
+    Truncated bool      // True if output was truncated
+    ElapsedMs int       // Wall-clock milliseconds
+    StartedAt string    // ISO 8601
+}
+
+// Run starts a subprocess and manages the sync/async handoff.
+// The caller (spawn_agent or run_command) is responsible for constructing
+// the exec.Cmd with the correct command, arguments, working directory, and stdin.
+// The source parameter identifies which tool created the job (for check_agent's
+// response and for logging).
+func (ae *AsyncExecutor) Run(cmd *exec.Cmd, timeoutSeconds int,
+                              maxOutput int, source string) AsyncResult:
+
+    // 1. Set up output capture
+    //    stdout and stderr are merged into a single thread-safe buffer
+    //    so that interleaved output is preserved in order.
+    outputBuffer = new ConcurrentBuffer()
+    cmd.Stdout = outputBuffer
+    cmd.Stderr = outputBuffer
+
+    // 2. Start the subprocess
+    startedAt = time.Now()
+    err = cmd.Start()
+    if err:
+        return error("Failed to start process: " + err)
+
+    // 3. Compute deadlines
+    syncDeadline = startedAt.Add(config.Async.SyncWindowSeconds * time.Second)
+    processDeadline = startedAt.Add(timeoutSeconds * time.Second)
+
+    // 4. Wait for completion in a goroutine
+    done = make(chan error, 1)
+    go func():
+        done <- cmd.Wait()
+
+    // 5. Sync window: wait for process completion or sync deadline
+    select:
+        case err = <-done:
+            // Process completed within sync window — return result immediately
+            elapsed = time.Since(startedAt).Milliseconds()
+            output = outputBuffer.String()
+            truncated = false
+
+            if len(output) > maxOutput:
+                output = truncateMiddle(output, maxOutput)
+                truncated = true
+
+            return AsyncResult{
+                Status:    "complete",
+                JobID:     "",
+                Stdout:    output,         // For run_command; spawn_agent uses as combined output
+                Stderr:    "",             // Merged into Stdout
+                Truncated: truncated,
+                ElapsedMs: elapsed,
+                StartedAt: startedAt.Format(ISO8601),
+            }
+
+        case <-time.After(time.Until(syncDeadline)):
+            // Sync window expired — register async job for check_agent polling
+            jobID = jobManager.Register(cmd.Process, outputBuffer, startedAt,
+                                         processDeadline, maxOutput, done, source)
+
+            log.Info("Process exceeded sync window, source=%s, job_id=%s", source, jobID)
+
+            elapsed = time.Since(startedAt).Milliseconds()
+            return AsyncResult{
+                Status:    "running",
+                JobID:     jobID,
+                Stdout:    "",
+                Stderr:    "",
+                Truncated: false,
+                ElapsedMs: elapsed,
+                StartedAt: startedAt.Format(ISO8601),
+            }
+```
+
+**Timeout enforcement:** When a process exceeds its `timeoutSeconds` deadline, it is killed by one of two mechanisms: (a) `check_agent` detects the deadline has passed and kills the process when polled, or (b) the job lifecycle manager's cleanup goroutine kills expired processes during its periodic sweep. This dual-path ensures processes are killed even if the primary agent never polls.
+
+### 3.11 Job Lifecycle Manager
+
+The job manager is a background goroutine that tracks active async jobs (from both `spawn_agent` and `run_command`) and cleans up expired ones.
 
 **Data structures:**
 
 ```
 type Job struct {
     ID             string
+    Source         string              // "spawn_agent" or "run_command" — identifies which tool created the job
     Process        *os.Process
     OutputBuffer   *ConcurrentBuffer   // Thread-safe buffer capturing stdout+stderr
     StartedAt      time.Time
     Deadline       time.Time           // StartedAt + TimeoutSeconds
-    MaxOutputTokens int
+    MaxOutput      int                 // Token limit (spawn_agent) or byte limit (run_command)
     Done           chan error           // Signaled when process exits
     Collected      bool                // True after check_agent retrieves the result
 }
@@ -742,12 +953,12 @@ func (jm *JobManager) CleanupLoop():
 
             // Clean up uncollected jobs that have expired
             // (process finished but primary agent never polled)
-            expiryTime = job.StartedAt.Add(config.JobExpirySeconds * time.Second)
+            expiryTime = job.StartedAt.Add(config.Async.JobExpirySeconds * time.Second)
             if now.After(expiryTime):
                 // If process is still running, kill it
                 if !job.ProcessDone():
                     job.Process.Kill()
-                log.Warn("Job %s expired without being collected", id)
+                log.Warn("Job %s (source=%s) expired without being collected", id, job.Source)
                 delete(jm.jobs, id)
 
         jm.mu.Unlock()
@@ -755,7 +966,7 @@ func (jm *JobManager) CleanupLoop():
 
 **Job ID generation:** Use a short, human-readable ID composed of a prefix and random suffix, e.g., `job-a1b2c3`. The prefix makes log entries easy to grep. Use `crypto/rand` for the random component.
 
-### 3.10 Logging
+### 3.12 Logging
 
 All bridge operations are logged to a file for auditability and debugging. Logging does **not** go to stdout/stderr (those are reserved for MCP stdio transport).
 
@@ -768,8 +979,11 @@ All bridge operations are logged to a file for auditability and debugging. Loggi
 | spawn_agent: subprocess launched | info | job_id (if async), model, working_dir |
 | spawn_agent: sync completion | info | elapsed time, output size |
 | spawn_agent: async handoff | info | job_id, elapsed time at handoff |
-| check_agent: status poll | debug | job_id, status, elapsed |
-| check_agent: result collected | info | job_id, status, elapsed, output size |
+| run_command: command executed | info | command (first 200 chars), working_dir, timeout |
+| run_command: sync completion | info | exit_code, elapsed time, output size, truncated |
+| run_command: async handoff | info | job_id, command (first 200 chars), elapsed time at handoff |
+| check_agent: status poll | debug | job_id, source, status, elapsed |
+| check_agent: result collected | info | job_id, source, status, elapsed, output size |
 | safe_write_file: write | info | path, bytes written |
 | safe_append_file: append | info | path, bytes written |
 | Job expired | warn | job_id, reason |
@@ -783,7 +997,7 @@ All bridge operations are logged to a file for auditability and debugging. Loggi
 {"ts":"2026-02-21T14:30:00Z","level":"info","msg":"spawn_agent: subprocess launched","job_id":"job-a1b2c3","model":"sonnet","working_dir":"C:\\franl\\git\\mcp-bridge"}
 ```
 
-### 3.11 Error Handling
+### 3.13 Error Handling
 
 The bridge should never crash from a tool call. All errors are caught and returned as MCP tool errors.
 
@@ -793,18 +1007,19 @@ The bridge should never crash from a tool call. All errors are caught and return
 |----------|---------|----------|
 | Configuration error | Missing config file, invalid YAML | Bridge fails to start with clear error message |
 | Tool input validation | Missing required param, invalid path | Return MCP tool error immediately |
-| Subprocess launch failure | `claude` not found, permission denied | Return MCP tool error with details |
-| Subprocess timeout | Sub-agent exceeds `timeout_seconds` | Kill process, return `timed_out` status via `check_agent` |
-| Subprocess crash | `claude -p` exits with non-zero | Return output + exit code via `result` field |
+| Subprocess launch failure | `claude` not found, shell not found, permission denied | Return MCP tool error with details |
+| Subprocess timeout | Sub-agent or command exceeds `timeout_seconds` | Kill process, return `timed_out` status via `check_agent` |
+| Subprocess crash | `claude -p` or shell command exits with non-zero | Return output + exit code via `result` field |
+| Shell not found | Configured `run_command.shell` path doesn't exist | Return MCP tool error; verify Cygwin installation |
 | File I/O error | Permission denied, disk full | Return MCP tool error with OS error details |
 | Concurrent agent cap reached | 5 sub-agents already running | Return MCP tool error suggesting the user wait or check existing jobs |
 
-### 3.12 Graceful Shutdown
+### 3.14 Graceful Shutdown
 
 When the bridge receives a shutdown signal (Claude Desktop closes, SIGINT, SIGTERM):
 
 1. Stop accepting new tool calls.
-2. Kill all running sub-agent subprocesses (send SIGTERM, wait 5 seconds, then SIGKILL).
+2. Kill all running subprocesses — both sub-agents (from `spawn_agent`) and shell commands (from `run_command`). Send SIGTERM, wait 5 seconds, then SIGKILL.
 3. Log the shutdown and number of jobs terminated.
 4. Exit cleanly.
 
@@ -960,7 +1175,7 @@ is the current focus.
 - Basic filesystem: delegated to Anthropic's Filesystem extension (Path A)
 
 ## Architecture
-The bridge is a single Go binary that registers three MCP tools via the mcp-go SDK.
+The bridge is a single Go binary that registers five MCP tools via the mcp-go SDK.
 It communicates with Claude Desktop over stdin/stdout using MCP's stdio transport.
 Sub-agents are launched as `claude -p` subprocesses.
 
@@ -1657,23 +1872,43 @@ echo "Working directory: $(pwd)"
 | Completed job | Start fast mock, wait, then poll | `status: "complete"`, result contains output |
 | Already collected | Poll same job_id twice after completion | Second poll returns error (job cleaned up) |
 | Expired job | Wait past job_expiry_seconds, then poll | Error: "Unknown job_id" (cleaned up) |
+| Source field (spawn_agent) | Spawn agent, poll | `source: "spawn_agent"` in response |
+| Source field (run_command) | Run command (async), poll | `source: "run_command"` in response |
 
-#### 8.1.4 Job Lifecycle Tests
+#### 8.1.4 run_command Tests
+
+| Test Case | Setup | Expected Behavior |
+|-----------|-------|-------------------|
+| Simple command (sync) | `run_command("echo hello")` | `status: "complete"`, `stdout` contains "hello", `exit_code: 0` |
+| Failing command (sync) | `run_command("false")` | `status: "complete"`, `exit_code: 1` |
+| Long-running command (async) | `run_command("sleep 60")` | `status: "running"`, `job_id` is non-null |
+| Async completion via check_agent | `run_command("sleep 30")`, then poll | `check_agent` returns `status: "complete"`, `source: "run_command"` |
+| Command timeout | `run_command("sleep 999", timeout_seconds=5)` | `check_agent` returns `status: "timed_out"` |
+| Output truncation | `run_command("seq 1 1000000")`, max_output_bytes=1024 | Output truncated with middle-truncation marker, `truncated: true` |
+| Working directory | `run_command("pwd", working_directory="/tmp")` | stdout contains "/tmp" |
+| Shell configuration | Configure custom shell path | Command executed via configured shell |
+| Invalid shell | Set run_command.shell to "/nonexistent" | Returns error: "Failed to start process" |
+| Empty command | `run_command("")` | Returns error: "command is required" |
+| Stderr capture | `run_command("echo error >&2")` | stderr contains "error" |
+| Pipeline | `run_command("echo hello \| tr a-z A-Z")` | stdout contains "HELLO" |
+
+#### 8.1.5 Job Lifecycle Tests
 
 | Test Case | Expected Behavior |
 |-----------|-------------------|
 | Cleanup goroutine runs | After job_expiry_seconds, uncollected jobs are removed |
 | Graceful shutdown | All active subprocesses are killed, bridge exits cleanly |
 | Job ID uniqueness | 1000 sequential job IDs are all unique |
+| Mixed job sources | Jobs from both spawn_agent and run_command coexist in job manager |
 
-#### 8.1.5 MCP Integration Tests
+#### 8.1.6 MCP Integration Tests
 
 These tests verify the bridge works correctly as an MCP server. Use the `mcp-go` SDK's test utilities or send raw JSON-RPC messages over a pipe.
 
 | Test Case | Expected Behavior |
 |-----------|-------------------|
 | MCP initialization handshake | Bridge responds with capabilities and tool list |
-| Tool listing | Returns spawn_agent, check_agent, safe_write_file, safe_append_file |
+| Tool listing | Returns spawn_agent, check_agent, run_command, safe_write_file, safe_append_file |
 | Tool call with valid params | Returns well-formed MCP result |
 | Tool call with missing required param | Returns MCP error with descriptive message |
 | Two concurrent tool calls (via pipe) | Both complete correctly (test serialization) |
@@ -1856,18 +2091,20 @@ The system is considered ready for daily use when:
 
 | # | Criterion | Verified by |
 |---|-----------|-------------|
-| AC1 | Bridge starts and registers all 3 tools with Claude Desktop | MCP integration test |
+| AC1 | Bridge starts and registers all 5 tools with Claude Desktop | MCP integration test |
 | AC2 | spawn_agent completes fast tasks synchronously (< 25s) | Sub-agent test 8.3.1 |
 | AC3 | spawn_agent handles slow tasks asynchronously (> 25s) | Sub-agent test 8.3.4 |
-| AC4 | check_agent returns correct status and results | check_agent tests 8.1.3 |
-| AC5 | append_file atomically appends to files within memory dir | append_file tests 8.1.1 |
-| AC6 | Memory skill loads core.md + index.md at session start | Skill test 8.2.1 |
-| AC7 | Memory skill writes updates during conversation | Skill test 8.2.3 |
-| AC8 | Memory skill creates episodic log entries | Skill test 8.2.4 |
-| AC9 | Memory persists across conversations | Integration test 8.4.1 |
-| AC10 | Sub-agent directory sandbox blocks unauthorized access | Sub-agent test 8.3.3 |
-| AC11 | Both MCP servers (bridge + filesystem) work simultaneously | Integration test 8.4.3 |
-| AC12 | No memory writes use cloud VM tools | Skill test 8.2.6 |
+| AC4 | check_agent returns correct status and results for both spawn_agent and run_command jobs | check_agent tests 8.1.3 |
+| AC5 | run_command executes simple commands and returns stdout/stderr/exit_code | run_command tests 8.1.4 |
+| AC6 | run_command uses hybrid sync/async model for long-running commands | run_command tests 8.1.4 |
+| AC7 | append_file atomically appends to files within memory dir | append_file tests 8.1.1 |
+| AC8 | Memory skill loads core.md + index.md at session start | Skill test 8.2.1 |
+| AC9 | Memory skill writes updates during conversation | Skill test 8.2.3 |
+| AC10 | Memory skill creates episodic log entries | Skill test 8.2.4 |
+| AC11 | Memory persists across conversations | Integration test 8.4.1 |
+| AC12 | Sub-agent directory sandbox blocks unauthorized access | Sub-agent test 8.3.3 |
+| AC13 | Both MCP servers (bridge + filesystem) work simultaneously | Integration test 8.4.3 |
+| AC14 | No memory writes use cloud VM tools | Skill test 8.2.6 |
 
 ---
 
@@ -1957,17 +2194,17 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 1. **Race condition with memory writes** — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this only prevents torn writes. It doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
 
-   - *Resolution:* Last-writer-wins is the accepted concurrency model for v1. A `safe_edit_file` tool would not solve this because the race is about stale reads, not unprotected writes. The mutex prevents data corruption; semantic divergence from concurrent read-modify-write is accepted as rare and tolerable. Optimistic locking via version counters is the identified upgrade path if this proves insufficient. See updated [Section 3.8](#38-write-mutex).
+   - *Resolution:* Last-writer-wins is the accepted concurrency model for v1. A `safe_edit_file` tool would not solve this because the race is about stale reads, not unprotected writes. The mutex prevents data corruption; semantic divergence from concurrent read-modify-write is accepted as rare and tolerable. Optimistic locking via version counters is the identified upgrade path if this proves insufficient. See updated [Section 3.9](#39-write-mutex).
 
 2. **Need a tool to run commands** — Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool, but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
 
-   - *Resolution:* TBD
+   - *Resolution:* Agreed. The `run_command` tool has been added to the bridge as a first-class tool (see [Section 3.6](#36-tool-run_command)). It executes shell commands via Cygwin bash (`C:\apps\cygwin\bin\bash.exe -c "<command>"`) with no LLM inference involved, making it dramatically cheaper than `spawn_agent` for simple operations. Key design decisions: (a) uses the same hybrid sync/async model as `spawn_agent` via the shared async executor ([Section 3.10](#310-async-executor)), so long-running commands like recursive `grep` are handled correctly; (b) default output limit is 50 KB (~12,500 tokens) to avoid context window bloat; (c) middle-truncation preserves both head and tail of output; (d) no command restrictions for v1 (primary agent already has equivalent access via `spawn_agent`); (e) all commands are logged for auditability. Section 2.3 has been updated to remove `run_command` from the "does NOT do" list. The bridge now provides five tools total.
 
 3. **Bridge configuration question** — What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
 
    - *Resolution:* TBD
 
-4. **UNIX Signals on Windows** — Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
+4. **UNIX Signals on Windows** — Section 3.14, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
 
    - *Resolution:* TBD
 
