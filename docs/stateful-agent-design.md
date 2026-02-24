@@ -161,7 +161,7 @@ These principles are inherited from the proposal and govern all design decisions
 │  │  Tools:              │  │                              │      │
 │  │  • spawn_agent       │  │  Tools:                      │      │
 │  │  • check_agent       │  │  • read_file                 │      │
-│  │  • run_command        │  │  • write_file                │      │
+│  │  • run_command       │  │  • write_file                │      │
 │  │  • safe_write_file   │  │  • edit_file                 │      │
 │  │  • safe_append_file  │  │  • create_directory          │      │
 │  │       │              │  │  • list_directory            │      │
