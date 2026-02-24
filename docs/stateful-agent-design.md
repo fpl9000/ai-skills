@@ -22,11 +22,13 @@
   - [3.3 Tool Summary](#33-tool-summary)
   - [3.4 Tool: spawn_agent](#34-tool-spawn_agent)
   - [3.5 Tool: check_agent](#35-tool-check_agent)
-  - [3.6 Tool: append_file](#36-tool-append_file)
-  - [3.7 Job Lifecycle Manager](#37-job-lifecycle-manager)
-  - [3.8 Logging](#38-logging)
-  - [3.9 Error Handling](#39-error-handling)
-  - [3.10 Graceful Shutdown](#310-graceful-shutdown)
+  - [3.6 Tool: safe_write_file](#36-tool-safe_write_file)
+  - [3.7 Tool: safe_append_file](#37-tool-safe_append_file)
+  - [3.8 Write Mutex](#38-write-mutex)
+  - [3.9 Job Lifecycle Manager](#39-job-lifecycle-manager)
+  - [3.10 Logging](#310-logging)
+  - [3.11 Error Handling](#311-error-handling)
+  - [3.12 Graceful Shutdown](#312-graceful-shutdown)
 - [4. Memory System (Layer 2)](#4-memory-system-layer-2)
   - [4.1 Two-Layer Memory Model](#41-two-layer-memory-model)
   - [4.2 Three-Tier File Structure](#42-three-tier-file-structure)
@@ -80,7 +82,7 @@
 
 The stateful agent system consists of three components that together give Claude persistent memory, local machine access, and task delegation capabilities:
 
-1. **MCP Bridge Server** — A Go binary that runs locally, providing sub-agent spawning and file-append capabilities to the Claude Desktop App via the MCP protocol over stdio.
+1. **MCP Bridge Server** — A Go binary that runs locally, providing sub-agent spawning and mutex-protected memory file writes to the Claude Desktop App via the MCP protocol over stdio.
 
 2. **Memory System (Layer 2)** — A directory of markdown files on the local filesystem that stores deep project context, episodic recall, decision history, and technical notes. This supplements Anthropic's built-in memory (Layer 1), which is limited to ~500–2,000 tokens.
 
@@ -90,7 +92,7 @@ The stateful agent system consists of three components that together give Claude
 
 | Component | Type | Location | Purpose |
 |-----------|------|----------|---------|
-| MCP Bridge Server | Go binary | `C:\franl\git\mcp-bridge\mcp-bridge.exe` | Sub-agent spawning, file append |
+| MCP Bridge Server | Go binary | `C:\franl\git\mcp-bridge\mcp-bridge.exe` | Sub-agent spawning, mutex-protected memory writes |
 | Anthropic Filesystem Extension | MCP server (npm) | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) |
 | Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage |
 | Memory skill | .zip file | Uploaded via Claude Desktop Settings | Instructions for memory lifecycle |
@@ -107,11 +109,11 @@ These principles are inherited from the proposal and govern all design decisions
 
 3. **Single binary.** The MCP bridge compiles to a single static Go binary with no runtime dependencies. Installation is copying the `.exe` file.
 
-4. **Lean bridge.** The bridge provides only capabilities that the existing Anthropic Filesystem extension lacks: `spawn_agent`, `check_agent`, and `append_file`. All basic filesystem operations (read, write, edit, list, search) are handled by the Filesystem extension. This is "Path A" from the proposal.
+4. **Lean bridge with safe writes.** The bridge provides sub-agent lifecycle management (`spawn_agent`, `check_agent`) and mutex-protected memory file writes (`safe_write_file`, `safe_append_file`). The memory write tools intentionally overlap with the Filesystem extension's `write_file` — this is by design, not redundancy. The bridge tools are scoped to the memory directory and serialized via an in-process mutex, preventing concurrent conversations from overwriting each other's memory updates. All other filesystem operations (read, list, search, and non-memory writes) are handled by the Filesystem extension. This is "Path A" from the proposal, enhanced with safe memory writes.
 
 5. **Compliance-based memory management.** Claude's memory updates are guided by skill instructions (compliance), not enforced by tool constraints. This is pragmatic — the alternative (a dedicated memory server with structured CRUD) is more complex and can be added later if compliance proves insufficient.
 
-6. **Single-writer model.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents are read-only. This eliminates concurrent write issues for the B1 single-instance architecture.
+6. **Single-writer model with mutex protection.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents are read-only. While the B1 architecture uses a single Desktop App instance, multiple concurrent conversations within that instance can still race on memory writes. The bridge's in-process write mutex serializes all memory file writes, eliminating this race condition without requiring the token-expensive read-before-write pattern.
 
 ### 1.4 Terminology
 
@@ -121,8 +123,9 @@ These principles are inherited from the proposal and govern all design decisions
 | **Sub-agent** | An ephemeral Claude Code CLI instance (`claude -p`) spawned by the bridge. One-shot, stateless, no Layer 1 memory. |
 | **Layer 1** | Anthropic's built-in memory. Auto-generated summary (~500–2,000 tokens) injected into every conversation. Influenced indirectly via `memory_user_edits` steering instructions. ~24-hour lag for updates. |
 | **Layer 2** | Our supplementary memory system. Markdown files at `~/.claude-agent-memory/`. Under our full control. Updates are immediate. |
-| **MCP bridge** | The Go binary that serves as an MCP server, providing `spawn_agent`, `check_agent`, and `append_file` tools. |
-| **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. |
+| **MCP bridge** | The Go binary that serves as an MCP server, providing `spawn_agent`, `check_agent`, `safe_write_file`, and `safe_append_file` tools. |
+| **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for reading memory files and all non-memory file operations. |
+| **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file writes (`safe_write_file` and `safe_append_file`). Prevents concurrent conversations from interleaving or overwriting each other's memory updates. |
 | **Memory skill** | The .zip file uploaded to Claude Desktop containing SKILL.md — instructions for managing Layer 2 memory. |
 | **Sync window** | The 25-second window during which `spawn_agent` waits for the sub-agent to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. |
 | **Block** | An individual markdown file in the `blocks/` directory. Each block covers a project, topic, or time period. |
@@ -138,34 +141,35 @@ These principles are inherited from the proposal and govern all design decisions
 ┌──────────────────────────────────────────────────────────────────┐
 │                    Claude Desktop App                            │
 │                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  Claude LLM (Anthropic servers)                            │  │
-│  │                                                            │  │
-│  │  Layer 1 memory (auto-injected, ~500–2,000 tokens)         │  │
-│  │  Memory skill instructions (from SKILL.md)                 │  │
-│  │  Cloud VM tools (bash_tool, create_file — DO NOT USE       │  │
-│  │    for persistent data; ephemeral, resets between sessions) │  │
-│  └──────────────┬─────────────────────┬───────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Claude LLM (Anthropic servers)                             │ │
+│  │                                                             │ │
+│  │  Layer 1 memory (auto-injected, ~500–2,000 tokens)          │ │
+│  │  Memory skill instructions (from SKILL.md)                  │ │
+│  │  Cloud VM tools (bash_tool, create_file — DO NOT USE        │ │
+│  │    for persistent data; ephemeral, resets between sessions) │ │
+│  └──────────────┬─────────────────────┬────────────────────────┘ │
 │                 │ MCP (stdio)         │ MCP (stdio)              │
 │                 ▼                     ▼                          │
-│  ┌──────────────────────┐  ┌──────────────────────────────┐     │
-│  │  MCP Bridge Server   │  │  Anthropic Filesystem Ext.   │     │
-│  │  (our Go binary)     │  │  (@modelcontextprotocol/     │     │
-│  │                      │  │   server-filesystem)         │     │
-│  │  Tools:              │  │                              │     │
-│  │  • spawn_agent       │  │  Tools:                      │     │
-│  │  • check_agent       │  │  • read_file                 │     │
-│  │  • append_file       │  │  • write_file                │     │
-│  │       │              │  │  • edit_file                  │     │
-│  │       │ subprocess   │  │  • list_directory             │     │
-│  │       ▼              │  │  • search_files               │     │
-│  │  ┌────────────┐      │  │  • ... (11 tools total)      │     │
-│  │  │ claude -p  │      │  │                              │     │
-│  │  │ (sub-agent)│      │  │  Allowed dirs:               │     │
-│  │  └────────────┘      │  │  • C:\franl                  │     │
-│  └──────────────────────┘  │  • C:\temp                   │     │
-│                            │  • C:\apps                   │     │
-│                            └──────────────────────────────┘     │
+│  ┌──────────────────────┐  ┌──────────────────────────────┐      │
+│  │  MCP Bridge Server   │  │  Anthropic Filesystem Ext.   │      │
+│  │  (our Go binary)     │  │  (@modelcontextprotocol/     │      │
+│  │                      │  │   server-filesystem)         │      │
+│  │  Tools:              │  │                              │      │
+│  │  • spawn_agent       │  │  Tools:                      │      │
+│  │  • check_agent       │  │  • read_file                 │      │
+│  │  • safe_write_file   │  │  • write_file                │      │
+│  │  • safe_append_file  │  │  • edit_file                 │      │
+│  │       │              │  │  • create_directory          │      │
+│  │       │ subprocess   │  │  • list_directory            │      │
+│  │       ▼              │  │  • search_files              │      │
+│  │  ┌────────────┐      │  │  • ... (11 tools total)      │      │
+│  │  │ claude -p  │      │  │                              │      │
+│  │  │ (sub-agent)│      │  │  Allowed dirs:               │      │
+│  │  └────────────┘      │  │  • C:\franl                  │      │
+│  └──────────────────────┘  │  • C:\temp                   │      │
+│                            │  • C:\apps                   │      │
+│                            └──────────────────────────────┘      │
 │                                                                  │
 │  Local filesystem: C:\franl\.claude-agent-memory\                │
 │  ├── core.md                                                     │
@@ -191,9 +195,12 @@ Claude LLM
 **Memory write (during session):**
 ```
 Claude LLM
-  → calls Filesystem:write_file (for core.md, index.md, or block updates)
-  → calls Filesystem:edit_file (for surgical edits to blocks)
-  → calls Bridge:append_file (for episodic log entries)
+  → calls Bridge:safe_write_file (for core.md, index.md, or block updates)
+  → calls Bridge:safe_append_file (for episodic log entries)
+  Both tools acquire the bridge's write mutex before writing,
+  preventing concurrent conversations from interleaving writes.
+  Claude should NEVER use Filesystem:write_file or Filesystem:edit_file
+  for memory files — those bypass the mutex.
 ```
 
 **Sub-agent invocation:**
@@ -210,12 +217,12 @@ Claude LLM
 
 The bridge is deliberately minimal. It does **not** provide:
 
-- Basic filesystem tools (read, write, edit, list, search) — handled by the Filesystem extension.
+- Basic filesystem tools (read, list, search) — handled by the Filesystem extension. The bridge provides `safe_write_file` and `safe_append_file` specifically for memory files; all non-memory file writes use the Filesystem extension.
 - Network request tools (http_get, http_post) — deferred. Sub-agents can perform network operations directly. Can be added to the bridge later if needed.
 - Command execution tools (run_command, run_script) — deferred. Sub-agents provide this capability. A direct `run_command` tool can be added later.
 - Memory-aware tools (update_memory_block, memory_search) — deferred to future enhancement. See [Section 9.2](#92-memory-aware-tools).
 
-This keeps the initial bridge very small: three tool handlers plus the job lifecycle manager.
+This keeps the initial bridge small: four tool handlers, a write mutex, and the job lifecycle manager.
 
 ---
 
@@ -232,7 +239,9 @@ mcp-bridge/
 ├── tools.go                  # Tool handler registration
 ├── spawn.go                  # spawn_agent tool handler + subprocess management
 ├── check.go                  # check_agent tool handler
-├── append.go                 # append_file tool handler
+├── safe_write.go             # safe_write_file tool handler (mutex-protected atomic write)
+├── safe_append.go            # safe_append_file tool handler (mutex-protected append)
+├── writemutex.go             # Write mutex shared by safe_write_file and safe_append_file
 ├── jobs.go                   # Job lifecycle manager (background goroutine)
 ├── logging.go                # Structured logging to file
 └── bridge-config.yaml        # Default configuration (embedded or external)
@@ -302,7 +311,8 @@ func LoadConfig(path string) Config:
 |------|----------|---------|
 | `spawn_agent` | `spawn_agent` | Launch a sub-agent (`claude -p`) with a task. Returns result (sync) or job_id (async). |
 | `check_agent` | `check_agent` | Poll a running sub-agent by job_id. Returns status and result. |
-| `append_file` | `append_file` | Atomically append text to a file. Primary use: episodic log entries. |
+| `safe_write_file` | `safe_write_file` | Mutex-protected atomic write (full file replacement) for memory files. Uses temp-file-then-rename. |
+| `safe_append_file` | `safe_append_file` | Mutex-protected append for memory files. Primary use: episodic log entries. |
 
 ### 3.4 Tool: spawn_agent
 
@@ -512,44 +522,135 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
             }
 ```
 
-### 3.6 Tool: append_file
+### 3.6 Tool: safe_write_file
 
-This tool atomically appends text to a file. Its primary use case is adding entries to episodic log files (`episodic-YYYY-MM.md`), but it works with any file within the memory directory.
+This tool performs a mutex-protected, atomic full-file write. It is the primary tool for updating memory files (`core.md`, `index.md`, content blocks). It replaces the use of `Filesystem:write_file` and `Filesystem:edit_file` for all memory operations.
 
-The Anthropic Filesystem extension does not provide an append operation — only full read, full write, and find-and-replace edit. For append-only patterns (episodic logs, activity trails), `append_file` avoids the read-modify-write cycle and the risk of clobbering concurrent changes to the same file.
+**Why not use the Filesystem extension's `write_file`?** Three reasons: (a) the Filesystem extension has no mutex — two concurrent conversations writing to the same memory file can interleave, with the second write silently clobbering the first; (b) `safe_write_file` is scoped to the memory directory, providing the "unambiguous tool names" benefit from proposal Open Question #22 — Claude can't accidentally use it to write to the cloud VM or to non-memory locations; (c) atomic write via temp-file-then-rename prevents partial writes from corrupting files if the process is interrupted.
+
+**Why full-file replacement instead of surgical edits?** Full replacement is simpler and more reliable than `Filesystem:edit_file`'s find-and-replace pattern, which can fail if the search string doesn't match exactly (due to whitespace differences, prior modifications by another conversation, etc.). Claude already has the file content in context (it loaded the file to decide what to change), so providing the complete updated content is straightforward. For typical memory files (500–2,000 tokens), the output token cost of a full write is modest.
 
 **MCP tool definition:**
 
 ```
-Name:        "append_file"
-Description: "Atomically append text to a file. Creates the file if it doesn't exist.
-             The text is appended exactly as provided — add leading newlines if needed."
+Name:        "safe_write_file"
+Description: "Atomically write content to a memory file. Acquires a write mutex
+             shared with safe_append_file to prevent concurrent write conflicts.
+             Uses temp-file-then-rename for atomicity. Restricted to the memory
+             directory. Provide the COMPLETE file content — this is a full
+             replacement, not an edit."
 
 Input Schema:
-  path:  string, required  — Absolute path to the file
+  path:     string, required  — Absolute path to the file (must be within memory directory)
+  content:  string, required  — Complete file content to write
+
+Output Schema:
+  success:       boolean
+  bytes_written: integer
+  path:          string   — The absolute path that was written (for confirmation)
+```
+
+**Handler pseudo-code:**
+
+```
+func HandleSafeWriteFile(params SafeWriteFileParams) SafeWriteFileResult:
+
+    // 1. Validate that the path is within the memory directory.
+    //    Resolve symlinks and ".." before checking to prevent path traversal.
+    absPath = filepath.Abs(params.Path)
+    if !strings.HasPrefix(absPath, config.Memory.Directory):
+        return error("safe_write_file is restricted to the memory directory: " +
+                      config.Memory.Directory)
+
+    // 2. Ensure parent directory exists (handles new block creation).
+    os.MkdirAll(filepath.Dir(absPath), 0755)
+
+    // 3. Acquire the write mutex. This serializes all memory writes
+    //    (both safe_write_file and safe_append_file) across all
+    //    concurrent conversations in this Desktop App instance.
+    writeMutex.Lock()
+    defer writeMutex.Unlock()
+
+    // 4. Write to a temp file in the same directory (same filesystem,
+    //    so rename is atomic). Use the target directory, not os.TempDir(),
+    //    to guarantee same-filesystem rename.
+    tmpFile = os.CreateTemp(filepath.Dir(absPath), ".safe-write-*.tmp")
+    _, err = tmpFile.Write([]byte(params.Content))
+    tmpFile.Close()
+    if err:
+        os.Remove(tmpFile.Name())  // Clean up on write failure
+        return error("Failed to write temp file: " + err)
+
+    // 5. Atomic rename: replaces the target file in one operation.
+    //    On Windows, os.Rename cannot overwrite an existing file.
+    //    Use os.Remove + os.Rename, or the ReplaceFile Windows API.
+    //    (Go's os.Rename on Windows uses MoveFileEx with
+    //    MOVEFILE_REPLACE_EXISTING when possible, but behavior varies
+    //    by filesystem. The safest cross-platform approach is:
+    //    remove target if it exists, then rename.)
+    if fileExists(absPath):
+        os.Remove(absPath)
+    err = os.Rename(tmpFile.Name(), absPath)
+    if err:
+        return error("Failed to rename temp file to target: " + err)
+
+    return {
+        success: true,
+        bytes_written: len(params.Content),
+        path: absPath
+    }
+```
+
+**Windows rename caveat:** On Windows, `os.Rename` cannot atomically overwrite an existing file on all filesystems. The pseudo-code above uses a remove-then-rename sequence, which introduces a tiny window where the file doesn't exist. For our use case (low-frequency memory writes, mutex-serialized), this is acceptable. If true atomicity is needed later, the Windows `ReplaceFile` API can be called via `syscall`.
+
+### 3.7 Tool: safe_append_file
+
+This tool performs a mutex-protected append to a memory file. Its primary use case is adding entries to episodic log files (`episodic-YYYY-MM.md`), where each conversation appends a timestamped entry and a full rewrite is unnecessary.
+
+**MCP tool definition:**
+
+```
+Name:        "safe_append_file"
+Description: "Append text to a memory file. Acquires the same write mutex as
+             safe_write_file to prevent concurrent write conflicts. Creates
+             the file if it doesn't exist. The text is appended exactly as
+             provided — include leading newlines if needed for formatting."
+
+Input Schema:
+  path:  string, required  — Absolute path to the file (must be within memory directory)
   text:  string, required  — Text to append
 
 Output Schema:
-  success: boolean
+  success:       boolean
   bytes_written: integer
 ```
 
 **Handler pseudo-code:**
 
 ```
-func HandleAppendFile(params AppendFileParams) AppendFileResult:
+func HandleSafeAppendFile(params SafeAppendFileParams) SafeAppendFileResult:
 
-    // Validate that the path is within the memory directory
+    // 1. Validate that the path is within the memory directory.
     absPath = filepath.Abs(params.Path)
     if !strings.HasPrefix(absPath, config.Memory.Directory):
-        return error("append_file is restricted to the memory directory: " + 
+        return error("safe_append_file is restricted to the memory directory: " +
                       config.Memory.Directory)
 
-    // Ensure parent directory exists
-    os.MkdirAll(filepath.Dir(absPath))
+    // 2. Ensure parent directory exists.
+    os.MkdirAll(filepath.Dir(absPath), 0755)
 
-    // Open file for append (create if needed), write, close
-    // Uses O_APPEND for atomicity at the OS level
+    // 3. Acquire the SAME write mutex as safe_write_file.
+    //    This means a safe_write_file and a safe_append_file to different
+    //    files still serialize, but that's fine — memory writes are
+    //    infrequent and fast (sub-millisecond). The simplicity of a
+    //    single mutex far outweighs the negligible performance cost.
+    writeMutex.Lock()
+    defer writeMutex.Unlock()
+
+    // 4. Open file for append (create if needed), write, close.
+    //    O_APPEND ensures the write goes to the end even if the file
+    //    was modified between open and write (belt-and-suspenders
+    //    safety alongside the mutex).
     f = os.OpenFile(absPath, O_WRONLY|O_APPEND|O_CREATE, 0644)
     n, err = f.Write([]byte(params.Text))
     f.Close()
@@ -560,9 +661,38 @@ func HandleAppendFile(params AppendFileParams) AppendFileResult:
     return { success: true, bytes_written: n }
 ```
 
-**Why not just use Filesystem:write_file?** Two reasons: (a) `write_file` overwrites the entire file, so appending requires a read-modify-write cycle that can lose data if two sessions write simultaneously; (b) `append_file` restricted to the memory directory provides a safety boundary — it cannot accidentally overwrite system files. (See proposal Open Question #22, strategy (b): unambiguous tool names.)
+### 3.8 Write Mutex
 
-### 3.7 Job Lifecycle Manager
+The write mutex is the mechanism that serializes all memory file writes. It is a single `sync.Mutex` shared by both `safe_write_file` and `safe_append_file`.
+
+**Why a single mutex works:** All conversations in the same Claude Desktop App instance share the same bridge process (same Go binary, same stdio pipe). Go's `sync.Mutex` provides in-process mutual exclusion — no file-locking APIs needed, no OS-specific behavior to worry about. When one conversation's tool call acquires the mutex, any other conversation's concurrent tool call blocks until the first releases it.
+
+**Why a single mutex (not per-file mutexes):** A per-file mutex would allow concurrent writes to different files, but the added complexity isn't justified. Memory writes are infrequent (a few per session, each taking sub-millisecond I/O time) and the mutex hold time is negligible. A single mutex keeps the implementation trivial and eliminates any possibility of deadlock from lock ordering.
+
+**What the mutex does NOT protect against:** Semantic divergence from concurrent read-modify-write sequences. If Conversation A loads `core.md`, then Conversation B also loads it, then A writes an update, then B writes a different update, B's write will atomically replace A's update. The mutex ensures neither write is corrupted (no interleaving), but B's write will not include A's changes because B was working from a stale snapshot. This is the **"last writer wins" semantic, and it is the accepted concurrency model for v1** of this system.
+
+A `safe_edit_file` tool (performing find-and-replace under the same mutex) would not solve this problem either, because the race condition is fundamentally about stale reads, not unprotected writes. Both conversations would still be constructing their edits from the same stale snapshot. The edit operations might not conflict textually (if they target non-overlapping regions), but when they do overlap, the second edit would either fail (if its search pattern no longer matches) or silently overwrite the first conversation's changes.
+
+The alternatives considered were: (a) optimistic concurrency control via version counters / ETags on each file, where `safe_write_file` rejects writes with a stale version and Claude must re-read and retry; and (b) merge-on-write, where the tool attempts a three-way merge under the mutex. Both add significant complexity — option (a) requires retry logic in the skill instructions, and option (b) is fragile for prose content. Neither is justified given the expected usage pattern: one active conversation at a time, with occasional brief overlaps. The write mutex prevents data corruption, and last-writer-wins is an acceptable trade-off for simplicity.
+
+If semantic divergence becomes a real problem in practice, the upgrade path is to add optimistic locking to `safe_write_file` (version-based conflict detection with retry) or to add a read-modify-write helper tool (see [Section 9.2](#92-memory-aware-tools)) that reads the current file under the mutex, applies changes, and writes back — all within a single lock acquisition.
+
+**Implementation (writemutex.go):**
+
+```go
+package main
+
+import "sync"
+
+// writeMutex serializes all memory file writes across all concurrent
+// conversations. Both safe_write_file and safe_append_file acquire
+// this mutex before performing any I/O.
+var writeMutex sync.Mutex
+```
+
+That's it. The entire write mutex implementation is a single global variable. Both tool handlers call `writeMutex.Lock()` / `defer writeMutex.Unlock()` at the start of their write operations.
+
+### 3.9 Job Lifecycle Manager
 
 The job manager is a background goroutine that tracks active sub-agent jobs and cleans up expired ones.
 
@@ -618,7 +748,7 @@ func (jm *JobManager) CleanupLoop():
 
 **Job ID generation:** Use a short, human-readable ID composed of a prefix and random suffix, e.g., `job-a1b2c3`. The prefix makes log entries easy to grep. Use `crypto/rand` for the random component.
 
-### 3.8 Logging
+### 3.10 Logging
 
 All bridge operations are logged to a file for auditability and debugging. Logging does **not** go to stdout/stderr (those are reserved for MCP stdio transport).
 
@@ -633,7 +763,8 @@ All bridge operations are logged to a file for auditability and debugging. Loggi
 | spawn_agent: async handoff | info | job_id, elapsed time at handoff |
 | check_agent: status poll | debug | job_id, status, elapsed |
 | check_agent: result collected | info | job_id, status, elapsed, output size |
-| append_file: write | info | path, bytes written |
+| safe_write_file: write | info | path, bytes written |
+| safe_append_file: append | info | path, bytes written |
 | Job expired | warn | job_id, reason |
 | Sub-agent killed (timeout) | warn | job_id, elapsed |
 | Error (any) | error | tool name, error details |
@@ -645,7 +776,7 @@ All bridge operations are logged to a file for auditability and debugging. Loggi
 {"ts":"2026-02-21T14:30:00Z","level":"info","msg":"spawn_agent: subprocess launched","job_id":"job-a1b2c3","model":"sonnet","working_dir":"C:\\franl\\git\\mcp-bridge"}
 ```
 
-### 3.9 Error Handling
+### 3.11 Error Handling
 
 The bridge should never crash from a tool call. All errors are caught and returned as MCP tool errors.
 
@@ -661,7 +792,7 @@ The bridge should never crash from a tool call. All errors are caught and return
 | File I/O error | Permission denied, disk full | Return MCP tool error with OS error details |
 | Concurrent agent cap reached | 5 sub-agents already running | Return MCP tool error suggesting the user wait or check existing jobs |
 
-### 3.10 Graceful Shutdown
+### 3.12 Graceful Shutdown
 
 When the bridge receives a shutdown signal (Claude Desktop closes, SIGINT, SIGTERM):
 
@@ -979,13 +1110,22 @@ You have access to a persistent memory system stored as markdown files on the lo
 filesystem. This memory persists across conversations and gives you deep context
 about the user, their projects, and your shared history.
 
-## CRITICAL: Use Local MCP Tools for All Persistent Operations
+## CRITICAL: Use the Correct Tools for Memory Operations
 
-ALWAYS use MCP Filesystem tools (`Filesystem:read_file`, `Filesystem:write_file`,
-`Filesystem:edit_file`) or Bridge tools (`Bridge:append_file`) for memory operations.
+For READING memory files: use `Filesystem:read_file` (the Anthropic Filesystem extension).
+
+For WRITING memory files: ALWAYS use `Bridge:safe_write_file` (full file replacement)
+or `Bridge:safe_append_file` (append to episodic logs). These tools are mutex-protected
+and scoped to the memory directory. They prevent concurrent conversations from
+overwriting each other's updates.
+
+NEVER use `Filesystem:write_file` or `Filesystem:edit_file` for memory files — those
+bypass the write mutex and can cause data loss if two conversations write simultaneously.
+
 NEVER use cloud VM tools (`bash_tool`, `create_file`, `str_replace`) for persistent data.
-The cloud VM filesystem is ephemeral and resets between sessions. Memory files live
-at `C:\franl\.claude-agent-memory\` — always access them via MCP tools.
+The cloud VM filesystem is ephemeral and resets between sessions.
+
+Memory files live at `C:\franl\.claude-agent-memory\` — always access them via the tools above.
 
 ## Memory Directory
 
@@ -1021,22 +1161,25 @@ and the current conversation.
 Write memory updates incrementally as significant information emerges. Do NOT
 accumulate changes and batch-write at session end — sessions can end abruptly.
 
-**Write to core.md** (via `Filesystem:write_file` or `Filesystem:edit_file`) when:
+**Write to core.md** (via `Bridge:safe_write_file`) when:
 - A new project starts or an existing project's status changes significantly
 - Key facts about the user change (role, location, preferences)
 - Keep core.md under ~1,000 tokens. Move detailed content to blocks.
+- Provide the COMPLETE updated file content (safe_write_file does full replacement)
 
-**Write to index.md** (via `Filesystem:edit_file`) when:
+**Write to index.md** (via `Bridge:safe_write_file`) when:
 - You create a new block (add a row)
 - A block's summary needs updating (edit the Summary column)
 - A block's content changes (update the Updated column)
+- Provide the COMPLETE updated file content
 
-**Write to blocks** (via `Filesystem:write_file` or `Filesystem:edit_file`) when:
+**Write to blocks** (via `Bridge:safe_write_file`) when:
 - Significant project decisions are made
 - Technical details worth remembering emerge
 - The user shares information that will be useful in future sessions
+- Provide the COMPLETE updated file content
 
-**Append to episodic log** (via `Bridge:append_file`) when:
+**Append to episodic log** (via `Bridge:safe_append_file`) when:
 - Periodically during long sessions (every 30–60 minutes)
 - At natural breakpoints in the conversation
 - Before the session ends (if you sense the user is wrapping up)
@@ -1057,10 +1200,9 @@ into existing blocks, create a new block file:
   deployment" is better than "We discussed several languages and eventually decided
   on Go because..."
 - Date-stamp significant decisions and status changes.
-- When updating blocks, use `Filesystem:edit_file` for surgical changes rather than
-  rewriting the entire file.
-- Re-read a file before writing if you haven't accessed it recently, to avoid
-  overwriting changes from other sessions.
+- When updating a file with `Bridge:safe_write_file`, provide the COMPLETE updated
+  content. The tool does a full file replacement (it does not do surgical edits).
+  Read the file first if you don't already have its content in context.
 
 ## Session End
 
@@ -1079,7 +1221,7 @@ If the user asks "what do you remember about X?":
 4. Respond naturally, as if recalling from your own knowledge
 
 If the user asks to correct or delete a memory:
-1. Use `Filesystem:edit_file` to make the correction in the relevant file
+1. Read the file, make the correction, and write the updated content via `Bridge:safe_write_file`
 2. Acknowledge the correction
 
 If the user asks to see their memory files:
@@ -1106,16 +1248,16 @@ Session Start
 Session Active
 │
 ├─ On topic change → Check index, load relevant blocks
-├─ On significant information → Update relevant block or core.md
-├─ On new project/topic → Create new block + update index.md
-├─ On decision made → Update decisions.md or project block
-├─ Every 30–60 minutes → Append episodic log entry
+├─ On significant information → Update relevant block or core.md (Bridge:safe_write_file)
+├─ On new project/topic → Create new block + update index.md (Bridge:safe_write_file)
+├─ On decision made → Update decisions.md or project block (Bridge:safe_write_file)
+├─ Every 30–60 minutes → Append episodic log entry (Bridge:safe_append_file)
 └─ On context pressure → Summarize verbose blocks to free tokens
 │
 Session End (if detectable)
 │
-├─ 1. Write pending updates to core.md, index.md, blocks
-├─ 2. Append episodic log entry summarizing the session
+├─ 1. Write pending updates to core.md, index.md, blocks (Bridge:safe_write_file)
+├─ 2. Append episodic log entry summarizing the session (Bridge:safe_append_file)
 └─ 3. (No announcement needed — just persist silently)
 ```
 
@@ -1130,8 +1272,8 @@ The skill should write memory when these conditions are met:
 | Project status change | New status, what changed | `core.md` (summary) + project block (detail) |
 | User shares key fact | The fact, context | `core.md` (if high-level) or relevant block |
 | Technical pattern discovered | The pattern, when to use it | `reference-<topic>.md` |
-| Session in progress (periodic) | Brief summary of what's happened so far | `episodic-YYYY-MM.md` (append) |
-| Session ending | Session summary | `episodic-YYYY-MM.md` (append) |
+| Session in progress (periodic) | Brief summary of what's happened so far | `episodic-YYYY-MM.md` (via `safe_append_file`) |
+| Session ending | Session summary | `episodic-YYYY-MM.md` (via `safe_append_file`) |
 
 ### 5.5 Memory Read Triggers
 
@@ -1165,7 +1307,7 @@ spawn_agent(
 
 **Step 3:** The primary agent applies fixes:
 - **Layer 1 fixes:** Add steering edits via `memory_user_edits` tool. These are incorporated by Anthropic's nightly regeneration (~24-hour lag).
-- **Layer 2 fixes:** Edit files directly via MCP tools (immediate effect).
+- **Layer 2 fixes:** Edit files directly via `Bridge:safe_write_file` (immediate effect).
 
 ---
 
@@ -1398,7 +1540,20 @@ Testing covers four levels: bridge unit tests, memory skill behavioral tests, su
 
 These are standard Go tests (`go test ./...`) that test the bridge in isolation.
 
-#### 8.1.1 append_file Tests
+#### 8.1.1 safe_write_file Tests
+
+| Test Case | Input | Expected Behavior |
+|-----------|-------|-------------------|
+| Write to new file | Path to non-existent file + content | File created with content, parent dirs created |
+| Write to existing file | Path to existing file + new content | File replaced atomically with new content |
+| Path outside memory dir | Path under `C:\temp\` | Error: "restricted to memory directory" |
+| Path traversal attempt | Path with `..` escaping memory dir | Error: path validation rejects it |
+| Empty content | Valid path + empty string | Success (creates/replaces with empty file) |
+| Temp file cleanup on failure | Simulate write error (e.g., disk full) | Temp file is cleaned up, error returned |
+| Atomic replacement | Write while another thread reads | Reader sees either old or new content, never partial |
+| Returns path in response | Any valid write | Response includes the absolute path that was written |
+
+#### 8.1.1a safe_append_file Tests
 
 | Test Case | Input | Expected Behavior |
 |-----------|-------|-------------------|
@@ -1408,6 +1563,14 @@ These are standard Go tests (`go test ./...`) that test the bridge in isolation.
 | Path traversal attempt | Path with `..` escaping memory dir | Error: path validation rejects it |
 | Empty text | Valid path + empty string | Success (no-op write, 0 bytes) |
 | Parent dir creation | Path where parent dir doesn't exist | Parent directories created, file written |
+
+#### 8.1.1b Write Mutex Serialization Tests
+
+| Test Case | Setup | Expected Behavior |
+|-----------|-------|-------------------|
+| Concurrent safe_write_file calls | Two goroutines write different content to the same file simultaneously | One write completes fully before the other starts; file contains one version, not a mix |
+| safe_write_file + safe_append_file concurrent | One goroutine writes, another appends to a different file | Both operations serialize; both files are correct |
+| Mutex does not deadlock | Rapid alternation of safe_write_file and safe_append_file | All operations complete within timeout |
 
 #### 8.1.2 spawn_agent Tests
 
@@ -1464,7 +1627,7 @@ These tests verify the bridge works correctly as an MCP server. Use the `mcp-go`
 | Test Case | Expected Behavior |
 |-----------|-------------------|
 | MCP initialization handshake | Bridge responds with capabilities and tool list |
-| Tool listing | Returns spawn_agent, check_agent, append_file |
+| Tool listing | Returns spawn_agent, check_agent, safe_write_file, safe_append_file |
 | Tool call with valid params | Returns well-formed MCP result |
 | Tool call with missing required param | Returns MCP error with descriptive message |
 | Two concurrent tool calls (via pipe) | Both complete correctly (test serialization) |
@@ -1522,14 +1685,14 @@ Memory skill testing is behavioral — it verifies that Claude follows the SKILL
 
 **Pass criteria:** New block file exists with reasonable content. Index row present.
 
-#### 8.2.6 Correct Tool Usage (No Cloud VM Writes)
+#### 8.2.6 Correct Tool Usage (Mutex-Protected Writes Only)
 
 **Test procedure:**
 1. Monitor the bridge log and Claude Desktop's tool usage during a memory-writing session.
-2. Verify that all writes to memory files use `Filesystem:write_file`, `Filesystem:edit_file`, or `Bridge:append_file`.
-3. Verify that no writes to the memory directory use `bash_tool`, `create_file`, or `str_replace`.
+2. Verify that all writes to memory files use `Bridge:safe_write_file` or `Bridge:safe_append_file`.
+3. Verify that no writes to the memory directory use `Filesystem:write_file`, `Filesystem:edit_file`, `bash_tool`, `create_file`, or `str_replace`.
 
-**Pass criteria:** All memory writes go through MCP tools. No cloud VM tools used for persistent data.
+**Pass criteria:** All memory writes go through the bridge's mutex-protected tools. No Filesystem extension writes or cloud VM tools used for memory files.
 
 #### 8.2.7 Compliance Monitoring Script
 
@@ -1673,10 +1836,10 @@ These are planned upgrades that are deliberately deferred from the initial imple
 **Design:** Add a SQLite FTS5 full-text search index alongside the markdown files. The index is a derived artifact — it can be rebuilt from the markdown files at any time.
 
 ```
-~/.claude-agent-memory/
+C:\franl\.claude-agent-memory\
 ├── core.md
 ├── index.md
-├── blocks/
+├── blocks\
 │   └── ...
 └── .search-index.db     # SQLite FTS5 (in .gitignore)
 ```
@@ -1746,44 +1909,66 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 ## 11. Open Questions and Requested Changes
 
-1. In section 1.2, "Component Inventory", item #6 says that the single-writer model "eliminates concurrent write issues for the B1 single-instance architecture", but doesn't this design have the problem that concurrent conversations can overwrite memories?  Can that be avoided somehow when using Anthropic's filesystem MCP server for memory writes?
+1. ~~**Race condition with memory writes**~~ — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
 
-2. In section 1.2, "Component Inventory", add a note that the memory skill's source will be in `C:\franl\git\ai-skill\agent-memory`, since its source files should be under source control.
+   - **Resolution:** Last-writer-wins is the accepted concurrency model for v1. A `safe_edit_file` tool would not solve this because the race is about stale reads, not unprotected writes. The mutex prevents data corruption; semantic divergence from concurrent read-modify-write is accepted as rare and tolerable. Optimistic locking via version counters is the identified upgrade path if this proves insufficient. See updated [Section 3.8](#38-write-mutex).
 
-3. I tried to verify that Anthropic's MCP `Filesystem:write_file` tool has no option to append to a file, but I could not find the definition online.  Can you find it to verify this?
+2. **Memory skill source location** — In section 1.2, "Component Inventory", add a note that the memory skill's source will be in `C:\franl\git\ai-skill\agent-memory`, since its source files should be under source control.
 
-4. Section 2.2, "Data Flow", under heading "Memory write (during session)", the entry "→ calls Filesystem:write_file (for core.md, index.md, or block updates)" implies that memory writes to `core.md` and `index.md` are always full file writes, rather than edits.  Wouldn't edits be safer, because Claude does not need to keep the entirety of those files unaltered in its context window, which reduces the risk of hallucination distoring the memories?
+   - **Resolution:** ...
 
-5. Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool, but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
+3. **Need a tool to run commands** — Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool, but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
 
-6. What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
+   - **Resolution:** ...
 
-7. Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
+4. **Bridge configuration question** — What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
 
-8. In section 4.2, "Three-Tier File Structure", add memory block files named `humans.md` and `interests.md`, as follows:
+   - **Resolution:** ...
 
-   ```
-   C:\franl\.claude-agent-memory\
-   └── blocks\                      # Tier 3: Content (loaded on demand)
-       ├── ...
-       ├── humans.md                # Info about humans (the user, his family/friends, etc.)
-       └── interests.md             # Long-term interests of the primary agent
-   ```
+5. **UNIX Signals on Windows** — Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
 
-   File `humans.md` should contain memories about humans known to the primary agent, including the user, his family/friends, and others.  File `interests.md` should contain the primary agent's long-term interests, which will be updated over time as the primary agent learns more about itself and the world.
+   - **Resolution:** ...
 
-9. In section 4.6, "File Format: Episodic Logs", should entries include the time-of-day as well as the date, in case two episodic updates happen on the same day?
+6. **New memory blocks** — In section 4.2, "Three-Tier File Structure", add memory block files named `humans.md` and `interests.md`, as follows:
 
-10. Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions?
+   - File `humans.md` should contain memories about humans known to the primary agent, including the user, his family/friends, and others.
+   - File `interests.md` should contain the primary agent's long-term interests, which will be updated over time as the primary agent learns more about itself and the world.
+   - **Resolution:** ...
 
-11. In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
+7. **Time-of-day in episodic logs** — In section 4.6, "File Format: Episodic Logs", should entries include the time-of-day as well as the date, in case two episodic updates happen on the same day?
 
-12. In section 6.5, "CLAUDE.md Recommendations", please include the actual `CLAUDE.md` file contents. I prefer to have the design document as self-contained as possible.
+   - **Resolution:** ...
 
-13. In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
+8. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions?
 
-    ``` {"globalShortcut": "Alt+Ctrl+Enter", "preferences": {"coworkScheduledTasksEnabled": false, "sidebarMode": "code"}} ```
+   - **Resolution:** ...
 
-14. Once this design stabilizes, do you see any issues with using Claude Code CLI to implement it?
+9. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
-15. Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
+   - **Resolution:** ...
+
+10. **CLAUDE.md contents** — In section 6.5, "CLAUDE.md Recommendations", please include the actual `CLAUDE.md` file contents from file `stateful-agent-proposal.md`. I prefer to have the design document as self-contained as possible.
+
+   - **Resolution:** ...
+
+11. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
+
+    ```
+    {
+      "globalShortcut": "Alt+Ctrl+Enter",
+      "preferences": {
+        "coworkScheduledTasksEnabled": false,
+        "sidebarMode": "chat"
+      }
+    }
+    ```
+
+    - **Resolution:** ...
+
+12. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
+
+    - **Resolution:** ...
+
+13. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
+
+    - **Resolution:** ...
