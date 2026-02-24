@@ -73,6 +73,7 @@
   - [9.3 Architecture B2 Upgrade](#93-architecture-b2-upgrade)
   - [9.4 GitHub Backup Automation](#94-github-backup-automation)
 - [10. References](#10-references)
+- [11. Open Questions](#11-open-questions)
 
 ---
 
@@ -669,11 +670,17 @@ The write mutex is the mechanism that serializes all memory file writes. It is a
 
 **Why a single mutex (not per-file mutexes):** A per-file mutex would allow concurrent writes to different files, but the added complexity isn't justified. Memory writes are infrequent (a few per session, each taking sub-millisecond I/O time) and the mutex hold time is negligible. A single mutex keeps the implementation trivial and eliminates any possibility of deadlock from lock ordering.
 
-**What the mutex does NOT protect against:** Semantic divergence from concurrent read-modify-write sequences. If Conversation A loads `core.md`, then Conversation B also loads it, then A writes an update, then B writes a different update, B's write will atomically replace A's update. The mutex ensures neither write is corrupted (no interleaving), but B's write will not include A's changes because B was working from a stale snapshot. This is the **"last writer wins" semantic, and it is the accepted concurrency model for v1** of this system.
+**What the mutex does NOT protect against:** Semantic divergence from concurrent read-modify-write sequences. If Conversation A loads `core.md`, then Conversation B also loads it, then A writes an update, then B writes a different update, B's write will atomically replace A's update. The mutex ensures neither write is corrupted (no interleaving), but B's write will not include A's changes because B was working from a stale snapshot. This is the *last writer wins* semantic, and **ait is the accepted concurrency model for v1** of this system.
 
 A `safe_edit_file` tool (performing find-and-replace under the same mutex) would not solve this problem either, because the race condition is fundamentally about stale reads, not unprotected writes. Both conversations would still be constructing their edits from the same stale snapshot. The edit operations might not conflict textually (if they target non-overlapping regions), but when they do overlap, the second edit would either fail (if its search pattern no longer matches) or silently overwrite the first conversation's changes.
 
-The alternatives considered were: (a) optimistic concurrency control via version counters / ETags on each file, where `safe_write_file` rejects writes with a stale version and Claude must re-read and retry; and (b) merge-on-write, where the tool attempts a three-way merge under the mutex. Both add significant complexity — option (a) requires retry logic in the skill instructions, and option (b) is fragile for prose content. Neither is justified given the expected usage pattern: one active conversation at a time, with occasional brief overlaps. The write mutex prevents data corruption, and last-writer-wins is an acceptable trade-off for simplicity.
+The alternatives considered were:
+
+1. Optimistic concurrency control via version counters / ETags on each file, where `safe_write_file` rejects writes with a stale version and Claude must re-read and retry.
+
+2. Merge-on-write, where the tool attempts a three-way merge under the mutex.
+
+Both add significant complexity — option 1 requires retry logic in the skill instructions, and option 2 is fragile for prose content. Neither is justified given the expected usage pattern: one active conversation at a time, with occasional brief overlaps. The write mutex prevents data corruption, and last-writer-wins is an acceptable trade-off for simplicity.
 
 If semantic divergence becomes a real problem in practice, the upgrade path is to add optimistic locking to `safe_write_file` (version-based conflict detection with retry) or to add a read-modify-write helper tool (see [Section 9.2](#92-memory-aware-tools)) that reads the current file under the mutex, applies changes, and writes back — all within a single lock acquisition.
 
@@ -1405,7 +1412,46 @@ The file `~/.claude/CLAUDE.md` is loaded into every Claude Code invocation autom
 - Service-specific instructions (Bluesky conventions, GitHub profile)
 - Niche build instructions (GUI flags, specific project configs)
 
-See the proposal's [Recommended CLAUDE.md Content for Sub-Agents](stateful-agent-proposal.md#recommended-claudemd-content-for-sub-agents) section for the complete recommended content.
+Recommended `CLAUDE.md` content:
+
+```markdown
+# OS Environment
+
+- This is a Windows 11 system with Cygwin installed.
+- Bash commands are executed by the Cygwin Bash shell.
+- Most Linux commands are available: cd, cat, ls, grep, find, cp, mv, sed, awk, git, python, etc.
+- To execute `rm`, use the full pathname `/bin/rm` (avoids a wrapper script's confirmation prompt).
+- Cygwin symlinks for drive letters exist: /c -> /cygdrive/c, /d -> /cygdrive/d, etc.
+  Native Windows apps cannot follow Cygwin symlinks.
+
+## Pathname Conventions
+
+- Cygwin apps: use forward slashes. Absolute paths start with /c/ (drive letter).
+  Example: /c/franl/git/project/file.txt
+- Native Windows apps: use backslashes, single-quoted to escape.
+  Example: 'C:\franl\git\project\file.txt'
+- If a pathname contains spaces or shell metacharacters, always single-quote it.
+
+## Available Tools
+
+- Compilers/runtimes: gcc, g++, go, rustc, cargo, python, node, npm, npx.
+- Package managers: uv, uvx (Python), npm/npx (Node.js).
+- Utilities: git, gh (GitHub CLI).
+- Do not install additional tools without explicit task instructions to do so.
+
+# Source Code Conventions
+
+- Line width: under 100 columns.
+- Use meaningful variable/loop names (not single characters).
+- Newlines: UNIX-style (LF) for new files. Match existing convention when editing.
+- Encoding: UTF-8 for new files. Match existing encoding when editing.
+- Comments: write well-commented code. Aim for nearly as many comment lines as code lines.
+  Comments should explain purpose and rationale, not restate what the code does.
+  Place comments on the line above the code they reference.
+- Prefer Python and Bash for scripts. Use PEP 723 metadata in Python scripts.
+- Bash variables: UPPERCASE for globals, _UPPERCASE for function locals.
+- When building executables, always use .exe extension (Windows).
+```
 
 ### 6.6 Sub-Agent Memory Access Rules
 
@@ -1907,68 +1953,60 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 ---
 
-## 11. Open Questions and Requested Changes
+## 11. Open Questions
 
-1. ~~**Race condition with memory writes**~~ — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
+1. ~~**Race condition with memory writes**~~ — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this only prevents torn writes. It doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
 
-   - **Resolution:** Last-writer-wins is the accepted concurrency model for v1. A `safe_edit_file` tool would not solve this because the race is about stale reads, not unprotected writes. The mutex prevents data corruption; semantic divergence from concurrent read-modify-write is accepted as rare and tolerable. Optimistic locking via version counters is the identified upgrade path if this proves insufficient. See updated [Section 3.8](#38-write-mutex).
+   - *Resolution:* Last-writer-wins is the accepted concurrency model for v1. A `safe_edit_file` tool would not solve this because the race is about stale reads, not unprotected writes. The mutex prevents data corruption; semantic divergence from concurrent read-modify-write is accepted as rare and tolerable. Optimistic locking via version counters is the identified upgrade path if this proves insufficient. See updated [Section 3.8](#38-write-mutex).
 
-2. **Memory skill source location** — In section 1.2, "Component Inventory", add a note that the memory skill's source will be in `C:\franl\git\ai-skill\agent-memory`, since its source files should be under source control.
+2. **Need a tool to run commands** — Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool, but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
 
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-3. **Need a tool to run commands** — Section 2.3, "What the Bridge Does NOT Do", says the bridge will not have a `run_command` tool, but using a sub-agent to run a simple `curl` command or Bash script is a waste of valuable tokens (that I have to pay for).  Let's change the design to include implmenting the `run_command` tool.
+3. **Bridge configuration question** — What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
 
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-4. **Bridge configuration question** — What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
+4. **UNIX Signals on Windows** — Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
 
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-5. **UNIX Signals on Windows** — Section 3.10, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
-
-   - **Resolution:** ...
-
-6. **New memory blocks** — In section 4.2, "Three-Tier File Structure", add memory block files named `humans.md` and `interests.md`, as follows:
+5. **New memory blocks** — In section 4.2, "Three-Tier File Structure", add memory block files named `humans.md` and `interests.md`, as follows:
 
    - File `humans.md` should contain memories about humans known to the primary agent, including the user, his family/friends, and others.
    - File `interests.md` should contain the primary agent's long-term interests, which will be updated over time as the primary agent learns more about itself and the world.
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-7. **Time-of-day in episodic logs** — In section 4.6, "File Format: Episodic Logs", should entries include the time-of-day as well as the date, in case two episodic updates happen on the same day?
+6. **Time-of-day in episodic logs** — In section 4.6, "File Format: Episodic Logs", shows log entries marked with the date. Should entries also include the time-of-day as well as the date, in case two episodic updates happen on the same day?
 
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-8. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions?
+7. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
 
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-9. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
+8. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
-   - **Resolution:** ...
+   - *Resolution:* TBD
 
-10. **CLAUDE.md contents** — In section 6.5, "CLAUDE.md Recommendations", please include the actual `CLAUDE.md` file contents from file `stateful-agent-proposal.md`. I prefer to have the design document as self-contained as possible.
+9. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
 
-   - **Resolution:** ...
+   ```
+   {
+     "globalShortcut": "Alt+Ctrl+Enter",
+     "preferences": {
+       "coworkScheduledTasksEnabled": false,
+       "sidebarMode": "chat"
+     }
+   }
+   ```
 
-11. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
+   - *Resolution:* TBD
 
-    ```
-    {
-      "globalShortcut": "Alt+Ctrl+Enter",
-      "preferences": {
-        "coworkScheduledTasksEnabled": false,
-        "sidebarMode": "chat"
-      }
-    }
-    ```
+10. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
 
-    - **Resolution:** ...
+    - *Resolution:* TBD
 
-12. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
+11. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
 
-    - **Resolution:** ...
-
-13. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
-
-    - **Resolution:** ...
+    - *Resolution:* TBD
