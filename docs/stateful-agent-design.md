@@ -1230,7 +1230,7 @@ updated: 2026-02-21
 ## 2026-02-21 — Stateful agent design document
 Created the detailed design document for the stateful agent system (MCP bridge,
 memory system, memory skill, sub-agents). Resolved all 27 open questions in the
-proposal. Design document written to C:\franl\git\ai-skills\docs\stateful-agent-design.md.
+proposal. Design document written to C:\franl\git\ai-skills\docs\agent-memory-design.md.
 
 ## 2026-02-20 — Proposal session 10: Open Questions #20–27
 Resolved memory format (markdown + YAML frontmatter), filesystem access (lean bridge
