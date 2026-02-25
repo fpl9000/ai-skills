@@ -2242,8 +2242,6 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
     - *Resolution:* TBD
 
-11. **Terms of Service Question:** — Given the news reported by PC World at the below URL about Anthropic banning some automated use of Claude Code CLI, do the consumer terms of service at https://www.anthropic.com/legal/consumer-terms prevent this design's use of Claude Code as a sub-agent?
-
-    - https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html
+11. **Terms of Service Question:** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent this design's use of Claude Code as a sub-agent?
 
     - *Resolution:* TBD
