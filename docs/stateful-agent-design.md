@@ -2208,19 +2208,15 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-5. **Time-of-day in episodic logs** — In section 4.6, "File Format: Episodic Logs", shows log entries marked with the date. Should entries also include the time-of-day as well as the date, in case two episodic updates happen on the same day?
+5. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
 
    - *Resolution:* TBD
 
-6. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
+6. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
    - *Resolution:* TBD
 
-7. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
-
-   - *Resolution:* TBD
-
-8. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
+7. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
 
    ```
    {
@@ -2234,14 +2230,14 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-9. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
+8. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
 
    - *Resolution:* TBD
 
-10. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
+9. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
 
-    - *Resolution:* TBD
+   - *Resolution:* TBD
 
-11. **Terms of Service Question:** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent this design's use of Claude Code as a sub-agent?
+10. **Terms of Service Question:** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent this design's use of Claude Code as a sub-agent?
 
     - *Resolution:* TBD
