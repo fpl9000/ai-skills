@@ -2208,25 +2208,19 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-5. **New memory blocks** — In section 4.2, "Three-Tier File Structure", add memory block files named `humans.md` and `interests.md`, as follows:
-
-   - File `humans.md` should contain memories about humans known to the primary agent, including the user, his family/friends, and others.
-   - File `interests.md` should contain the primary agent's long-term interests, which will be updated over time as the primary agent learns more about itself and the world.
-   - *Resolution:* TBD
-
-6. **Time-of-day in episodic logs** — In section 4.6, "File Format: Episodic Logs", shows log entries marked with the date. Should entries also include the time-of-day as well as the date, in case two episodic updates happen on the same day?
+5. **Time-of-day in episodic logs** — In section 4.6, "File Format: Episodic Logs", shows log entries marked with the date. Should entries also include the time-of-day as well as the date, in case two episodic updates happen on the same day?
 
    - *Resolution:* TBD
 
-7. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
+6. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
 
    - *Resolution:* TBD
 
-8. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
+7. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
    - *Resolution:* TBD
 
-9. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
+8. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
 
    ```
    {
@@ -2240,10 +2234,16 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-10. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
+9. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
+
+   - *Resolution:* TBD
+
+10. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
 
     - *Resolution:* TBD
 
-11. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use it to trigger memory writes?
+11. **Terms of Service Question:** — Given the news reported by PC World at the below URL about Anthropic banning some automated use of Claude Code CLI, do the consumer terms of service at https://www.anthropic.com/legal/consumer-terms prevent this design's use of Claude Code as a sub-agent?
+
+    - https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html
 
     - *Resolution:* TBD
