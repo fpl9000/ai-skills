@@ -2128,6 +2128,10 @@ C:\franl\.claude-agent-memory\
 └── .search-index.db     # SQLite FTS5 (in .gitignore)
 ```
 
+**New tool:** `memory_search(query: string, max_results: int) → [{file, snippet, score}]`
+
+**Implementation:** Use `modernc.org/sqlite` (pure Go, no CGO) or `mattn/go-sqlite3` for the SQLite driver. Maintain the FTS5 index via a post-write hook: whenever the bridge detects a write to the memory directory (via `append_file` or by observing file modification times), re-index the changed file.
+
 Also investigate semantic memory storage and search technologies such as:
 
 - [engram](https://github.com/mirrorfields/engram)\
@@ -2141,10 +2145,6 @@ Also investigate semantic memory storage and search technologies such as:
 
 - [tristan-mcinnis/claude-code-agentic-semantic-memory-system-mcp](https://github.com/tristan-mcinnis/claude-code-agentic-semantic-memory-system-mcp)\
   *Specifically designed for Claude Code. TypeScript MCP server using PostgreSQL + pgvector for semantic search. Supports project namespaces, knowledge graph relations, local embeddings (no external API needed), and intent-based natural language triggers. More opinionated/Claude-specific than the others.*
-
-**New tool:** `memory_search(query: string, max_results: int) → [{file, snippet, score}]`
-
-**Implementation:** Use `modernc.org/sqlite` (pure Go, no CGO) or `mattn/go-sqlite3` for the SQLite driver. Maintain the FTS5 index via a post-write hook: whenever the bridge detects a write to the memory directory (via `append_file` or by observing file modification times), re-index the changed file.
 
 ### 9.2 Memory-Aware Tools
 
