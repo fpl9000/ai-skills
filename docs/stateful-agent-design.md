@@ -2146,7 +2146,26 @@ C:\franl\.claude-agent-memory\
 
 These tools trade skill simplicity (fewer instructions needed) for bridge complexity (more code to maintain). They also provide the "unambiguous tool names" benefit described in proposal Open Question #22 — reducing the risk of Claude using cloud VM tools for memory operations.
 
-### 9.3 Architecture B2 Upgrade
+### 9.3 Semantic Memory Storage
+
+**Trigger:** When text-based memory fails to correctly or efficiently handle memories as they accrue.
+
+Investigate semantic memory storage and search technologies such as:
+
+- [engram](https://github.com/mirrorfields/engram)\
+  *Memories are stored in SQLite alongside their vector embeddings and a full-text search index. Search combines cosine similarity (via sqlite-vec) with keyword matching (via FTS5), merged using reciprocal rank fusion — so you get both semantic understanding and exact-term recall. Collections are just string namespaces. Existing memories are migrated into the FTS index automatically on first run.*
+
+- [MCP Memory Service](https://github.com/doobidoo/mcp-memory-service)\
+  *Probably the most mature and featureful. It's a local MCP server with semantic search (using vector embeddings), a knowledge graph, a web dashboard, and REST API. Works with Claude Desktop, LangGraph, CrewAI, AutoGen, and 13+ other AI clients. Privacy-first / local-first design, optional Cloudflare cloud sync. Written in Python with SQLite-vec for fast local vector storage. Very actively maintained (10.16.x as of recently).*
+
+- [agentic-mcp-tools/memora](https://github.com/agentic-mcp-tools/memora)\
+  *Lightweight local MCP server with semantic memory, knowledge graphs, conversational recall, RAG-powered chat panel, and inter-agent event notifications. Supports both local embeddings (offline, ~2GB PyTorch) and cloud. Works via stdio MCP. Bonus: optional Cloudflare D1 cloud backend. Pretty impressive feature set for its size.*
+
+- [tristan-mcinnis/claude-code-agentic-semantic-memory-system-mcp](https://github.com/tristan-mcinnis/claude-code-agentic-semantic-memory-system-mcp)\
+  *Specifically designed for Claude Code. TypeScript MCP server using PostgreSQL + pgvector for semantic search. Supports project namespaces, knowledge graph relations, local embeddings (no external API needed), and intent-based natural language triggers. More opinionated/Claude-specific than the others.*
+
+
+### 9.4 Architecture B2 Upgrade
 
 **Trigger:** If Claude Desktop App's UI limitations or stability issues become a persistent problem.
 
@@ -2158,7 +2177,7 @@ These tools trade skill simplicity (fewer instructions needed) for bridge comple
 
 The bridge codebase, memory directory, and skill are all unchanged. Only the transport layer changes.
 
-### 9.4 GitHub Backup Automation
+### 9.5 GitHub Backup Automation
 
 **Trigger:** After the system is stable and the memory directory has valuable content.
 
