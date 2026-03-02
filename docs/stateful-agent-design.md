@@ -2253,7 +2253,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-10. **Terms of Service Question** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent using Claude Code CLI as a sub-agent?
+10. **Terms of Service question** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent using Claude Code CLI as a sub-agent?
 
     - *Resolution:* The design is compliant with Anthropic's Terms of Service. The `spawn_agent` tool invokes the official `claude -p` CLI binary as a subprocess — it does not extract, transfer, or reuse OAuth tokens, and it does not make direct Anthropic API calls. The bridge never touches authentication at all; the Claude Code CLI manages its own auth lifecycle internally. The Consumer ToS prohibition on automated access contains an explicit exception for use cases "where we otherwise explicitly permit it," and Anthropic explicitly permits scripted and automated use of the `claude` CLI — their official documentation demonstrates piping, scripting, and CI/CD pipelines as intended patterns.
 
@@ -2261,4 +2261,6 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
       The "ordinary, individual usage" language added to Anthropic's February 2026 documentation refers to preventing subscription arbitrage at scale (e.g., multi-tenant bots running overnight autonomous swarms on a flat-rate plan, which would cost $1,000+/month at API prices). It does not apply to a single developer running personal project work from their own machine — which is the intended use case for a Max subscription and the exact scenario this design targets.
 
-11. **Shell Invocation to Minimize Quoting Issues** — Section 3.6, 'Tool: run_command', says that commands will be executed by Bash as follows: `C:\apps\cygwin\bin\bash.exe -c "<command>"`, but that can cause problems when `<command>` contains complex combinations of single and double quotes. Can the MCP server spawn Bash using `bash -s` so it reads the `<command>` from stdin, which simplifies the quoting issues in the command?
+11. **Shell invocation to minimize quoting issues** — Section 3.6, 'Tool: run_command', says that commands will be executed by Bash as follows: `C:\apps\cygwin\bin\bash.exe -c "<command>"`, but that can cause problems when `<command>` contains complex combinations of single and double quotes. Can the MCP server spawn Bash using `bash -s` so it reads the `<command>` from stdin, which simplifies the quoting issues in the command?
+
+    - *Resolution:* TBD
