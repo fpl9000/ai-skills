@@ -2216,7 +2216,11 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 3. **Bridge configuration question** — What exactly are the semantics of bridge configuration parameter `job_expiry_seconds`?
 
-   - *Resolution:* TBD
+   - *Resolution:* `job_expiry_seconds` (default: 600) defines how long the bridge's job lifecycle manager will retain a completed-but-uncollected async job before discarding it. The expiry clock starts from `job.StartedAt` (not from when the process finished). When the cleanup goroutine's 30-second sweep detects that `now > job.StartedAt + job_expiry_seconds`, it kills the process if it is still running, logs a warning, and removes the job from the map.
+
+     The parameter exists to prevent memory leaks from orphaned jobs — async jobs whose `job_id` was returned to the primary agent but never retrieved via `check_agent`. This can happen if the user closes Claude Desktop mid-conversation, the agent forgets to poll, or the agent hits a context limit and loses track of the job_id. Without expiry, those jobs would accumulate indefinitely in the job manager, holding process handles and output buffers (up to 50 KB each for `run_command`, up to the token limit for `spawn_agent`).
+
+     The default of 600 seconds (10 minutes) is intentionally generous. In normal operation, the primary agent polls `check_agent` within seconds or minutes of receiving a `job_id`. The 10-minute window provides ample time for the agent to return to polling even after a distraction or brief interruption, while still ensuring the bridge doesn't accumulate stale jobs across a long Claude Desktop session. No change to the design or default value is needed.
 
 4. **UNIX Signals on Windows** — Section 3.14, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
 
