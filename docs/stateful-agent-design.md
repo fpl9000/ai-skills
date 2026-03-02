@@ -1,4 +1,3 @@
-
 # Stateful Agent System: Detailed Design
 
 **Version:** 1.0 (Draft)<br/>
@@ -2263,4 +2262,10 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 11. **Shell invocation to minimize quoting issues** — Section 3.6, "Tool: run_command", says that commands will be executed by Bash as follows: `C:\apps\cygwin\bin\bash.exe -c "<command>"`, but that can cause problems when `<command>` contains complex combinations of single and double quotes. Can the MCP server spawn Bash using `bash -s` so it reads the `<command>` from stdin, which simplifies the quoting issues in the command?
 
-    - *Resolution:* TBD
+    - *Resolution:* Keep the `-c` approach. The question was based on a mistaken assumption: that the `bash -c <command>` invocation is itself parsed by a shell, which would require the command string to be shell-escaped. In fact, Go's `exec.Command` bypasses any intermediate shell entirely — it calls `CreateProcess` (on Windows) directly, passing the command string as a single, literal argument to Bash's `-c` flag. No shell metacharacter expansion occurs at the Go level; the raw string is delivered to Bash as-is.
+
+      The genuine quoting challenge — complex single/double quote combinations in the command string — is a property of Bash parsing the command, not of how the string is delivered to Bash. Whether Bash receives the string via `-c` or via stdin (`-s`), it parses the same shell syntax identically. Switching to `bash -s` would not eliminate this challenge.
+
+      The `-s` approach would have one narrow, genuine advantage: avoiding the Windows `CreateProcess` command-line length limit (~32 KB). For the command types `run_command` is intended for (`grep`, `curl`, `git`, `find`, short pipelines, etc.), this limit will never be approached in practice.
+
+      Accordingly, the implementation uses `exec.Command(shellPath, append(shellArgs, params.Command)...)` as specified in [Section 3.6](#36-tool-run_command), where `shellArgs` defaults to `["-c"]`. This is correct, sufficient, and requires no change.
