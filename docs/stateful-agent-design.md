@@ -2226,7 +2226,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-5. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
+5. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location. What other options do we have to mitigate this issue?
 
    - *Resolution:* TBD
 
