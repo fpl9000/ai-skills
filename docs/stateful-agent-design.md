@@ -1016,26 +1016,33 @@ The bridge should never crash from a tool call. All errors are caught and return
 
 ### 3.14 Graceful Shutdown
 
-When the bridge receives a shutdown signal (Claude Desktop closes, SIGINT, SIGTERM):
+The bridge runs as a subprocess of Claude Desktop, communicating over stdio (stdin/stdout). When Claude Desktop exits or terminates the bridge, it closes the stdin pipe. **Stdin EOF is the authoritative shutdown signal** for the bridge — it is the only shutdown mechanism that works reliably on Windows and is consistent with the MCP stdio transport model.
 
-1. Stop accepting new tool calls.
-2. Kill all running subprocesses — both sub-agents (from `spawn_agent`) and shell commands (from `run_command`). Send SIGTERM, wait 5 seconds, then SIGKILL.
-3. Log the shutdown and number of jobs terminated.
-4. Exit cleanly.
+Note: UNIX signals are not used for shutdown. On Windows, SIGTERM does not exist as an inter-process signal, and SIGINT is only available when a console window is present (Ctrl+C). Since the bridge runs as a background stdio subprocess with no attached console, neither signal is reliably deliverable. Stdin EOF is the correct and portable mechanism.
+
+**Shutdown sequence when stdin EOF is detected:**
+
+1. The `mcp-go` SDK's stdio read loop detects EOF on stdin and exits naturally.
+2. The bridge detects the loop exit and begins shutdown.
+3. Kill all running subprocesses — both sub-agents (from `spawn_agent`) and shell commands (from `run_command`) — by calling `Process.Kill()` on each active job. On Windows, this calls `TerminateProcess` immediately; there is no SIGTERM grace period.
+4. Log the shutdown and number of jobs terminated.
+5. Exit cleanly.
 
 **Pseudo-code:**
 
 ```
 func main():
     // ... setup ...
-    
-    // Handle shutdown signals
-    sigCh = signal.Notify(SIGINT, SIGTERM)
-    go func():
-        <-sigCh
-        log.Info("Shutdown signal received, killing %d active jobs", jobManager.ActiveCount())
-        jobManager.KillAll()
-        os.Exit(0)
+
+    // Start the MCP stdio server. This blocks until stdin is closed (EOF),
+    // which happens when Claude Desktop exits or kills the bridge process.
+    // The mcp-go SDK handles the stdio read/write loop internally.
+    server.Run()  // returns when stdin closes
+
+    // Stdin EOF received — begin graceful shutdown
+    log.Info("Stdin EOF detected, killing %d active jobs", jobManager.ActiveCount())
+    jobManager.KillAll()  // calls Process.Kill() on all running subprocesses
+    os.Exit(0)
 ```
 
 ---
@@ -2224,7 +2231,9 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 4. **UNIX Signals on Windows** — Section 3.14, "Graceful Shutdown", mentions SIGINT and SIGTERM, but do those signals exist on Windows?  How does the Go runtime deal with UNIX signals on Windows?
 
-   - *Resolution:* TBD
+   - *Resolution:* SIGTERM does not exist as a native inter-process signal on Windows — it is only a software-level constant defined within the Windows CRT and cannot be sent from one external process to another. SIGINT exists in a limited form (Ctrl+C in a console window triggers a `CTRL_C_EVENT` that Go maps to `syscall.SIGINT`), but since the bridge runs as a background stdio subprocess with no attached console, it is not reliably deliverable either. Go's `os/signal` package maps these console events to signal constants, but that is of no help for a headless subprocess.
+
+     The correct shutdown mechanism for an MCP stdio server on Windows is **stdin EOF detection**. When Claude Desktop exits or kills the bridge, it closes the stdin pipe. The `mcp-go` SDK's stdio read loop detects this EOF and exits naturally, giving the bridge an opportunity to clean up. Section 3.14 has been updated accordingly: UNIX signal handling has been removed, the shutdown trigger is now stdin EOF, and subprocess termination uses `Process.Kill()` (which calls Windows `TerminateProcess` directly) rather than a SIGTERM-then-SIGKILL escalation sequence.
 
 5. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location.  Should we have a `subagents.md` memory block so that the primary agent has access to these instructions? What other options do we have to mitigate this issue?
 
