@@ -2235,15 +2235,11 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
      The correct shutdown mechanism for an MCP stdio server on Windows is **stdin EOF detection**. When Claude Desktop exits or kills the bridge, it closes the stdin pipe. The `mcp-go` SDK's stdio read loop detects this EOF and exits naturally, giving the bridge an opportunity to clean up. Section 3.14 has been updated accordingly: UNIX signal handling has been removed, the shutdown trigger is now stdin EOF, and subprocess termination uses `Process.Kill()` (which calls Windows `TerminateProcess` directly) rather than a SIGTERM-then-SIGKILL escalation sequence.
 
-5. **Sub-agent instructions** — Sections 6.1 (Command Construction), 6.2 (Default System Preamble), 6.3 (System Prompt Assembly) describe how the primary agent (Claude Desktop) uses Claude Code CLI as a sub-agent execution environment.  These instructions do not seem to reside in any skill or other location. What options do we have to mitigate this issue?
+5. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
    - *Resolution:* TBD
 
-6. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
-
-   - *Resolution:* TBD
-
-7. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
+6. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
 
    ```
    {
@@ -2257,23 +2253,23 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
    - *Resolution:* TBD
 
-8. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
+7. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
 
    - *Resolution:* TBD
 
-9. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use them to trigger memory writes?
+8. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use them to trigger memory writes?
 
    - *Resolution:* TBD
 
-10. **Terms of Service question** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent using Claude Code CLI as a sub-agent?
+9. **Terms of Service question** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent using Claude Code CLI as a sub-agent?
 
-    - *Resolution:* The design is compliant with Anthropic's Terms of Service. The `spawn_agent` tool invokes the official `claude -p` CLI binary as a subprocess — it does not extract, transfer, or reuse OAuth tokens, and it does not make direct Anthropic API calls. The bridge never touches authentication at all; the Claude Code CLI manages its own auth lifecycle internally. The Consumer ToS prohibition on automated access contains an explicit exception for use cases "where we otherwise explicitly permit it," and Anthropic explicitly permits scripted and automated use of the `claude` CLI — their official documentation demonstrates piping, scripting, and CI/CD pipelines as intended patterns.
+   - *Resolution:* The design is compliant with Anthropic's Terms of Service. The `spawn_agent` tool invokes the official `claude -p` CLI binary as a subprocess — it does not extract, transfer, or reuse OAuth tokens, and it does not make direct Anthropic API calls. The bridge never touches authentication at all; the Claude Code CLI manages its own auth lifecycle internally. The Consumer ToS prohibition on automated access contains an explicit exception for use cases "where we otherwise explicitly permit it," and Anthropic explicitly permits scripted and automated use of the `claude` CLI — their official documentation demonstrates piping, scripting, and CI/CD pipelines as intended patterns.
 
-      The account bans reported in January–February 2026 targeted a specific and narrow behavior: third-party harnesses (OpenCode, OpenClaw, Cline, Roo Code, etc.) that intercepted Claude's OAuth authentication flow, extracted the subscriber's OAuth token, and used it to make direct Anthropic API calls while forging the HTTP headers that the real Claude Code CLI sends — effectively spoofing the official client to gain flat-rate subscription access at API-level volume. Anthropic's formal prohibition, published February 17–19, 2026, reads: *"Using OAuth tokens obtained through Claude Free, Pro, or Max accounts in any other product, tool, or service — including the Agent SDK — is not permitted."* This design does none of that. The critical distinction is: **calling `claude -p` (the real CLI binary) = allowed; extracting OAuth tokens to use in a third-party API client = banned.**
+     The account bans reported in January–February 2026 targeted a specific and narrow behavior: third-party harnesses (OpenCode, OpenClaw, Cline, Roo Code, etc.) that intercepted Claude's OAuth authentication flow, extracted the subscriber's OAuth token, and used it to make direct Anthropic API calls while forging the HTTP headers that the real Claude Code CLI sends — effectively spoofing the official client to gain flat-rate subscription access at API-level volume. Anthropic's formal prohibition, published February 17–19, 2026, reads: *"Using OAuth tokens obtained through Claude Free, Pro, or Max accounts in any other product, tool, or service — including the Agent SDK — is not permitted."* This design does none of that. The critical distinction is: **calling `claude -p` (the real CLI binary) = allowed; extracting OAuth tokens to use in a third-party API client = banned.**
 
-      The "ordinary, individual usage" language added to Anthropic's February 2026 documentation refers to preventing subscription arbitrage at scale (e.g., multi-tenant bots running overnight autonomous swarms on a flat-rate plan, which would cost $1,000+/month at API prices). It does not apply to a single developer running personal project work from their own machine — which is the intended use case for a Max subscription and the exact scenario this design targets.
+     The "ordinary, individual usage" language added to Anthropic's February 2026 documentation refers to preventing subscription arbitrage at scale (e.g., multi-tenant bots running overnight autonomous swarms on a flat-rate plan, which would cost $1,000+/month at API prices). It does not apply to a single developer running personal project work from their own machine — which is the intended use case for a Max subscription and the exact scenario this design targets.
 
-11. **Shell invocation to minimize quoting issues** — Section 3.6, "Tool: run_command", says that commands will be executed by Bash as follows: `C:\apps\cygwin\bin\bash.exe -c "<command>"`, but that can cause problems when `<command>` contains complex combinations of single and double quotes. Can the MCP server spawn Bash using `bash -s` so it reads the `<command>` from stdin, which simplifies the quoting issues in the command?
+10. **Shell invocation to minimize quoting issues** — Section 3.6, "Tool: run_command", says that commands will be executed by Bash as follows: `C:\apps\cygwin\bin\bash.exe -c "<command>"`, but that can cause problems when `<command>` contains complex combinations of single and double quotes. Can the MCP server spawn Bash using `bash -s` so it reads the `<command>` from stdin, which simplifies the quoting issues in the command?
 
     - *Resolution:* Keep the `-c` approach. The question was based on a mistaken assumption: that the `bash -c <command>` invocation is itself parsed by a shell, which would require the command string to be shell-escaped. In fact, Go's `exec.Command` bypasses any intermediate shell entirely — it calls `CreateProcess` (on Windows) directly, passing the command string as a single, literal argument to Bash's `-c` flag. No shell metacharacter expansion occurs at the Go level; the raw string is delivered to Bash as-is.
 
