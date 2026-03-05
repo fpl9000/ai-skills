@@ -1,3 +1,4 @@
+────────────────────────────────────────────────────────────
 # Stateful Agent System: Detailed Design
 
 **Version:** 1.0 (Draft)<br/>
@@ -2237,7 +2238,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 5. **Read-only mounts** — In section 6.4, "Directory Sandbox Behavior", the design states "For additional hardening, the bridge could launch the subprocess with the memory directory mounted read-only at the OS level (platform-specific)."  Is this possible on Windows 11?
 
-   - *Resolution:* TBD
+   - *Resolution:* OS-level read-only mounting of a directory into a specific subprocess's namespace is not supported on Windows 11 without disproportionate complexity. The options considered were: (a) **ACL manipulation** — temporarily removing write permissions on the memory directory before launching the subprocess and restoring them after; this is globally visible (affects all processes, not just the sub-agent), introduces a TOCTOU race window, and is fragile if the bridge crashes before restoring permissions; (b) **Job Objects with restricted tokens** — Windows Job Objects can constrain CPU and memory but offer no directory-level read/write access control; (c) **App Containers / Win32 app isolation** — available since Windows 10 1903, but require setting up security capabilities and are far too complex to invoke from a Go binary for this use case. The design already provides the correct level of protection via Claude Code's own directory sandbox: when `allow_memory_read` is `false`, the sandbox blocks all access to the memory directory entirely; when `allow_memory_read` is `true`, the preamble-based write prohibition is the appropriate mechanism. No OS-level read-only hardening will be added in v1.
 
 6. **Filesystem extension question** — In section 7.2, "Claude Desktop Configuration", the design says the existing Filesystem extension entry should already be present in `%APPDATA%\Claude\claude_desktop_config.json`, but on my Windows 11 machine that file contains only the below contents.  Is this a problem?
 
@@ -2278,3 +2279,5 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
       The `-s` approach would have one narrow, genuine advantage: avoiding the Windows `CreateProcess` command-line length limit (~32 KB). For the command types `run_command` is intended for (`grep`, `curl`, `git`, `find`, short pipelines, etc.), this limit will never be approached in practice.
 
       Accordingly, the implementation uses `exec.Command(shellPath, append(shellArgs, params.Command)...)` as specified in [Section 3.6](#36-tool-run_command), where `shellArgs` defaults to `["-c"]`. This is correct, sufficient, and requires no change.
+
+────────────────────────────────────────────────────────────
