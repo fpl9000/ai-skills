@@ -1728,31 +1728,13 @@ Add the bridge server entry:
 
 The Desktop App will launch the bridge as a subprocess on startup, communicating via stdio.
 
-**Note:** The existing Filesystem extension entry should already be present in this file. The two MCP servers run simultaneously. If the Filesystem extension is not configured, add it:
-
-```json
-{
-  "mcpServers": {
-    "mcp-bridge": {
-      "command": "C:\\franl\\git\\mcp-bridge\\mcp-bridge.exe",
-      "args": ["--config", "C:\\franl\\.claude-agent-memory\\bridge-config.yaml"]
-    },
-    "filesystem": {
-      "command": "npx",
-      "args": [
-        "-y", "@modelcontextprotocol/server-filesystem",
-        "C:\\franl", "C:\\temp", "C:\\apps"
-      ]
-    }
-  }
-}
-```
+**Note:** The Filesystem extension does **not** appear in `claude_desktop_config.json` and should **not** be added there. It is a first-party Claude Desktop extension developed by Anthropic and distributed through Claude Desktop's built-in extensions gallery (Settings > Extensions). It is installed, enabled, and configured entirely through the Claude Desktop UI — not via the config JSON file. Claude Desktop manages its configuration for first-party extensions through a separate internal store. See the resolution of Open Question #6 for details.
 
 ### 7.3 Filesystem Extension Configuration
 
-Ensure the Anthropic Filesystem extension's allowed directories include the memory directory's parent. Since `C:\franl\.claude-agent-memory` is under `C:\franl`, and `C:\franl` is already an allowed directory, no changes are needed.
+The Filesystem extension is enabled and configured via Claude Desktop's Extensions UI (Settings > Extensions > Filesystem > Configure). The allowed directories (e.g., `C:\franl`, `C:\temp`, `C:\apps`) are set there, not in `claude_desktop_config.json`.
 
-If the memory directory were elsewhere, it would need to be added as an argument to the filesystem server command.
+The memory directory (`C:\franl\.claude-agent-memory`) is covered because it is a subdirectory of `C:\franl`, which is already an allowed directory. No additional configuration is needed.
 
 ### 7.4 Memory Directory Setup
 
@@ -2251,7 +2233,13 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
    }
    ```
 
-   - *Resolution:* TBD
+   - *Resolution:* The Filesystem extension does not appear in `claude_desktop_config.json` because it is not an MCP server configured by the user — it is a **first-party Claude Desktop extension** developed and distributed by Anthropic through Claude Desktop's built-in extensions gallery (Settings > Extensions). First-party extensions are installed, enabled, and configured entirely through the Claude Desktop UI. Claude Desktop manages their configuration through a separate internal store, not through `claude_desktop_config.json`.
+
+     The `claude_desktop_config.json` file is only for **third-party MCP servers** that the user manually registers — i.e., servers that Claude Desktop does not know about natively and must be told how to launch. The `mcp-bridge` server we are building belongs in that file. The Filesystem extension does not.
+
+     The screenshot of the Filesystem extension's detail screen in Claude Desktop confirms this: it shows an "Enabled" toggle and a "Configure" button (for setting allowed directories), consistent with a UI-managed extension. It also shows "Developed by Anthropic" and notes that it uses `@modelcontextprotocol/server-filesystem` under the hood — Anthropic has bundled the npm package but manages its lifecycle internally.
+
+     **Impact on the design:** Section 7.2 has been corrected to remove the incorrect note and the example JSON that showed a `"filesystem"` entry in `claude_desktop_config.json`. Section 7.3 has been updated to describe configuring allowed directories via the UI instead of via command-line arguments. No `"filesystem"` entry should be added to `claude_desktop_config.json`.
 
 7. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
 
