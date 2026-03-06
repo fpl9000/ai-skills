@@ -125,7 +125,7 @@ These principles are inherited from the proposal and govern all design decisions
 | **Primary agent** | The Claude instance running in Claude Desktop App. Has Layer 1 memory, MCP tools, and the memory skill. |
 | **Sub-agent** | An ephemeral Claude Code CLI instance (`claude -p`) spawned by the bridge. One-shot, stateless, no Layer 1 memory. |
 | **Layer 1** | Anthropic's built-in memory. Auto-generated summary (~500–2,000 tokens) injected into every conversation. Influenced indirectly via `memory_user_edits` steering instructions. ~24-hour lag for updates. |
-| **Layer 2** | Our supplementary memory system. Markdown files at `~/.claude-agent-memory/`. Under our full control. Updates are immediate. |
+| **Layer 2** | Our supplementary memory system. Markdown files at `C:\franl\.claude-agent-memory\`. Under our full control. Updates are immediate. |
 | **MCP bridge** | The Go binary that serves as an MCP server, providing `spawn_agent`, `check_agent`, `run_command`, `safe_write_file`, and `safe_append_file` tools. |
 | **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for reading memory files and all non-memory file operations. |
 | **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file writes (`safe_write_file` and `safe_append_file`). Prevents concurrent conversations from interleaving or overwriting each other's memory updates. |
@@ -278,7 +278,7 @@ The bridge reads its configuration from a YAML file. The config file location is
 
 1. `--config` command-line flag
 2. `MCP_BRIDGE_CONFIG` environment variable
-3. Default: `~/.claude-agent-memory/bridge-config.yaml`
+3. Default: `C:\franl\.claude-agent-memory\bridge-config.yaml`
 
 **Configuration schema:**
 
@@ -1521,7 +1521,7 @@ Periodically (monthly, or when the user requests it), the primary agent should r
 **Step 1:** Spawn a sub-agent with `allow_memory_read: true` to read all Layer 2 files and produce a structured digest:
 ```
 spawn_agent(
-  task: "Read all files in ~/.claude-agent-memory/ and produce a structured 
+  task: "Read all files in C:\franl\.claude-agent-memory\ and produce a structured 
          digest listing: active projects, completed projects, key facts,
          recent decisions, and any stale or contradictory content.",
   allow_memory_read: true,
@@ -1608,10 +1608,10 @@ Claude Code's directory sandbox is enforcement-level security provided by Claude
 
 | Scenario | `working_directory` | `allow_memory_read` | `additional_dirs` | Sub-agent can access |
 |----------|--------------------|--------------------|-------------------|---------------------|
-| Minimal | `~/projects/foo` | false | none | Only `~/projects/foo/**` |
-| With memory | `~/projects/foo` | true | none | `~/projects/foo/**` + `~/.claude-agent-memory/**` (read) |
-| Multi-repo | `~/projects/foo` | false | `[~/projects/bar]` | `~/projects/foo/**` + `~/projects/bar/**` |
-| Memory + multi-repo | `~/projects/foo` | true | `[~/projects/bar]` | All three directories |
+| Minimal | `C:\franl\projects\foo` | false | none | Only `C:\franl\projects\foo\**` |
+| With memory | `C:\franl\projects\foo` | true | none | `C:\franl\projects\foo\**` + `C:\franl\.claude-agent-memory\**` (read) |
+| Multi-repo | `C:\franl\projects\foo` | false | `[C:\franl\projects\bar]` | `C:\franl\projects\foo\**` + `C:\franl\projects\bar7**` |
+| Memory + multi-repo | `C:\franl\projects\foo` | true | `[C:\franl\projects\bar]` | All three directories |
 
 **Important:** The sandbox blocks reads, not just writes. If `allow_memory_read` is `false`, the sub-agent cannot even `cat` a memory file — Claude Code will refuse the operation.
 
@@ -1619,7 +1619,7 @@ Claude Code's directory sandbox is enforcement-level security provided by Claude
 
 ### 6.5 CLAUDE.md Recommendations
 
-The file `~/.claude/CLAUDE.md` is loaded into every Claude Code invocation automatically (including sub-agents), independent of `--system-prompt`. It should be optimized for the sub-agent use case:
+The file `C:\Users\flitt\.claude\CLAUDE.md` is loaded into every Claude Code invocation automatically (including sub-agents), independent of `--system-prompt`. It should be optimized for the sub-agent use case:
 
 **Target size:** Under 500 tokens (~400 words).
 
@@ -1759,7 +1759,7 @@ If the memory directory were elsewhere, it would need to be added as an argument
 Create the directory structure:
 
 ```bash
-mkdir -p C:\franl\.claude-agent-memory\blocks
+mkdir -p C:/franl/.claude-agent-memory/blocks
 ```
 
 Create the bridge configuration file (`bridge-config.yaml`) with the schema defined in [Section 3.2](#32-configuration).
@@ -1796,7 +1796,7 @@ Alternatively, ask Claude in an initial conversation to seed the memory from its
 
 ### 7.7 CLAUDE.md Update
 
-Replace the current `~/.claude/CLAUDE.md` with the lean sub-agent-optimized version described in [Section 6.5](#65-claudemd-recommendations) and the proposal. Move credentials to environment variables. Move service-specific instructions to `spawn_agent` system_prompt parameters.
+Replace the current `C:\Users\flitt\.claude\CLAUDE.md` with the lean sub-agent-optimized version described in [Section 6.5](#65-claudemd-recommendations) and the proposal. Move credentials to environment variables. Move service-specific instructions to `spawn_agent` system_prompt parameters.
 
 ---
 
