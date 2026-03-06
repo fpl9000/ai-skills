@@ -2279,6 +2279,6 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
       Accordingly, the implementation uses `exec.Command(shellPath, append(shellArgs, params.Command)...)` as specified in [Section 3.6](#36-tool-run_command), where `shellArgs` defaults to `["-c"]`. This is correct, sufficient, and requires no change.
 
-11. **Multiple home directories** — Sections 3.4, "Tool: spawn_agent", and 3.6, "Tool: run_command", mention my home directory in several places, but my Windows home directory is `C:\Users\flitt\` and my Cygwin home directory is `C:\franl\`.  Is there any problem with resolving this by changing those sections to explicity specify `C:\franl`?
+11. **Multiple home directories** — Sections 3.4, "Tool: spawn_agent", and 3.6, "Tool: run_command", say that the default value of the working directory parameter is my home directory, but there's an ambiguity: my Windows home directory is `C:\Users\flitt\` and my Cygwin home directory is `C:\franl\`.  Is there any issue with changing those sections to explicity specify `C:\franl` as the default working directory for commands `spawn_agent` and `run_command`?
 
     - *Resolution:* TBD
