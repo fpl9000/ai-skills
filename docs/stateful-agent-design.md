@@ -291,6 +291,13 @@ async:
                                   # Must be < 30 (Claude Desktop reliability threshold)
   job_expiry_seconds: 600         # Uncollected jobs cleaned up after this
 
+# Default working directory for spawn_agent and run_command.
+# On this system, C:\franl\ is the Cygwin home directory and the root of all
+# project work. This is preferred over os.UserHomeDir() (which returns the
+# Windows home directory C:\Users\flitt\) because commands run via Cygwin bash
+# and sub-agents expect a Cygwin-rooted working environment.
+default_working_directory: "C:\\franl"
+
 # Sub-agent defaults (for spawn_agent tool)
 sub_agent:
   default_timeout_seconds: 300    # Max subprocess runtime (kills after this)
@@ -361,7 +368,7 @@ Input Schema:
   task:               string, required  — The task prompt
   system_prompt:      string, optional  — Task-specific instructions (appended to default preamble)
   model:              string, optional  — Sub-agent model (e.g., "sonnet", "opus")
-  working_directory:  string, optional  — CWD and sandbox root (default: user's home)
+  working_directory:  string, optional  — CWD and sandbox root (default: config.DefaultWorkingDirectory)
   additional_dirs:    string[], optional — Extra dirs for --add-dir
   timeout_seconds:    integer, optional — Max subprocess runtime (default: from config)
   max_output_tokens:  integer, optional — Output truncation threshold (default: from config)
@@ -410,7 +417,7 @@ func HandleSpawnAgent(params SpawnAgentParams) AsyncResult:
 
     // 4. Build the exec.Cmd
     cmd = exec.Command(config.ClaudeCLI.Path, args...)
-    cmd.Dir = params.WorkingDirectory or os.UserHomeDir()
+    cmd.Dir = params.WorkingDirectory or config.DefaultWorkingDirectory
     cmd.Stdin = strings.NewReader(params.Task)  // Task goes to stdin
 
     // 5. Determine timeout
@@ -543,7 +550,7 @@ Description: "Execute a shell command on the local machine and return its output
 
 Input Schema:
   command:            string, required   — Shell command to execute
-  working_directory:  string, optional   — CWD for the command (default: user's home dir)
+  working_directory:  string, optional   — CWD for the command (default: config.DefaultWorkingDirectory)
   timeout_seconds:    integer, optional  — Max runtime in seconds (default: from config, typically 120)
   max_output_bytes:   integer, optional  — Truncate combined stdout+stderr beyond this
                                            (default: from config, typically 50 KB)
@@ -572,7 +579,7 @@ func HandleRunCommand(params RunCommandParams) AsyncResult:
     // 2. Resolve configuration defaults
     timeout = params.TimeoutSeconds or config.RunCommand.DefaultTimeoutSeconds
     maxOutputBytes = params.MaxOutputBytes or config.RunCommand.DefaultMaxOutputBytes
-    workDir = params.WorkingDirectory or os.UserHomeDir()
+    workDir = params.WorkingDirectory or config.DefaultWorkingDirectory
 
     // 3. Construct the shell command
     //    Wraps the command in the configured shell (Cygwin bash by default).
@@ -2271,4 +2278,6 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 11. **Multiple home directories** — Sections 3.4, "Tool: spawn_agent", and 3.6, "Tool: run_command", say that the default value of the working directory parameter is my home directory, but there's an ambiguity: my Windows home directory is `C:\Users\flitt\` and my Cygwin home directory is `C:\franl\`.  Is there any issue with changing those sections to explicity specify `C:\franl\` as the default working directory for commands `spawn_agent` and `run_command`?
 
-    - *Resolution:* TBD
+    - *Resolution:* No issue. `C:\franl\` is the correct default and `os.UserHomeDir()` would be wrong here for two reasons: (a) on Windows it returns `C:\Users\flitt\` (from `USERPROFILE`), not the Cygwin home; and (b) both `run_command` (which runs via Cygwin bash) and `spawn_agent` (which spawns a sub-agent doing real work) expect to start in the Cygwin-rooted environment where all projects and tools live. Using `C:\Users\flitt\` as the default would be consistently wrong.
+
+      Rather than hardcoding `C:\franl\` as a compile-time constant, the design has been updated to add a `default_working_directory` field to the bridge config (see [Section 3.2](#32-configuration)), defaulting to `C:\franl\`. This keeps it configurable without a recompile if the filesystem layout ever changes, and is consistent with how the rest of the config handles machine-specific paths. Sections 3.4 and 3.6 have been updated to reference `config.DefaultWorkingDirectory` instead of `os.UserHomeDir()`.
