@@ -2215,8 +2215,8 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 │                  │       │              │       │        │                   │
 │                  │       │              │       │        ▼                   │
 │                  │       │              │       │      Claude Desktop        │
-│                  │       │              │       │        │                   │
-│                  │       │              │       │        ▼ relay_respond()   │
+│                  │       │              │       │        │ relay_respond()   │
+│                  │       │              │       │        ▼                   │
 │                  │       │              │       │      MCP Bridge            │
 └──────────────────┘       └──────────────┘       └────────────────────────────┘
 ```
