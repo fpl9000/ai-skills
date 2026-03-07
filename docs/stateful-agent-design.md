@@ -2192,22 +2192,33 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 **Trigger:** When mobile or web access to the local stateful agent is desired — e.g., using the Claude app on a phone to invoke tools on the home machine.
 
-**Problem:** Claude.ai runs code in an ephemeral Linux VM with strict egress restrictions (whitelisted domains only: `github.com`, `api.github.com`, `pypi.org`, etc.). It cannot reach arbitrary IPs or custom domains. This rules out direct connections via port forwarding, Tailscale, or any custom tunnel endpoint. However, both Claude.ai (via the GitHub skill) and the local machine can read and write to GitHub's REST API — making a private GitHub repo a viable asynchronous message relay.
+**Problem:** Claude.ai runs code in an ephemeral Linux VM with strict egress restrictions (whitelisted domains only: `github.com`, `api.github.com`, `pypi.org`, etc.). It cannot reach arbitrary IPs or custom domains. This rules out direct connections via port forwarding, Tailscale, or any custom tunnel endpoint. However, both Claude.ai (via the GitHub skill) and the local MCP bridge can read and write to GitHub's REST API — making a private GitHub repo a viable asynchronous message relay.
 
 **Architecture overview:**
 
 ```
-┌──────────────────┐       ┌──────────────┐       ┌──────────────────────┐
-│  Claude.ai       │       │   GitHub     │       │  Local Machine       │
-│  (phone/web)     │       │   Private    │       │  (Windows 11)        │
-│                  │  PUT  │   Repo       │  GET  │                      │
-│  GitHub skill ───────────▶ requests/   ◀───────── Relay Daemon         │
-│                  │       │              │       │    │                  │
-│                  │  GET  │              │  PUT  │    ▼                  │
-│  GitHub skill ◀──────────── responses/ ◀─────────  MCP Bridge / CLI   │
-│                  │       │              │       │                      │
-└──────────────────┘       └──────────────┘       └──────────────────────┘
+┌──────────────────┐       ┌──────────────┐       ┌──────────────────────────┐
+│  Claude.ai       │       │   GitHub     │       │  Local Machine           │
+│  (phone/web)     │       │   Private    │       │  (Windows 11)            │
+│                  │  PUT  │   Repo       │  GET  │                          │
+│  GitHub skill ───────────▶ requests/   ◀─────────  MCP Bridge              │
+│                  │       │              │       │    │                      │
+│                  │  GET  │              │  PUT  │    ├─ memory_query:       │
+│  GitHub skill ◀──────────── responses/ ◀─────────  │   handled directly    │
+│                  │       │              │       │    ├─ shell_command:       │
+│                  │       │              │       │    │   handled directly    │
+│                  │       │              │       │    └─ claude_prompt:       │
+│                  │       │              │       │        inject into Claude  │
+│                  │       │              │       │        Desktop via AHK     │
+│                  │       │              │       │        ▼                   │
+│                  │       │              │       │      Claude Desktop        │
+│                  │       │              │       │        │                   │
+│                  │       │              │       │        ▼ relay_respond()   │
+│                  │       │              │       │      MCP Bridge            │
+└──────────────────┘       └──────────────┘       └──────────────────────────┘
 ```
+
+**Key design principle:** The relay logic is integrated directly into the MCP bridge — there is no separate daemon process. The bridge polls the relay repo, handles `memory_query` and `shell_command` operations locally (no inference), and delegates `claude_prompt` operations to Claude Desktop via an AutoHotkey-based prompt injection mechanism.
 
 **Relay repository:** A dedicated private repo (e.g., `fpl9000/claude-relay`) with the following structure:
 
@@ -2216,7 +2227,7 @@ claude-relay/
 ├── README.md
 ├── requests/          # Claude.ai writes here
 │   └── <id>.json
-├── responses/         # Local daemon writes here
+├── responses/         # MCP bridge writes here
 │   └── <id>.json
 └── .gitignore
 ```
@@ -2233,8 +2244,7 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
   "created_at": "2026-03-07T14:30:22Z",
   "status": "pending",
   "nonce": "randomly-generated-shared-secret-verification",
-  "operation": "tool_call",
-  "tool": "safe_read_file",
+  "operation": "memory_query",
   "arguments": {
     "path": "core.md"
   },
@@ -2251,7 +2261,7 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
   "status": "completed",
   "result": {
     "success": true,
-    "content": "... file contents ..."
+    "content": "... file contents or response text ..."
   }
 }
 ```
@@ -2260,99 +2270,173 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
 
 | Status | Location | Meaning |
 |--------|----------|---------|
-| `pending` | `requests/` | Awaiting pickup by local daemon |
-| `claimed` | `requests/` | Daemon has acknowledged, processing |
+| `pending` | `requests/` | Awaiting pickup by MCP bridge |
+| `claimed` | `requests/` | Bridge has acknowledged, processing |
 | `completed` | `responses/` | Result ready for Claude.ai to read |
 | `failed` | `responses/` | Operation failed; `result.error` contains details |
 | `expired` | `requests/` | TTL exceeded without pickup (set by cleanup) |
 
-**Supported operations:**
+#### 9.5.2 Supported Operations
 
-| Operation | Description |
-|-----------|-------------|
-| `tool_call` | Invoke any registered MCP bridge tool by name |
-| `memory_query` | Read from the memory directory (convenience wrapper) |
-| `shell_command` | Execute a local command via the bridge's `run_command` tool |
-| `agent_task` | Dispatch a task to `spawn_agent` for async execution |
-| `ping` | Health check — daemon responds with uptime and status |
+The relay supports exactly three operations, with a clear split: two are handled entirely by the MCP bridge (no inference), and one delegates to Claude Desktop for full agent-loop processing.
 
-#### 9.5.2 Security
+**Bridge-local operations (no inference):**
+
+| Operation | Arguments | Behavior |
+|-----------|-----------|----------|
+| `memory_query` | `path` (string) | Reads the specified file from the memory directory and returns its content as UTF-8 text. Equivalent to the bridge's `safe_read_file` tool scoped to the memory directory. |
+| `shell_command` | `command` (string), `timeout_seconds` (int, optional) | Executes the command locally and returns stdout/stderr as UTF-8 text. Equivalent to the bridge's `run_command` tool with the same security constraints (no interactive commands, enforced timeout). |
+
+**Claude Desktop-delegated operation:**
+
+| Operation | Arguments | Behavior |
+|-----------|-----------|----------|
+| `claude_prompt` | `prompt` (string) | Forwards the prompt to Claude Desktop for processing. Claude Desktop performs whatever tool calls it deems appropriate based on the prompt content, then returns its final response as UTF-8 text via the `relay_respond` MCP tool. |
+
+The `claude_prompt` operation is the "full agent loop" path — it gives Claude Desktop complete autonomy to read memory, run commands, spawn sub-agents, or do anything else its tools allow. The other two operations are fast, deterministic shortcuts that bypass inference entirely.
+
+#### 9.5.3 The `claude_prompt` Flow and `relay_respond` Tool
+
+The `claude_prompt` operation requires a round-trip through Claude Desktop:
+
+1. The MCP bridge picks up a `claude_prompt` request from the relay repo.
+2. The bridge injects the prompt into Claude Desktop via an AutoHotkey script (mechanism TBD — see Section 9.5.7).
+3. The injected prompt includes a preamble instructing Claude Desktop to call the `relay_respond` tool when it has completed the task:
+
+   ```
+   [RELAY REQUEST id=20260307T143022Z-a1b2c3]
+   The following prompt was forwarded from Claude.ai via the GitHub relay.
+   Process it using whatever tools you need, then call the relay_respond
+   tool with your final answer.
+
+   <relay_prompt>
+   {original prompt text from Claude.ai}
+   </relay_prompt>
+   ```
+
+4. Claude Desktop processes the prompt — reading memory, running commands, spawning agents, etc. as it sees fit.
+5. When finished, Claude Desktop calls the `relay_respond` MCP tool provided by the bridge.
+6. The bridge writes the response to `responses/<id>.json` in the relay repo.
+
+**New MCP tool — `relay_respond`:**
+
+```go
+// Tool definition
+mcp.NewTool(
+    "relay_respond",
+    mcp.WithDescription(
+        "Submit a response for a relay request forwarded from Claude.ai. "+
+        "Call this tool when you have completed processing a [RELAY REQUEST] prompt. "+
+        "The response content will be delivered back to the Claude.ai session that "+
+        "originated the request.",
+    ),
+    mcp.WithString("relay_id",
+        mcp.Required(),
+        mcp.Description("The relay request ID from the [RELAY REQUEST] header."),
+    ),
+    mcp.WithString("content",
+        mcp.Required(),
+        mcp.Description(
+            "Your complete response to the relay request, as UTF-8 text. "+
+            "Include all relevant results, summaries, and context — the "+
+            "recipient cannot ask follow-up questions.",
+        ),
+    ),
+)
+```
+
+**Handler behavior:**
+
+1. Validate that `relay_id` matches a `claimed` request that used the `claude_prompt` operation.
+2. Write `responses/<relay_id>.json` to the relay repo via the GitHub API.
+3. Return success to Claude Desktop.
+
+If Claude Desktop calls `relay_respond` with an unknown or already-completed `relay_id`, the handler returns a tool error.
+
+#### 9.5.4 Security
 
 The relay repo is private, but defense-in-depth applies:
 
-1. **Shared nonce:** Each request includes a `nonce` field. The local daemon maintains a list of valid nonces (pre-shared between the user and the daemon configuration). Requests with unknown nonces are rejected. This prevents a compromised repo collaborator from injecting commands.
+1. **Shared nonce:** Each request includes a `nonce` field. The bridge maintains a list of valid nonces (configured in `relay-config.yaml`). Requests with unknown nonces are rejected. This prevents a compromised repo collaborator from injecting commands.
 
-2. **Operation allowlist:** The daemon configuration specifies which operations and tools are permitted via the relay. Dangerous operations (e.g., arbitrary `shell_command` with no constraints) can be disabled or restricted to specific command patterns.
+2. **Operation allowlist:** The bridge configuration specifies which operations are permitted via the relay. For example, `shell_command` can be disabled or restricted to specific command patterns.
 
-3. **Rate limiting:** The daemon enforces a maximum number of requests per time window (e.g., 10 requests per minute) to limit abuse.
+3. **Rate limiting:** The bridge enforces a maximum number of requests per time window (e.g., 10 requests per minute) to limit abuse.
 
-4. **Audit log:** All relay activity is logged locally, including rejected requests.
+4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests.
 
-#### 9.5.3 Local Relay Daemon
+#### 9.5.5 Bridge Relay Integration
 
-The daemon is a Go program (or Python script) running as a background service on the local machine. Its responsibilities:
+The relay polling loop runs as a goroutine within the MCP bridge process. Its responsibilities:
 
-1. **Poll** the `requests/` directory in the relay repo at a configurable interval (default: 15 seconds).
+1. **Poll** the `requests/` directory in the relay repo at a configurable interval (default: 15 seconds) using the GitHub Contents API.
 2. **Claim** new `pending` requests by updating their status to `claimed`.
-3. **Dispatch** the operation to the MCP bridge (or directly to the appropriate tool).
-4. **Write** the response to `responses/<id>.json`.
-5. **Clean up** expired requests and old response files beyond the configured TTL (default: 1 hour).
+3. **Dispatch** the operation:
+   - `memory_query` → read the file directly from the memory directory and write the response.
+   - `shell_command` → execute the command (reusing `run_command` logic) and write the response.
+   - `claude_prompt` → inject the prompt into Claude Desktop via AutoHotkey; the response arrives asynchronously when Claude Desktop calls `relay_respond`.
+4. **Clean up** expired requests and old response files beyond the configured TTL (default: 1 hour).
 
-**Dispatch strategies:**
-
-- **Direct tool invocation (preferred):** If the daemon is integrated into the MCP bridge process (or linked as a library), it can call tool handlers directly — no subprocess overhead. This is the most efficient path.
-
-- **CLI passthrough:** The daemon invokes `claude -p "..."` (Claude Code CLI) with the task, captures the output, and writes it as the response. This leverages the full agent loop (including sub-agent orchestration) but incurs CLI startup cost and API token usage.
-
-- **HTTP to bridge:** If the bridge is upgraded to Streamable HTTP transport (Section 9.3), the daemon can forward relay requests as MCP tool calls over HTTP to `localhost:<port>`. This cleanly separates relay concerns from bridge concerns.
-
-**Daemon configuration** (`relay-config.yaml`):
+**Bridge configuration** (added to `relay-config.yaml` or a `[relay]` section in the bridge config):
 
 ```yaml
-repo: fpl9000/claude-relay
-poll_interval_seconds: 15
-request_ttl_minutes: 60
-max_requests_per_minute: 10
-dispatch_mode: direct        # direct | cli | http
-valid_nonces:
-  - "pre-shared-secret-1"
-  - "pre-shared-secret-2"
-allowed_operations:
-  - tool_call
-  - memory_query
-  - ping
-  # shell_command and agent_task disabled by default
-allowed_tools:
-  - safe_read_file
-  - safe_write_file
-  - safe_append_file
-  - list_directory
-  # Restrict to safe tools initially
-log_file: C:\franl\.claude-agent-memory\relay.log
+relay:
+  enabled: false               # Off by default
+  repo: fpl9000/claude-relay
+  github_token_env: GITHUB_TOKEN
+  poll_interval_seconds: 15
+  request_ttl_minutes: 60
+  claude_prompt_timeout_minutes: 5
+  max_requests_per_minute: 10
+  valid_nonces:
+    - "pre-shared-secret-1"
+    - "pre-shared-secret-2"
+  allowed_operations:
+    - memory_query
+    - shell_command
+    - claude_prompt
+  ahk_script_path: C:\franl\scripts\relay-inject.ahk
+  log_file: C:\franl\.claude-agent-memory\relay.log
 ```
 
-#### 9.5.4 Claude.ai Workflow
+#### 9.5.6 Claude.ai Workflow
 
 From Claude.ai (web or mobile), the interaction pattern is:
 
-1. **User** asks Claude.ai to do something that requires the local machine (e.g., "read my core memory," "check what tasks are running").
+1. **User** asks Claude.ai to do something that requires the local machine (e.g., "read my core memory," "ask my local Claude to summarize today's episodic log").
 2. **Claude.ai** uses the GitHub skill to create `requests/<id>.json` in the relay repo.
 3. **Claude.ai** polls `responses/<id>.json` at intervals (e.g., every 10 seconds, up to a timeout).
 4. **Claude.ai** reads the response and presents the result to the user.
 
-The round-trip latency is bounded by: `daemon_poll_interval + operation_execution_time + claudeai_poll_interval`. With 15-second daemon polling and 10-second Claude.ai polling, typical latency is 15–40 seconds — acceptable for async mobile use.
+The round-trip latency depends on the operation:
 
-**Timeout behavior:** If no response appears within a configurable timeout (default: 2 minutes), Claude.ai reports that the local machine may be offline or the daemon is not running.
+| Operation | Typical latency | Bottleneck |
+|-----------|----------------|------------|
+| `memory_query` | 15–40 sec | Bridge poll interval + GitHub API round-trips |
+| `shell_command` | 15–60 sec | Bridge poll interval + command execution time |
+| `claude_prompt` | 30 sec–5 min | Bridge poll interval + Claude Desktop inference + tool calls |
 
-#### 9.5.5 Cleanup and Hygiene
+**Timeout behavior:** If no response appears within a configurable timeout (default: 2 minutes for bridge-local ops, 5 minutes for `claude_prompt`), Claude.ai reports that the local machine may be offline or the operation is still in progress.
 
-- The daemon deletes request files after writing the corresponding response.
+#### 9.5.7 AutoHotkey Prompt Injection (TBD)
+
+The mechanism for injecting a prompt into Claude Desktop's UI is deferred to a future design iteration. The approach will use an AutoHotkey script that:
+
+1. Activates the Claude Desktop window.
+2. Pastes the relay-formatted prompt into the input field.
+3. Sends Enter to submit.
+
+Design considerations include: handling the case where Claude Desktop is mid-conversation, ensuring the prompt is injected cleanly (no partial sends), and dealing with Claude Desktop's window state (minimized, behind other windows, etc.).
+
+#### 9.5.8 Cleanup and Hygiene
+
+- The bridge deletes request files after writing the corresponding response.
 - Response files are deleted after the configured TTL.
-- A `cleanup` operation (triggered by the daemon on each poll cycle) prunes stale files.
-- The relay repo should stay lean — it is a message queue, not a data store. The `.gitignore` should exclude any local daemon state files.
+- Cleanup runs on each poll cycle as part of the relay goroutine.
+- The relay repo should stay lean — it is a message queue, not a data store. The `.gitignore` should exclude any local state files.
 - GitHub API rate limits (5,000 authenticated requests/hour) are more than sufficient for relay traffic at expected volumes.
 
-#### 9.5.6 Relationship to Section 9.3 (Architecture B2 Upgrade)
+#### 9.5.9 Relationship to Section 9.3 (Architecture B2 Upgrade)
 
 If the bridge gains Streamable HTTP transport and a Cloudflare Tunnel (Section 9.3), Claude.ai could potentially connect directly — bypassing the GitHub relay entirely. The relay is the pragmatic v1 solution that works within Claude.ai's current egress restrictions. The two approaches are complementary: the relay can remain as a fallback for environments where tunnel setup is impractical.
 
