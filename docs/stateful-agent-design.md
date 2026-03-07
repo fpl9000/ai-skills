@@ -74,7 +74,6 @@
   - [9.2 Memory-Aware Tools](#92-memory-aware-tools)
   - [9.3 Architecture B2 Upgrade](#93-architecture-b2-upgrade)
   - [9.4 GitHub Backup Automation](#94-github-backup-automation)
-  - [9.5 GitHub Relay: Claude.ai to Local Bridge Communication](#95-github-relay-claudeai-to-local-bridge-communication)
 - [10. References](#10-references)
 - [11. Open Questions](#11-open-questions)
 - [12. Appendix: mark3labs/mcp-go SDK Reference](#12-appendix-mark3labsmcp-go-sdk-reference)
@@ -2189,7 +2188,7 @@ git push origin main
 The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 
-### 9.5 GitHub Relay: Claude.ai to Local Bridge Communication
+### 9.5 GitHub Relay: Claude.ai ↔ Local Bridge Communication
 
 **Trigger:** When mobile or web access to the local stateful agent is desired — e.g., using the Claude app on a phone to invoke tools on the home machine.
 
@@ -2198,27 +2197,25 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 **Architecture overview:**
 
 ```
-┌──────────────────┐       ┌──────────────┐       ┌────────────────────────────┐
-│  Claude.ai       │       │   GitHub     │       │  Local Machine             │
-│  (phone/web)     │       │   Private    │       │  (Windows 11)              │
-│                  │       │              │       │    │                       │
-│                  │  PUT  │   Repo       │  GET  │    │                       │
-│  GitHub skill ───────────▶ requests/  ◀──────────   MCP Bridge              │
-│                  │       │              │       │    │                       │
-│                  │  GET  │              │  PUT  │    ├─ memory_query:        │
-│  GitHub skill ◀─────────── responses/ ◀──────────   │   handled directly    │
+┌──────────────────┐       ┌──────────────┐       ┌──────────────────────────┐
+│  Claude.ai       │       │   GitHub     │       │  Local Machine           │
+│  (phone/web)     │       │   Private    │       │  (Windows 11)            │
+│                  │  PUT  │   Repo       │  GET  │                          │
+│  GitHub skill ───────────▶ requests/   ◀─────────  MCP Bridge              │
+│                  │       │              │       │    │                      │
+│                  │  GET  │              │  PUT  │    ├─ memory_query:       │
+│  GitHub skill ◀──────────── responses/ ◀─────────  │   handled directly    │
 │                  │       │              │       │    ├─ shell_command:       │
 │                  │       │              │       │    │   handled directly    │
 │                  │       │              │       │    └─ claude_prompt:       │
 │                  │       │              │       │        inject into Claude  │
 │                  │       │              │       │        Desktop via AHK     │
-│                  │       │              │       │        │                   │
 │                  │       │              │       │        ▼                   │
 │                  │       │              │       │      Claude Desktop        │
-│                  │       │              │       │        │ relay_respond()   │
-│                  │       │              │       │        ▼                   │
+│                  │       │              │       │        │                   │
+│                  │       │              │       │        ▼ relay_respond()   │
 │                  │       │              │       │      MCP Bridge            │
-└──────────────────┘       └──────────────┘       └────────────────────────────┘
+└──────────────────┘       └──────────────┘       └──────────────────────────┘
 ```
 
 **Key design principle:** The relay logic is integrated directly into the MCP bridge — there is no separate daemon process. The bridge polls the relay repo, handles `memory_query` and `shell_command` operations locally (no inference), and delegates `claude_prompt` operations to Claude Desktop via an AutoHotkey-based prompt injection mechanism.
@@ -2246,7 +2243,8 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
   "id": "20260307T143022Z-a1b2c3",
   "created_at": "2026-03-07T14:30:22Z",
   "status": "pending",
-  "nonce": "randomly-generated-shared-secret-verification",
+  "nonce": "a1b2c3d4e5f6...",
+  "hmac": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "operation": "memory_query",
   "arguments": {
     "path": "core.md"
@@ -2360,13 +2358,35 @@ If Claude Desktop calls `relay_respond` with an unknown or already-completed `re
 
 The relay repo is private, but defense-in-depth applies:
 
-1. **Shared nonce:** Each request includes a `nonce` field. The bridge maintains a list of valid nonces (configured in `relay-config.yaml`). Requests with unknown nonces are rejected. This prevents a compromised repo collaborator from injecting commands.
+1. **HMAC request authentication:** The bridge and Claude.ai share a secret key (configured in `relay-config.yaml` on the bridge side, provided to Claude.ai by the user at the start of a session or stored in the GitHub skill's environment). Each request is authenticated as follows:
+
+   **Signing (Claude.ai side):**
+   1. Generate a cryptographically random nonce (e.g., 16 hex bytes).
+   2. Construct the HMAC input by concatenating: `id || operation || nonce || canonical_arguments`, where `canonical_arguments` is the JSON-serialized `arguments` object with keys sorted alphabetically.
+   3. Compute HMAC-SHA256 over the input using the shared secret key.
+   4. Include both `nonce` and `hmac` (hex-encoded) in the request JSON.
+
+   **Verification (bridge side):**
+   1. Recompute the HMAC from the request fields using the same shared key.
+   2. Compare using constant-time comparison (`hmac.Equal` in Go) to prevent timing attacks.
+   3. Check the nonce against a seen-nonces set (stored in memory, bounded by TTL) to prevent replay attacks. Reject if the nonce has been seen before.
+   4. Check that `created_at` is within the acceptable time window (e.g., ±5 minutes) to bound the size of the replay-prevention set.
+
+   **Example HMAC computation:**
+
+   ```
+   Input:  "20260307T143022Z-a1b2c3" + "memory_query" + "a1b2c3d4e5f6..." + '{"path":"core.md"}'
+   Key:    <shared secret from relay-config.yaml>
+   Output: HMAC-SHA256 → hex-encoded → "e3b0c44298fc1c..."
+   ```
+
+   Requests with invalid or missing HMACs are rejected and logged. Requests with replayed nonces are rejected and logged.
 
 2. **Operation allowlist:** The bridge configuration specifies which operations are permitted via the relay. For example, `shell_command` can be disabled or restricted to specific command patterns.
 
 3. **Rate limiting:** The bridge enforces a maximum number of requests per time window (e.g., 10 requests per minute) to limit abuse.
 
-4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests.
+4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests with the rejection reason (bad HMAC, replayed nonce, disallowed operation, rate-limited).
 
 #### 9.5.5 Bridge Relay Integration
 
@@ -2391,9 +2411,8 @@ relay:
   request_ttl_minutes: 60
   claude_prompt_timeout_minutes: 5
   max_requests_per_minute: 10
-  valid_nonces:
-    - "pre-shared-secret-1"
-    - "pre-shared-secret-2"
+  hmac_secret_env: RELAY_HMAC_SECRET   # Environment variable holding the shared key
+  replay_window_minutes: 5             # Nonce replay prevention window
   allowed_operations:
     - memory_query
     - shell_command
