@@ -2247,7 +2247,9 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 8. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use them to trigger memory writes?
 
-   - *Resolution:* TBD
+   - *Resolution:* Slash commands are a Claude Code CLI terminal interface feature — the user types `/skill-name` in the interactive CLI session to explicitly invoke a skill. Claude Desktop has no equivalent mechanism; there is no input field where a user would type a slash command. Skills uploaded to Claude Desktop are invoked exclusively through the description-driven auto-invocation mechanism: Claude decides when to load a skill based on whether its description matches the current conversation context.
+
+     In any case, slash commands would not be useful for triggering memory writes. A memory write requires Claude to call a tool (`Bridge:safe_write_file` or `Bridge:safe_append_file`), which happens in response to conversational context — not in response to a user-typed command. The memory skill's compliance-based instructions already cover when to write: on significant new information, on project status changes, at session end, etc. There is no gap here that slash commands would fill.
 
 9. **Terms of Service question** — Given the news reported by PC World at https://www.pcworld.com/article/3068842/whats-behind-the-openclaw-ban-wave.html about Anthropic banning some automated use of Claude Code CLI, do Anthropic's consumer terms of service at https://www.anthropic.com/legal/consumer-terms or their Acceptable Use Policy at https://www.anthropic.com/legal/aup prevent using Claude Code CLI as a sub-agent?
 
