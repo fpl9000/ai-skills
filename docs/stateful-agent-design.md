@@ -2243,7 +2243,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 7. **Claude Code CLI for implemenation** — Once this design stabilizes, do you see any issues with using Claude Code CLI with Sonnet 4.6 to implement it?
 
-   - *Resolution:* TBD
+   - *Resolution:* Claude Code CLI with Claude Sonnet 4.6 is an appropriate choice for implementing the MCP bridge. Sonnet is Anthropic's recommended model for Claude Code and is well-suited to this kind of work: translating a detailed design document into Go code within a well-defined module structure. Note that `spawn_agent` and other bridge tools are unavailable during the bridge's own implementation — Claude Code CLI must be used directly for that phase. Once the bridge is built and deployed, it becomes available for all subsequent work.
 
 8. **Slash commands** — Claude Code CLI has a slash command corresponding to each loaded skill.  Does the Claude Desktop also have these?  If so, can we use them to trigger memory writes?
 
