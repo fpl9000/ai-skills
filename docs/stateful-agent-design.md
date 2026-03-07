@@ -74,6 +74,7 @@
   - [9.2 Memory-Aware Tools](#92-memory-aware-tools)
   - [9.3 Architecture B2 Upgrade](#93-architecture-b2-upgrade)
   - [9.4 GitHub Backup Automation](#94-github-backup-automation)
+  - [9.5 GitHub Relay: Claude.ai to Local Bridge Communication](#95-github-relay-claudeai-to-local-bridge-communication)
 - [10. References](#10-references)
 - [11. Open Questions](#11-open-questions)
 - [12. Appendix: mark3labs/mcp-go SDK Reference](#12-appendix-mark3labsmcp-go-sdk-reference)
@@ -2188,7 +2189,7 @@ git push origin main
 The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 
-### 9.5 GitHub Relay: Claude.ai ↔ Local Bridge Communication
+### 9.5 GitHub Relay: Claude.ai to Local Bridge Communication
 
 **Trigger:** When mobile or web access to the local stateful agent is desired — e.g., using the Claude app on a phone to invoke tools on the home machine.
 
@@ -2197,25 +2198,27 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 **Architecture overview:**
 
 ```
-┌──────────────────┐       ┌──────────────┐       ┌──────────────────────────┐
-│  Claude.ai       │       │   GitHub     │       │  Local Machine           │
-│  (phone/web)     │       │   Private    │       │  (Windows 11)            │
-│                  │  PUT  │   Repo       │  GET  │                          │
-│  GitHub skill ───────────▶ requests/   ◀─────────  MCP Bridge              │
-│                  │       │              │       │    │                      │
-│                  │  GET  │              │  PUT  │    ├─ memory_query:       │
-│  GitHub skill ◀──────────── responses/ ◀─────────  │   handled directly    │
+┌──────────────────┐       ┌──────────────┐       ┌────────────────────────────┐
+│  Claude.ai       │       │   GitHub     │       │  Local Machine             │
+│  (phone/web)     │       │   Private    │       │  (Windows 11)              │
+│                  │       │              │       │    │                       │
+│                  │  PUT  │   Repo       │  GET  │    │                       │
+│  GitHub skill ───────────▶ requests/   ◀─────────   MCP Bridge              │
+│                  │       │              │       │    │                       │
+│                  │  GET  │              │  PUT  │    ├─ memory_query:        │
+│  GitHub skill ◀─────────── responses/ ◀──────────   │   handled directly    │
 │                  │       │              │       │    ├─ shell_command:       │
 │                  │       │              │       │    │   handled directly    │
 │                  │       │              │       │    └─ claude_prompt:       │
 │                  │       │              │       │        inject into Claude  │
 │                  │       │              │       │        Desktop via AHK     │
+│                  │       │              │       │        │                   │
 │                  │       │              │       │        ▼                   │
 │                  │       │              │       │      Claude Desktop        │
 │                  │       │              │       │        │                   │
 │                  │       │              │       │        ▼ relay_respond()   │
 │                  │       │              │       │      MCP Bridge            │
-└──────────────────┘       └──────────────┘       └──────────────────────────┘
+└──────────────────┘       └──────────────┘       └────────────────────────────┘
 ```
 
 **Key design principle:** The relay logic is integrated directly into the MCP bridge — there is no separate daemon process. The bridge polls the relay repo, handles `memory_query` and `shell_command` operations locally (no inference), and delegates `claude_prompt` operations to Claude Desktop via an AutoHotkey-based prompt injection mechanism.
