@@ -76,6 +76,7 @@
   - [9.4 GitHub Backup Automation](#94-github-backup-automation)
 - [10. References](#10-references)
 - [11. Open Questions](#11-open-questions)
+- [12. Appendix: mark3labs/mcp-go SDK Reference](#12-appendix-mark3labsmcp-go-sdk-reference)
 
 ---
 
