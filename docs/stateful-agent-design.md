@@ -96,8 +96,8 @@ The stateful agent system consists of three components that together give Claude
 
 | Component | Type | Location | Purpose |
 |-----------|------|----------|---------|
-| MCP Bridge Server | Go binary | `C:\franl\git\mcp-bridge\mcp-bridge.exe` | Sub-agent spawning, mutex-protected memory writes |
-| Anthropic Filesystem Extension | MCP server (npm) | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) |
+| MCP Bridge Server<br/>(aka "the bridge") | Go binary | `C:\franl\git\mcp-bridge\mcp-bridge.exe` | Sub-agent spawning, mutex-protected memory writes |
+| Anthropic Filesystem Extension | MCP server | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) |
 | Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage |
 | Memory skill | .zip file | Uploaded via Claude Desktop Settings | Instructions for memory lifecycle |
 | CLAUDE.md | Markdown file | `C:\Users\flitt\.claude\CLAUDE.md` | Sub-agent environment context |
@@ -1719,7 +1719,8 @@ No CGO, no external dependencies. The binary is self-contained.
 Edit Claude Desktop's MCP configuration file:
 
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **MacOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json` (no official support for Claude Desktop on Linux)
 
 Add the bridge server entry:
 
