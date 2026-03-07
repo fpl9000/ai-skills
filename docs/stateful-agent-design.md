@@ -2203,7 +2203,7 @@ The `.search-index.db` file (if it exists) should be in `.gitignore`.
 │  (phone/web)     │       │   Private    │       │  (Windows 11)              │
 │                  │       │              │       │    │                       │
 │                  │  PUT  │   Repo       │  GET  │    │                       │
-│  GitHub skill ───────────▶ requests/   ◀─────────   MCP Bridge              │
+│  GitHub skill ───────────▶ requests/  ◀──────────   MCP Bridge              │
 │                  │       │              │       │    │                       │
 │                  │  GET  │              │  PUT  │    ├─ memory_query:        │
 │  GitHub skill ◀─────────── responses/ ◀──────────   │   handled directly    │
