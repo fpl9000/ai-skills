@@ -2187,6 +2187,175 @@ git push origin main
 
 The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
+
+### 9.5 GitHub Relay: Claude.ai ↔ Local Bridge Communication
+
+**Trigger:** When mobile or web access to the local stateful agent is desired — e.g., using the Claude app on a phone to invoke tools on the home machine.
+
+**Problem:** Claude.ai runs code in an ephemeral Linux VM with strict egress restrictions (whitelisted domains only: `github.com`, `api.github.com`, `pypi.org`, etc.). It cannot reach arbitrary IPs or custom domains. This rules out direct connections via port forwarding, Tailscale, or any custom tunnel endpoint. However, both Claude.ai (via the GitHub skill) and the local machine can read and write to GitHub's REST API — making a private GitHub repo a viable asynchronous message relay.
+
+**Architecture overview:**
+
+```
+┌──────────────────┐       ┌──────────────┐       ┌──────────────────────┐
+│  Claude.ai       │       │   GitHub     │       │  Local Machine       │
+│  (phone/web)     │       │   Private    │       │  (Windows 11)        │
+│                  │  PUT  │   Repo       │  GET  │                      │
+│  GitHub skill ───────────▶ requests/   ◀───────── Relay Daemon         │
+│                  │       │              │       │    │                  │
+│                  │  GET  │              │  PUT  │    ▼                  │
+│  GitHub skill ◀──────────── responses/ ◀─────────  MCP Bridge / CLI   │
+│                  │       │              │       │                      │
+└──────────────────┘       └──────────────┘       └──────────────────────┘
+```
+
+**Relay repository:** A dedicated private repo (e.g., `fpl9000/claude-relay`) with the following structure:
+
+```
+claude-relay/
+├── README.md
+├── requests/          # Claude.ai writes here
+│   └── <id>.json
+├── responses/         # Local daemon writes here
+│   └── <id>.json
+└── .gitignore
+```
+
+#### 9.5.1 Message Protocol
+
+Each request/response pair shares a unique message ID (a timestamp-based UUID or similar). The protocol uses a simple state machine:
+
+**Request message** (`requests/<id>.json`):
+
+```json
+{
+  "id": "20260307T143022Z-a1b2c3",
+  "created_at": "2026-03-07T14:30:22Z",
+  "status": "pending",
+  "nonce": "randomly-generated-shared-secret-verification",
+  "operation": "tool_call",
+  "tool": "safe_read_file",
+  "arguments": {
+    "path": "core.md"
+  },
+  "context": "User asked from mobile: what's in my core memory?"
+}
+```
+
+**Response message** (`responses/<id>.json`):
+
+```json
+{
+  "id": "20260307T143022Z-a1b2c3",
+  "completed_at": "2026-03-07T14:30:38Z",
+  "status": "completed",
+  "result": {
+    "success": true,
+    "content": "... file contents ..."
+  }
+}
+```
+
+**Status values:**
+
+| Status | Location | Meaning |
+|--------|----------|---------|
+| `pending` | `requests/` | Awaiting pickup by local daemon |
+| `claimed` | `requests/` | Daemon has acknowledged, processing |
+| `completed` | `responses/` | Result ready for Claude.ai to read |
+| `failed` | `responses/` | Operation failed; `result.error` contains details |
+| `expired` | `requests/` | TTL exceeded without pickup (set by cleanup) |
+
+**Supported operations:**
+
+| Operation | Description |
+|-----------|-------------|
+| `tool_call` | Invoke any registered MCP bridge tool by name |
+| `memory_query` | Read from the memory directory (convenience wrapper) |
+| `shell_command` | Execute a local command via the bridge's `run_command` tool |
+| `agent_task` | Dispatch a task to `spawn_agent` for async execution |
+| `ping` | Health check — daemon responds with uptime and status |
+
+#### 9.5.2 Security
+
+The relay repo is private, but defense-in-depth applies:
+
+1. **Shared nonce:** Each request includes a `nonce` field. The local daemon maintains a list of valid nonces (pre-shared between the user and the daemon configuration). Requests with unknown nonces are rejected. This prevents a compromised repo collaborator from injecting commands.
+
+2. **Operation allowlist:** The daemon configuration specifies which operations and tools are permitted via the relay. Dangerous operations (e.g., arbitrary `shell_command` with no constraints) can be disabled or restricted to specific command patterns.
+
+3. **Rate limiting:** The daemon enforces a maximum number of requests per time window (e.g., 10 requests per minute) to limit abuse.
+
+4. **Audit log:** All relay activity is logged locally, including rejected requests.
+
+#### 9.5.3 Local Relay Daemon
+
+The daemon is a Go program (or Python script) running as a background service on the local machine. Its responsibilities:
+
+1. **Poll** the `requests/` directory in the relay repo at a configurable interval (default: 15 seconds).
+2. **Claim** new `pending` requests by updating their status to `claimed`.
+3. **Dispatch** the operation to the MCP bridge (or directly to the appropriate tool).
+4. **Write** the response to `responses/<id>.json`.
+5. **Clean up** expired requests and old response files beyond the configured TTL (default: 1 hour).
+
+**Dispatch strategies:**
+
+- **Direct tool invocation (preferred):** If the daemon is integrated into the MCP bridge process (or linked as a library), it can call tool handlers directly — no subprocess overhead. This is the most efficient path.
+
+- **CLI passthrough:** The daemon invokes `claude -p "..."` (Claude Code CLI) with the task, captures the output, and writes it as the response. This leverages the full agent loop (including sub-agent orchestration) but incurs CLI startup cost and API token usage.
+
+- **HTTP to bridge:** If the bridge is upgraded to Streamable HTTP transport (Section 9.3), the daemon can forward relay requests as MCP tool calls over HTTP to `localhost:<port>`. This cleanly separates relay concerns from bridge concerns.
+
+**Daemon configuration** (`relay-config.yaml`):
+
+```yaml
+repo: fpl9000/claude-relay
+poll_interval_seconds: 15
+request_ttl_minutes: 60
+max_requests_per_minute: 10
+dispatch_mode: direct        # direct | cli | http
+valid_nonces:
+  - "pre-shared-secret-1"
+  - "pre-shared-secret-2"
+allowed_operations:
+  - tool_call
+  - memory_query
+  - ping
+  # shell_command and agent_task disabled by default
+allowed_tools:
+  - safe_read_file
+  - safe_write_file
+  - safe_append_file
+  - list_directory
+  # Restrict to safe tools initially
+log_file: C:\franl\.claude-agent-memory\relay.log
+```
+
+#### 9.5.4 Claude.ai Workflow
+
+From Claude.ai (web or mobile), the interaction pattern is:
+
+1. **User** asks Claude.ai to do something that requires the local machine (e.g., "read my core memory," "check what tasks are running").
+2. **Claude.ai** uses the GitHub skill to create `requests/<id>.json` in the relay repo.
+3. **Claude.ai** polls `responses/<id>.json` at intervals (e.g., every 10 seconds, up to a timeout).
+4. **Claude.ai** reads the response and presents the result to the user.
+
+The round-trip latency is bounded by: `daemon_poll_interval + operation_execution_time + claudeai_poll_interval`. With 15-second daemon polling and 10-second Claude.ai polling, typical latency is 15–40 seconds — acceptable for async mobile use.
+
+**Timeout behavior:** If no response appears within a configurable timeout (default: 2 minutes), Claude.ai reports that the local machine may be offline or the daemon is not running.
+
+#### 9.5.5 Cleanup and Hygiene
+
+- The daemon deletes request files after writing the corresponding response.
+- Response files are deleted after the configured TTL.
+- A `cleanup` operation (triggered by the daemon on each poll cycle) prunes stale files.
+- The relay repo should stay lean — it is a message queue, not a data store. The `.gitignore` should exclude any local daemon state files.
+- GitHub API rate limits (5,000 authenticated requests/hour) are more than sufficient for relay traffic at expected volumes.
+
+#### 9.5.6 Relationship to Section 9.3 (Architecture B2 Upgrade)
+
+If the bridge gains Streamable HTTP transport and a Cloudflare Tunnel (Section 9.3), Claude.ai could potentially connect directly — bypassing the GitHub relay entirely. The relay is the pragmatic v1 solution that works within Claude.ai's current egress restrictions. The two approaches are complementary: the relay can remain as a fallback for environments where tunnel setup is impractical.
+
 ---
 
 ## 10. References
@@ -2628,3 +2797,4 @@ if err := server.ServeStdio(s); err != nil {
 4. **JSON numbers are `float64`.** The JSON protocol encodes all numbers as `float64`. The `GetInt` / `RequireInt` accessors perform the `float64 → int` conversion (via truncation) automatically. The correct pattern for integer tool parameters is `mcp.WithNumber(...)` in the tool definition and `request.GetInt(...)` / `request.RequireInt(...)` in the handler. There is no `mcp.WithInteger` function in this SDK.
 
 5. **`Required()` in the schema is advisory, not enforced by the SDK.** The `mcp.Required()` property option adds the parameter name to the JSON Schema `required` array, which is conveyed to Claude. However, the SDK does not validate incoming requests against this schema before calling the handler. The handler is responsible for validating its own inputs — which is why `RequireString`, `RequireInt`, etc. exist and should be used for required parameters.
+
