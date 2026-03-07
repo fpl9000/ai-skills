@@ -2260,6 +2260,8 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
   "id": "20260307T143022Z-a1b2c3",
   "completed_at": "2026-03-07T14:30:38Z",
   "status": "completed",
+  "nonce": "d7e8f9a0b1c2...",
+  "hmac": "7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
   "result": {
     "success": true,
     "content": "... file contents or response text ..."
@@ -2358,35 +2360,47 @@ If Claude Desktop calls `relay_respond` with an unknown or already-completed `re
 
 The relay repo is private, but defense-in-depth applies:
 
-1. **HMAC request authentication:** The bridge and Claude.ai share a secret key (configured in `relay-config.yaml` on the bridge side, provided to Claude.ai by the user at the start of a session or stored in the GitHub skill's environment). Each request is authenticated as follows:
+1. **Bidirectional HMAC authentication:** The bridge and Claude.ai share a secret key (configured in `relay-config.yaml` on the bridge side, provided to Claude.ai by the user at the start of a session or stored in the GitHub skill's environment). Both requests and responses are authenticated using the same protocol:
 
-   **Signing (Claude.ai side):**
+   **Signing requests (Claude.ai side):**
    1. Generate a cryptographically random nonce (e.g., 16 hex bytes).
    2. Construct the HMAC input by concatenating: `id || operation || nonce || canonical_arguments`, where `canonical_arguments` is the JSON-serialized `arguments` object with keys sorted alphabetically.
    3. Compute HMAC-SHA256 over the input using the shared secret key.
    4. Include both `nonce` and `hmac` (hex-encoded) in the request JSON.
 
-   **Verification (bridge side):**
-   1. Recompute the HMAC from the request fields using the same shared key.
-   2. Compare using constant-time comparison (`hmac.Equal` in Go) to prevent timing attacks.
+   **Signing responses (bridge side):**
+   1. Generate a fresh cryptographically random nonce.
+   2. Construct the HMAC input by concatenating: `id || status || nonce || canonical_result`, where `canonical_result` is the JSON-serialized `result` object with keys sorted alphabetically.
+   3. Compute HMAC-SHA256 over the input using the same shared secret key.
+   4. Include both `nonce` and `hmac` (hex-encoded) in the response JSON.
+
+   **Verification (both sides):**
+   1. Recompute the HMAC from the message fields using the shared key.
+   2. Compare using constant-time comparison (`hmac.Equal` in Go, `hmac.compare_digest` in Python) to prevent timing attacks.
    3. Check the nonce against a seen-nonces set (stored in memory, bounded by TTL) to prevent replay attacks. Reject if the nonce has been seen before.
-   4. Check that `created_at` is within the acceptable time window (e.g., ±5 minutes) to bound the size of the replay-prevention set.
+   4. Check that the timestamp (`created_at` for requests, `completed_at` for responses) is within the acceptable time window (e.g., ±5 minutes) to bound the size of the replay-prevention set.
 
-   **Example HMAC computation:**
+   **Example HMAC computations:**
 
    ```
-   Input:  "20260307T143022Z-a1b2c3" + "memory_query" + "a1b2c3d4e5f6..." + '{"path":"core.md"}'
-   Key:    <shared secret from relay-config.yaml>
-   Output: HMAC-SHA256 → hex-encoded → "e3b0c44298fc1c..."
+   Request:
+     Input:  "20260307T143022Z-a1b2c3" + "memory_query" + "a1b2c3d4e5f6..." + '{"path":"core.md"}'
+     Key:    <shared secret>
+     Output: HMAC-SHA256 → hex-encoded → "e3b0c44298fc1c..."
+
+   Response:
+     Input:  "20260307T143022Z-a1b2c3" + "completed" + "d7e8f9a0b1c2..." + '{"content":"...","success":true}'
+     Key:    <shared secret>
+     Output: HMAC-SHA256 → hex-encoded → "7f83b1657ff1fc..."
    ```
 
-   Requests with invalid or missing HMACs are rejected and logged. Requests with replayed nonces are rejected and logged.
+   Messages with invalid or missing HMACs are rejected and logged. Messages with replayed nonces are rejected and logged. On the Claude.ai side, a response that fails HMAC verification is reported to the user as a potential tampering event rather than silently accepted.
 
 2. **Operation allowlist:** The bridge configuration specifies which operations are permitted via the relay. For example, `shell_command` can be disabled or restricted to specific command patterns.
 
 3. **Rate limiting:** The bridge enforces a maximum number of requests per time window (e.g., 10 requests per minute) to limit abuse.
 
-4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests with the rejection reason (bad HMAC, replayed nonce, disallowed operation, rate-limited).
+4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests and responses with the rejection reason (bad HMAC, replayed nonce, disallowed operation, rate-limited).
 
 #### 9.5.5 Bridge Relay Integration
 
