@@ -2779,6 +2779,10 @@ If the bridge gains Streamable HTTP transport and a Cloudflare Tunnel (Section 9
 
       Rather than hardcoding `C:\franl\` as a compile-time constant, the design has been updated to add a `default_working_directory` field to the bridge config (see [Section 3.2](#32-configuration)), defaulting to `C:\franl\`. This keeps it configurable without a recompile if the filesystem layout ever changes, and is consistent with how the rest of the config handles machine-specific paths. Sections 3.4 and 3.6 have been updated to reference `config.DefaultWorkingDirectory` instead of `os.UserHomeDir()`.
 
+12. **Claude.ai SKILL.md contents needed** — Section 9.5, "GitHub Relay: Claude.ai to Local Bridge Communication", needs to include the contents of the skill, including the `SKILL.md` file and the names of any scripts.
+
+    - *Resolution:* TBD
+
 ---
 
 ## 12. Appendix: mark3labs/mcp-go SDK Reference
