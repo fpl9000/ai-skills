@@ -2361,41 +2361,241 @@ If Claude Desktop calls `relay_respond` with an unknown or already-completed `re
 
 The relay repo is private, but defense-in-depth applies:
 
-1. **Bidirectional HMAC authentication:** The bridge and Claude.ai share a secret key (configured in `relay-config.yaml` on the bridge side, provided to Claude.ai by the user at the start of a session or stored in the GitHub skill's environment). Both requests and responses are authenticated using the same protocol:
+1. **Bidirectional HMAC authentication via relay skill scripts:** The bridge and Claude.ai share a secret key (stored in the `RELAY_HMAC_SECRET` environment variable on both sides). Both requests and responses are authenticated using HMAC-SHA256, implemented in two Python scripts that are part of the GitHub skill:
 
-   **Signing requests (Claude.ai side):**
-   1. Generate a cryptographically random nonce (e.g., 16 hex bytes).
-   2. Construct the HMAC input by concatenating: `id || operation || nonce || canonical_arguments`, where `canonical_arguments` is the JSON-serialized `arguments` object with keys sorted alphabetically.
-   3. Compute HMAC-SHA256 over the input using the shared secret key.
-   4. Include both `nonce` and `hmac` (hex-encoded) in the request JSON.
+   - **`relay_send.py`** — Constructs a relay message, generates a cryptographic nonce, computes the HMAC, and pushes the signed message to the relay repo via the GitHub API.
+   - **`relay_receive.py`** — Fetches a relay message from the repo, recomputes the HMAC from the message fields, performs constant-time comparison, validates the nonce against the replay window, and returns the verified payload (or rejects the message).
 
-   **Signing responses (bridge side):**
-   1. Generate a fresh cryptographically random nonce.
-   2. Construct the HMAC input by concatenating: `id || status || nonce || canonical_result`, where `canonical_result` is the JSON-serialized `result` object with keys sorted alphabetically.
-   3. Compute HMAC-SHA256 over the input using the same shared secret key.
-   4. Include both `nonce` and `hmac` (hex-encoded) in the response JSON.
+   Because both scripts live in the GitHub skill, and the GitHub skill is available to both Claude.ai (in its ephemeral VM) and the MCP bridge (on the local machine via `uv run`), both sides get signing *and* verification from the same codebase. The bridge does not need to implement HMAC in Go — its relay goroutine shells out to `uv run scripts/relay_send.py` and `uv run scripts/relay_receive.py` for all crypto operations, keeping the bridge code focused on orchestration.
 
-   **Verification (both sides):**
-   1. Recompute the HMAC from the message fields using the shared key.
-   2. Compare using constant-time comparison (`hmac.Equal` in Go, `hmac.compare_digest` in Python) to prevent timing attacks.
-   3. Check the nonce against a seen-nonces set (stored in memory, bounded by TTL) to prevent replay attacks. Reject if the nonce has been seen before.
-   4. Check that the timestamp (`created_at` for requests, `completed_at` for responses) is within the acceptable time window (e.g., ±5 minutes) to bound the size of the replay-prevention set.
+   **HMAC protocol:**
+
+   Both scripts share a common `compute_hmac()` function. The HMAC input is constructed by concatenating message fields in a canonical order that differs by message direction:
+
+   - **Request HMAC input:** `id || operation || nonce || canonical_arguments`, where `canonical_arguments` is the JSON-serialized `arguments` object with keys sorted alphabetically.
+   - **Response HMAC input:** `id || status || nonce || canonical_result`, where `canonical_result` is the JSON-serialized `result` object with keys sorted alphabetically.
+
+   The HMAC is computed using HMAC-SHA256 and hex-encoded. The nonce is 16 bytes from `secrets.token_hex()`. Verification uses `hmac.compare_digest()` for constant-time comparison.
+
+   **Replay prevention:** `relay_receive.py` checks the nonce against a seen-nonces set. Since both Claude.ai and the bridge run the script in short-lived invocations (no persistent in-memory state), the seen-nonces set is approximated by checking the timestamp field (`created_at` for requests, `completed_at` for responses) against a ±5-minute window. Messages outside this window are rejected. Within the window, replay is prevented by the combination of: (a) the relay repo's Git history making message tampering auditable, (b) the bridge deleting request files after processing, and (c) the short TTL on response files. A future enhancement could add a nonce log file in the memory directory for persistent replay tracking.
 
    **Example HMAC computations:**
 
    ```
    Request:
      Input:  "20260307T143022Z-a1b2c3" + "memory_query" + "a1b2c3d4e5f6..." + '{"path":"core.md"}'
-     Key:    <shared secret>
+     Key:    <shared secret from RELAY_HMAC_SECRET>
      Output: HMAC-SHA256 → hex-encoded → "e3b0c44298fc1c..."
 
    Response:
      Input:  "20260307T143022Z-a1b2c3" + "completed" + "d7e8f9a0b1c2..." + '{"content":"...","success":true}'
-     Key:    <shared secret>
+     Key:    <shared secret from RELAY_HMAC_SECRET>
      Output: HMAC-SHA256 → hex-encoded → "7f83b1657ff1fc..."
    ```
 
-   Messages with invalid or missing HMACs are rejected and logged. Messages with replayed nonces are rejected and logged. On the Claude.ai side, a response that fails HMAC verification is reported to the user as a potential tampering event rather than silently accepted.
+   Messages with invalid or missing HMACs are rejected and logged. On the Claude.ai side, a response that fails HMAC verification is reported to the user as a potential tampering event rather than silently accepted.
+
+   **Script invocation patterns:**
+
+   Sending a signed request (Claude.ai side):
+   ```bash
+   GITHUB_TOKEN="..." RELAY_HMAC_SECRET="..." uv run scripts/relay_send.py \
+       fpl9000/claude-relay \
+       --direction request \
+       --id "20260307T143022Z-a1b2c3" \
+       --operation memory_query \
+       --arguments '{"path":"core.md"}' \
+       --context "User asked from mobile: what is in my core memory?"
+   ```
+
+   Receiving and validating a response (Claude.ai side):
+   ```bash
+   GITHUB_TOKEN="..." RELAY_HMAC_SECRET="..." uv run scripts/relay_receive.py \
+       fpl9000/claude-relay \
+       --direction response \
+       --id "20260307T143022Z-a1b2c3"
+   ```
+
+   The bridge uses the same scripts with `--direction` reversed: `relay_receive.py --direction request` to validate incoming requests, and `relay_send.py --direction response` to sign outgoing responses.
+
+   **Pseudo-code for `relay_send.py`:**
+
+   ```
+   # /// script
+   # requires-python = ">=3.11"
+   # dependencies = ["requests"]
+   # ///
+
+   import argparse, hashlib, hmac, json, os, secrets, sys
+   from datetime import datetime, timezone
+
+   def compute_hmac(key_hex, *fields):
+       """Compute HMAC-SHA256 over concatenated fields.
+       The key is hex-decoded from the environment variable.
+       Fields are concatenated as UTF-8 strings with no separator
+       (each field is self-delimiting by protocol design)."""
+       key = bytes.fromhex(key_hex)
+       msg = "".join(fields).encode("utf-8")
+       return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+   def canonical_json(obj):
+       """Serialize a dict to JSON with keys sorted alphabetically.
+       This ensures both sides produce identical HMAC inputs
+       regardless of the dict's internal key ordering."""
+       return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+   def generate_message_id():
+       """Create a timestamp-based ID with a random suffix.
+       Format: 20260307T143022Z-a1b2c3 (ISO 8601 compact + 6 hex chars)."""
+       ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+       suffix = secrets.token_hex(3)
+       return f"{ts}-{suffix}"
+
+   def main():
+       # Parse args: repo, --direction, --id (optional, auto-generated if omitted),
+       #             --operation (for requests), --status (for responses),
+       #             --arguments/--result (JSON string), --context (optional)
+
+       # Load shared secret from RELAY_HMAC_SECRET env var
+       secret = os.environ["RELAY_HMAC_SECRET"]
+
+       # Generate nonce: 16 bytes of cryptographic randomness, hex-encoded
+       nonce = secrets.token_hex(16)
+
+       # Build the message body (varies by direction)
+       if direction == "request":
+           timestamp = datetime.now(timezone.utc).isoformat()
+           canonical_args = canonical_json(arguments)
+           mac = compute_hmac(secret, msg_id, operation, nonce, canonical_args)
+           message = {
+               "id": msg_id,
+               "created_at": timestamp,
+               "status": "pending",
+               "nonce": nonce,
+               "hmac": mac,
+               "operation": operation,
+               "arguments": arguments,
+               "context": context   # optional, not included in HMAC
+           }
+           path = f"requests/{msg_id}.json"
+
+       elif direction == "response":
+           timestamp = datetime.now(timezone.utc).isoformat()
+           canonical_res = canonical_json(result)
+           mac = compute_hmac(secret, msg_id, status, nonce, canonical_res)
+           message = {
+               "id": msg_id,
+               "completed_at": timestamp,
+               "status": status,
+               "nonce": nonce,
+               "hmac": mac,
+               "result": result
+           }
+           path = f"responses/{msg_id}.json"
+
+       # Push to GitHub via REST API (PUT /repos/:owner/:repo/contents/:path)
+       # Uses GITHUB_TOKEN for authentication
+       # Prints the message ID to stdout on success for the caller to capture
+   ```
+
+   **Pseudo-code for `relay_receive.py`:**
+
+   ```
+   # /// script
+   # requires-python = ">=3.11"
+   # dependencies = ["requests"]
+   # ///
+
+   import argparse, hashlib, hmac, json, os, sys
+   from datetime import datetime, timezone, timedelta
+
+   # compute_hmac() and canonical_json() — same as in relay_send.py
+   # (in implementation, these would be in a shared module like relay_common.py,
+   # or duplicated with a comment pointing to the canonical copy)
+
+   REPLAY_WINDOW_MINUTES = 5
+
+   def validate_timestamp(ts_str):
+       """Reject messages whose timestamp is outside the ±5-minute window.
+       This bounds the replay prevention surface without requiring
+       persistent nonce storage."""
+       ts = datetime.fromisoformat(ts_str)
+       now = datetime.now(timezone.utc)
+       delta = abs((now - ts).total_seconds())
+       if delta > REPLAY_WINDOW_MINUTES * 60:
+           return False, f"Timestamp {ts_str} is {delta:.0f}s from now (limit: {REPLAY_WINDOW_MINUTES * 60}s)"
+       return True, None
+
+   def main():
+       # Parse args: repo, --direction, --id, --json (output as JSON, default: true)
+
+       # Load shared secret from RELAY_HMAC_SECRET env var
+       secret = os.environ["RELAY_HMAC_SECRET"]
+
+       # Determine the file path based on direction
+       if direction == "request":
+           path = f"requests/{msg_id}.json"
+       elif direction == "response":
+           path = f"responses/{msg_id}.json"
+
+       # Fetch the message from GitHub via REST API
+       # (GET /repos/:owner/:repo/contents/:path)
+       # If 404: print error and exit 1 (message not yet available or expired)
+       message = fetch_and_parse(repo, path)
+
+       # Extract fields for HMAC verification
+       received_hmac = message["hmac"]
+       nonce = message["nonce"]
+
+       if direction == "request":
+           timestamp_field = message["created_at"]
+           canonical_payload = canonical_json(message["arguments"])
+           expected_hmac = compute_hmac(
+               secret, message["id"], message["operation"], nonce, canonical_payload
+           )
+       elif direction == "response":
+           timestamp_field = message["completed_at"]
+           canonical_payload = canonical_json(message["result"])
+           expected_hmac = compute_hmac(
+               secret, message["id"], message["status"], nonce, canonical_payload
+           )
+
+       # Constant-time HMAC comparison — prevents timing side-channel attacks
+       if not hmac.compare_digest(received_hmac, expected_hmac):
+           print(json.dumps({"error": "HMAC verification failed", "id": msg_id}))
+           sys.exit(2)
+
+       # Timestamp validation — reject messages outside the replay window
+       valid, reason = validate_timestamp(timestamp_field)
+       if not valid:
+           print(json.dumps({"error": f"Timestamp rejected: {reason}", "id": msg_id}))
+           sys.exit(3)
+
+       # Verification passed — output the validated message payload
+       print(json.dumps({"verified": True, "message": message}))
+       sys.exit(0)
+   ```
+
+   **Testing the HMAC round-trip without the bridge:** Because both scripts are standalone, the full signing and verification flow can be tested from the command line:
+
+   ```bash
+   # 1. Send a signed request
+   export RELAY_HMAC_SECRET="your_hex_secret_here"
+   export GITHUB_TOKEN="ghp_..."
+   ID=$(uv run scripts/relay_send.py fpl9000/claude-relay \
+       --direction request --operation memory_query \
+       --arguments '{"path":"core.md"}')
+
+   # 2. Verify it (simulating the bridge side)
+   uv run scripts/relay_receive.py fpl9000/claude-relay \
+       --direction request --id "$ID"
+   # Expected: {"verified": true, "message": {...}}
+
+   # 3. Tamper test: manually edit the request in the repo, re-verify
+   # Expected: exit code 2, "HMAC verification failed"
+   ```
+
+   **No HMAC in Go:** Because the bridge delegates all HMAC operations to these Python scripts (invoked via `uv run` using `exec.Command`, the same mechanism used by `run_command`), the bridge's Go code contains no cryptographic logic. This keeps the bridge focused on its core responsibilities (MCP tool handling, subprocess management, relay orchestration) and ensures that the signing and verification logic is identical on both sides — there is exactly one implementation, shared via the GitHub skill.
 
 2. **Operation allowlist:** The bridge configuration specifies which operations are permitted via the relay. For example, `shell_command` can be disabled or restricted to specific command patterns.
 
@@ -2408,12 +2608,16 @@ The relay repo is private, but defense-in-depth applies:
 The relay polling loop runs as a goroutine within the MCP bridge process. Its responsibilities:
 
 1. **Poll** the `requests/` directory in the relay repo at a configurable interval (default: 15 seconds) using the GitHub Contents API.
-2. **Claim** new `pending` requests by updating their status to `claimed`.
-3. **Dispatch** the operation:
+2. **Validate** incoming requests by invoking `uv run scripts/relay_receive.py --direction request --id <id>`. Requests that fail HMAC verification or timestamp validation are rejected and logged.
+3. **Claim** validated `pending` requests by updating their status to `claimed`.
+4. **Dispatch** the operation:
    - `memory_query` → read the file directly from the memory directory and write the response.
    - `shell_command` → execute the command (reusing `run_command` logic) and write the response.
    - `claude_prompt` → inject the prompt into Claude Desktop via AutoHotkey; the response arrives asynchronously when Claude Desktop calls `relay_respond`.
-4. **Clean up** expired requests and old response files beyond the configured TTL (default: 1 hour).
+5. **Sign and send** responses by invoking `uv run scripts/relay_send.py --direction response --id <id> --status completed --result '<json>'`.
+6. **Clean up** expired requests and old response files beyond the configured TTL (default: 1 hour).
+
+The bridge invokes the relay skill scripts via `exec.Command` and `uv run`, consistent with how all other GitHub skill scripts are used. The `GITHUB_TOKEN` and `RELAY_HMAC_SECRET` environment variables are inherited from the bridge's process environment (configured in the bridge's YAML config via `github_token_env` and `hmac_secret_env`).
 
 **Bridge configuration** (added to `relay-config.yaml` or a `[relay]` section in the bridge config):
 
@@ -2428,6 +2632,7 @@ relay:
   max_requests_per_minute: 10
   hmac_secret_env: RELAY_HMAC_SECRET   # Environment variable holding the shared key
   replay_window_minutes: 5             # Nonce replay prevention window
+  skill_scripts_dir: C:\franl\git\ai-skills\skills\github\scripts  # Path to relay_send.py / relay_receive.py
   allowed_operations:
     - memory_query
     - shell_command
@@ -2441,9 +2646,9 @@ relay:
 From Claude.ai (web or mobile), the interaction pattern is:
 
 1. **User** asks Claude.ai to do something that requires the local machine (e.g., "read my core memory," "ask my local Claude to summarize today's episodic log").
-2. **Claude.ai** uses the GitHub skill to create `requests/<id>.json` in the relay repo.
-3. **Claude.ai** polls `responses/<id>.json` at intervals (e.g., every 10 seconds, up to a timeout).
-4. **Claude.ai** reads the response and presents the result to the user.
+2. **Claude.ai** invokes `relay_send.py` (via `uv run` from the GitHub skill) to construct a signed request and push it to the relay repo. The script returns the message ID.
+3. **Claude.ai** polls by invoking `relay_receive.py --direction response --id <id>` at intervals (e.g., every 10 seconds, up to a timeout). The script returns the validated response payload or a 404/timeout indication.
+4. **Claude.ai** presents the verified result to the user. If HMAC verification fails, Claude.ai reports a potential tampering event rather than silently accepting the response.
 
 The round-trip latency depends on the operation:
 
