@@ -2244,7 +2244,6 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
   "id": "20260307T143022Z-a1b2c3",
   "created_at": "2026-03-07T14:30:22Z",
   "status": "pending",
-  "nonce": "a1b2c3d4e5f6...",
   "hmac": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "operation": "memory_query",
   "arguments": {
@@ -2261,7 +2260,6 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
   "id": "20260307T143022Z-a1b2c3",
   "completed_at": "2026-03-07T14:30:38Z",
   "status": "completed",
-  "nonce": "d7e8f9a0b1c2...",
   "hmac": "7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
   "result": {
     "success": true,
@@ -2363,8 +2361,8 @@ The relay repo is private, but defense-in-depth applies:
 
 1. **Bidirectional HMAC authentication via relay skill scripts:** The bridge and Claude.ai share a secret key (stored in the `RELAY_HMAC_SECRET` environment variable on both sides). Both requests and responses are authenticated using HMAC-SHA256, implemented in two Python scripts that are part of the GitHub skill:
 
-   - **`relay_send.py`** — Constructs a relay message, generates a cryptographic nonce, computes the HMAC, and pushes the signed message to the relay repo via the GitHub API.
-   - **`relay_receive.py`** — Fetches a relay message from the repo, recomputes the HMAC from the message fields, performs constant-time comparison, validates the nonce against the replay window, and returns the verified payload (or rejects the message).
+   - **`relay_send.py`** — Constructs a relay message, computes the HMAC, and pushes the signed message to the relay repo via the GitHub API.
+   - **`relay_receive.py`** — Fetches a relay message from the repo, recomputes the HMAC from the message fields, performs constant-time comparison, and returns the verified payload (or rejects the message).
 
    Because both scripts live in the GitHub skill, and the GitHub skill is available to both Claude.ai (in its ephemeral VM) and the MCP bridge (on the local machine via `uv run`), both sides get signing *and* verification from the same codebase. The bridge does not need to implement HMAC in Go — its relay goroutine shells out to `uv run scripts/relay_send.py` and `uv run scripts/relay_receive.py` for all crypto operations, keeping the bridge code focused on orchestration.
 
@@ -2372,23 +2370,23 @@ The relay repo is private, but defense-in-depth applies:
 
    Both scripts share a common `compute_hmac()` function. The HMAC input is constructed by concatenating message fields in a canonical order that differs by message direction:
 
-   - **Request HMAC input:** `id || operation || nonce || canonical_arguments`, where `canonical_arguments` is the JSON-serialized `arguments` object with keys sorted alphabetically.
-   - **Response HMAC input:** `id || status || nonce || canonical_result`, where `canonical_result` is the JSON-serialized `result` object with keys sorted alphabetically.
+   - **Request HMAC input:** `id || operation || canonical_arguments`, where `canonical_arguments` is the JSON-serialized `arguments` object with keys sorted alphabetically.
+   - **Response HMAC input:** `id || status || canonical_result`, where `canonical_result` is the JSON-serialized `result` object with keys sorted alphabetically.
 
-   The HMAC is computed using HMAC-SHA256 and hex-encoded. The nonce is 16 bytes from `secrets.token_hex()`. Verification uses `hmac.compare_digest()` for constant-time comparison.
+   The HMAC is computed using HMAC-SHA256 and hex-encoded. Verification uses `hmac.compare_digest()` for constant-time comparison.
 
-   **Replay prevention:** `relay_receive.py` checks the nonce against a seen-nonces set. Since both Claude.ai and the bridge run the script in short-lived invocations (no persistent in-memory state), the seen-nonces set is approximated by checking the timestamp field (`created_at` for requests, `completed_at` for responses) against a ±5-minute window. Messages outside this window are rejected. Within the window, replay is prevented by the combination of: (a) the relay repo's Git history making message tampering auditable, (b) the bridge deleting request files after processing, and (c) the short TTL on response files. A future enhancement could add a nonce log file in the memory directory for persistent replay tracking.
+   **Replay prevention:** `relay_receive.py` checks the timestamp field (`created_at` for requests, `completed_at` for responses) against a ±5-minute window. Messages outside this window are rejected. Within the window, replay is prevented by the combination of: (a) the relay repo's Git history making message tampering auditable, (b) the bridge deleting request files after processing, and (c) the short TTL on response files.
 
    **Example HMAC computations:**
 
    ```
    Request:
-     Input:  "20260307T143022Z-a1b2c3" + "memory_query" + "a1b2c3d4e5f6..." + '{"path":"core.md"}'
+     Input:  "20260307T143022Z-a1b2c3" + "memory_query" + '{"path":"core.md"}'
      Key:    <shared secret from RELAY_HMAC_SECRET>
      Output: HMAC-SHA256 → hex-encoded → "e3b0c44298fc1c..."
 
    Response:
-     Input:  "20260307T143022Z-a1b2c3" + "completed" + "d7e8f9a0b1c2..." + '{"content":"...","success":true}'
+     Input:  "20260307T143022Z-a1b2c3" + "completed" + '{"content":"...","success":true}'
      Key:    <shared secret from RELAY_HMAC_SECRET>
      Output: HMAC-SHA256 → hex-encoded → "7f83b1657ff1fc..."
    ```
@@ -2459,19 +2457,15 @@ The relay repo is private, but defense-in-depth applies:
        # Load shared secret from RELAY_HMAC_SECRET env var
        secret = os.environ["RELAY_HMAC_SECRET"]
 
-       # Generate nonce: 16 bytes of cryptographic randomness, hex-encoded
-       nonce = secrets.token_hex(16)
-
        # Build the message body (varies by direction)
        if direction == "request":
            timestamp = datetime.now(timezone.utc).isoformat()
            canonical_args = canonical_json(arguments)
-           mac = compute_hmac(secret, msg_id, operation, nonce, canonical_args)
+           mac = compute_hmac(secret, msg_id, operation, canonical_args)
            message = {
                "id": msg_id,
                "created_at": timestamp,
                "status": "pending",
-               "nonce": nonce,
                "hmac": mac,
                "operation": operation,
                "arguments": arguments,
@@ -2482,12 +2476,11 @@ The relay repo is private, but defense-in-depth applies:
        elif direction == "response":
            timestamp = datetime.now(timezone.utc).isoformat()
            canonical_res = canonical_json(result)
-           mac = compute_hmac(secret, msg_id, status, nonce, canonical_res)
+           mac = compute_hmac(secret, msg_id, status, canonical_res)
            message = {
                "id": msg_id,
                "completed_at": timestamp,
                "status": status,
-               "nonce": nonce,
                "hmac": mac,
                "result": result
            }
@@ -2518,7 +2511,7 @@ The relay repo is private, but defense-in-depth applies:
    def validate_timestamp(ts_str):
        """Reject messages whose timestamp is outside the ±5-minute window.
        This bounds the replay prevention surface without requiring
-       persistent nonce storage."""
+       persistent state."""
        ts = datetime.fromisoformat(ts_str)
        now = datetime.now(timezone.utc)
        delta = abs((now - ts).total_seconds())
@@ -2545,19 +2538,18 @@ The relay repo is private, but defense-in-depth applies:
 
        # Extract fields for HMAC verification
        received_hmac = message["hmac"]
-       nonce = message["nonce"]
 
        if direction == "request":
            timestamp_field = message["created_at"]
            canonical_payload = canonical_json(message["arguments"])
            expected_hmac = compute_hmac(
-               secret, message["id"], message["operation"], nonce, canonical_payload
+               secret, message["id"], message["operation"], canonical_payload
            )
        elif direction == "response":
            timestamp_field = message["completed_at"]
            canonical_payload = canonical_json(message["result"])
            expected_hmac = compute_hmac(
-               secret, message["id"], message["status"], nonce, canonical_payload
+               secret, message["id"], message["status"], canonical_payload
            )
 
        # Constant-time HMAC comparison — prevents timing side-channel attacks
@@ -2601,7 +2593,7 @@ The relay repo is private, but defense-in-depth applies:
 
 3. **Rate limiting:** The bridge enforces a maximum number of requests per time window (e.g., 10 requests per minute) to limit abuse.
 
-4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests and responses with the rejection reason (bad HMAC, replayed nonce, disallowed operation, rate-limited).
+4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests and responses with the rejection reason (bad HMAC, disallowed operation, rate-limited).
 
 #### 9.5.5 Bridge Relay Integration
 
@@ -2768,7 +2760,6 @@ Each relay exchange consists of a request/response pair sharing a unique message
   "id": "20260307T143022Z-a1b2c3",
   "created_at": "2026-03-07T14:30:22Z",
   "status": "pending",
-  "nonce": "<32 hex chars>",
   "hmac": "<64 hex chars>",
   "operation": "<operation name>",
   "arguments": { ... },
@@ -2783,7 +2774,6 @@ Each relay exchange consists of a request/response pair sharing a unique message
   "id": "20260307T143022Z-a1b2c3",
   "completed_at": "2026-03-07T14:30:38Z",
   "status": "completed",
-  "nonce": "<32 hex chars>",
   "hmac": "<64 hex chars>",
   "result": {
     "success": true,
@@ -2865,15 +2855,13 @@ When waiting for a response from the local MCP bridge:
 
 The HMAC is computed over canonicalized message fields using HMAC-SHA256:
 
-- **Request HMAC input:** `id + operation + nonce + canonical_json(arguments)`
-- **Response HMAC input:** `id + status + nonce + canonical_json(result)`
+- **Request HMAC input:** `id + operation + canonical_json(arguments)`
+- **Response HMAC input:** `id + status + canonical_json(result)`
 
 Where `canonical_json()` serializes the JSON object with keys sorted alphabetically
 and compact separators (`","` `":"`). The `context` field in requests is NOT included
 in the HMAC (it is informational only).
 
-The nonce is 16 bytes of cryptographic randomness, hex-encoded (32 characters).
-Each message gets a fresh nonce.
 ````
 
 #### 9.5.12 AI Messaging Skill
