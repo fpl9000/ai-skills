@@ -1,4 +1,4 @@
-# Stateful Agent System: Detailed Design Future Enhancements
+# Stateful Agent System: Future Enhancements
 
 **Version:** 1.0 (Draft)<br/>
 **Date:** March 2026<br/>
