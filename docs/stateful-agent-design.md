@@ -233,7 +233,7 @@ The bridge is deliberately minimal. It does **not** provide:
 
 - Basic filesystem tools (read, list, search) — handled by the Filesystem extension. The bridge provides `safe_write_file` and `safe_append_file` specifically for memory files; all non-memory file writes use the Filesystem extension.
 - Network request tools (http_get, http_post) — deferred. Sub-agents or `run_command` (e.g., `run_command("curl ...")`) can perform network operations. Dedicated network tools can be added to the bridge later if needed.
-- Memory-aware tools (update_memory_block, memory_search) — deferred to future enhancement. See [Section 9.2](#92-memory-aware-tools).
+- Memory-aware tools (update_memory_block, memory_search) — deferred to future enhancement. See [Future Enhancements, Section 1.2](stateful-agent-design-future.md#12-memory-aware-tools).
 
 This keeps the initial bridge small: five tool handlers, a write mutex, the async executor, and the job lifecycle manager.
 
@@ -795,7 +795,7 @@ The alternatives considered were:
 
 Both add significant complexity — option 1 requires retry logic in the skill instructions, and option 2 is fragile for prose content. Neither is justified given the expected usage pattern: one active conversation at a time, with occasional brief overlaps. The write mutex prevents data corruption, and last-writer-wins is an acceptable trade-off for simplicity.
 
-If semantic divergence becomes a real problem in practice, the upgrade path is to add optimistic locking to `safe_write_file` (version-based conflict detection with retry) or to add a read-modify-write helper tool (see [Section 9.2](#92-memory-aware-tools)) that reads the current file under the mutex, applies changes, and writes back — all within a single lock acquisition.
+If semantic divergence becomes a real problem in practice, the upgrade path is to add optimistic locking to `safe_write_file` (version-based conflict detection with retry) or to add a read-modify-write helper tool (see [Future Enhancements, Section 1.2](stateful-agent-design-future.md#12-memory-aware-tools)) that reads the current file under the mutex, applies changes, and writes back — all within a single lock acquisition.
 
 **Implementation (writemutex.go):**
 
@@ -2203,7 +2203,7 @@ Planned upgrades that are deliberately deferred from the initial implementation 
 
       Rather than hardcoding `C:\franl\` as a compile-time constant, the design has been updated to add a `default_working_directory` field to the bridge config (see [Section 3.2](#32-configuration)), defaulting to `C:\franl\`. This keeps it configurable without a recompile if the filesystem layout ever changes, and is consistent with how the rest of the config handles machine-specific paths. Sections 3.4 and 3.6 have been updated to reference `config.DefaultWorkingDirectory` instead of `os.UserHomeDir()`.
 
-12. **Claude.ai SKILL.md contents needed** — Section 9.5, "GitHub Relay: Claude.ai to Local Bridge Communication", needs to include the contents of the skill, including the `SKILL.md` file and the names of any scripts.
+12. **Claude.ai SKILL.md contents needed** — [Future Enhancements, Section 1.5](stateful-agent-design-future.md#15-github-relay-claudeai-to-local-bridge-communication), "GitHub Relay: Claude.ai to Local Bridge Communication", needs to include the contents of the skill, including the `SKILL.md` file and the names of any scripts.
 
     - *Resolution:* The relay functionality is split across two skills to maintain a clean separation between the transport protocol and the operational semantics:
 
@@ -2215,7 +2215,7 @@ Planned upgrades that are deliberately deferred from the initial implementation 
 
       The `RELAY_HMAC_SECRET` environment variable value is stored in the user's Claude.ai personal instructions (the `<userPreferences>` block), alongside the existing `GITHUB_TOKEN` and Bluesky credentials. These instructions are shared by both Claude Desktop and Claude.ai, so both environments have access to the secret.
 
-      See [Section 9.5.10](#9510-relay-script-inventory) for the script specifications, [Section 9.5.11](#9511-github-skill-relay-transport-additions) for the github skill SKILL.md additions, and [Section 9.5.12](#9512-ai-messaging-skill) for the ai-messaging skill's complete SKILL.md.
+      See [Future Enhancements, Section 1.5.10](stateful-agent-design-future.md#1510-relay-script-inventory) for the script specifications, [Section 1.5.11](stateful-agent-design-future.md#1511-github-skill-relay-transport-additions) for the github skill SKILL.md additions, and [Section 1.5.12](stateful-agent-design-future.md#1512-ai-messaging-skill) for the ai-messaging skill's complete SKILL.md.
 
 ---
 
