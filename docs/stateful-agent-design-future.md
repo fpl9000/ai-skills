@@ -30,6 +30,8 @@
 
 These are planned upgrades that are deliberately deferred from the initial implementation. Each addresses a limitation documented in the proposal. This document references terms and concepts from *[Stateful Agent Design](stateful-agent-design.md)* without definition, so please read that design first.
 
+This document was previously section 9, "Future Enhancements", in that design.
+
 ### 1.1 FTS5 Search Index (Option 3)
 
 **Trigger:** When the number of blocks exceeds ~50 and filename-based retrieval from `index.md` becomes cumbersome.

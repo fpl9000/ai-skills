@@ -1,9 +1,11 @@
 # Stateful Agent System: Detailed Design
 
 **Version:** 1.0 (Draft)<br/>
-**Date:** February 2026<br/>
+**Date:** February - March 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
-**Companion document:** [Stateful Agent Proposal](stateful-agent-proposal.md) — architecture evaluation, rationale, and open question resolutions.
+**Companion documents:**
+- [Stateful Agent Proposal](stateful-agent-proposal.md) — architecture evaluation, rationale, and open question resolutions.
+- [Stateful Agent System: Future Enhancements](stateful-agent-design-future.md) — future enhancements.
 
 ## Contents
 
