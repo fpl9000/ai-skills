@@ -25,6 +25,7 @@
     - [1.5.10 Relay Script Inventory](#1510-relay-script-inventory)
     - [1.5.11 GitHub Skill Relay Transport Additions](#1511-github-skill-relay-transport-additions)
     - [1.5.12 AI Messaging Skill](#1512-ai-messaging-skill)
+  - [1.6 Race Condition: Concurrent Read-Modify-Write](#16-race-condition-concurrent-read-modify-write)
 
 ## 1. Overview
 
@@ -1044,3 +1045,16 @@ Here is the complete sequence for a typical relay interaction:
 
 ---
 
+### 1.6 Race Condition: Concurrent Read-Modify-Write
+
+The current Layer 2 memory system design has a race condition. When two concurrent conversations read the same memory file (e.g., `core.md`), modify it in-context, then write it back, the second write will overwrite the first, causing the first conversation's memory update to be lost.
+
+Previously, we considered using timestamps or [Etags](https://en.wikipedia.org/wiki/HTTP_ETag) for optimistic concurrency control.  In this approach, if the file was modified by another conversation after the current conversation read it, it would be re-read, re-modified, and re-written.
+
+Instead, we should consider "branching" a memory file when a concurrent read-modify-write race happens. The conversation that encounters detects the race writes its version of the file with a different filename (e.g., `core-a1b2c3d4.md`), and later Claude detects this (perhaps during off-hours wake periods) and merge the branched files. This would preserve both conversations' changes without requiring retries.
+
+The branched file name should include a conversation ID (may need to design these), which may help with resolution if multiple branched files are created by the same conversation.  After merging, the single remaining memory file will have an ID that indicates it was merged (e.g., `core-merged.md`).
+
+If branched files exist when memory is read or searched, they should be included in the results. For example, if `core.md` has branched versions `core-a1b2c3d4.md` and `core-e5f6g7h8.md`, then a query for `core.md` should also return the contents of the branched files, perhaps with an indication that they are branched versions.
+
+This impacts the file names that appear in `index.md`.  How can we avoid needing to update `index.md` every time a branch is created?  Perhaps we can use a naming convention that allows us to infer the existence of branched files without needing to list them in `index.md`. For example, if we see `core.md`, we can infer that any files matching the pattern `core-*.md` are branched versions.
