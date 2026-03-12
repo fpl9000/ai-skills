@@ -25,7 +25,7 @@
     - [1.5.10 Relay Script Inventory](#1510-relay-script-inventory)
     - [1.5.11 GitHub Skill Relay Transport Additions](#1511-github-skill-relay-transport-additions)
     - [1.5.12 AI Messaging Skill](#1512-ai-messaging-skill)
-  - [1.6 Race Condition: Concurrent Read-Modify-Write](#16-race-condition-concurrent-read-modify-write)
+  - [1.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#16-proposed-solution-to-concurrent-read-modify-write-race-condition)
 
 ## 1. Overview
 
@@ -1045,47 +1045,55 @@ Here is the complete sequence for a typical relay interaction:
 
 ---
 
-### 1.6 Race Condition: Concurrent Read-Modify-Write
+### 1.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition
 
 The current Layer 2 memory system design has a race condition: when multiple concurrent
 conversations read the same memory file (e.g., `core.md`), modify it in-context, then write back the
 modified version, the last write will overwrite the earlier ones, causing memory data to be lost.
 
-Previously, we considered using timestamps or [Etags](https://en.wikipedia.org/wiki/HTTP_ETag) for
-optimistic concurrency control. In this approach, if a memory file is modified by another
-conversation after the current conversation has read it, it would be re-read, re-modified, and
-re-written. This is unacceptably token intensive.
+Earlier, we considered implementing optimistic concurrency control using timestamps or
+[Etags](https://en.wikipedia.org/wiki/HTTP_ETag) in memory files. In the earlier approach, if a
+memory file is modified by another conversation after the current conversation has read it, it would
+be re-read, re-modified, and re-written. This is unacceptably token intensive.
 
-Instead, the following solution will be implemented. When a concurrent read-modify-write race is
-detected by the MCP bridge, the memory file is "branched" by the bridge. This means the memory data
-is written to a filename uniquely associated with that conversation (e.g.,
-`core-20260311-195918.md`, which contains the date/time of the start of the conversation). Later
-during off-hours wake up periods, Claude Desktop or a sub-agent detects these "branched" memory
-files based on their names, and merges the branched files. This preserves memories from all
-branches.
+This section proposes the following alternative approach:
 
-If branched files exist when memory is read or searched, they will be included in the results,
-suitably annotated to indicate that branching happened. For example, if `core.md` has branched
-versions `core-20260311-070933.md` and `core-20260311-195918.md`, then reading file `core.md` will
-return the contents of that file plus its associated branched files.
+1. The existing MCP tools `safe_write_file` and `safe_append_file` will implement optimistic
+   concurrency control via Etags.
 
-File names that appear in `index.md` do not change. `index.md` continues to reference memory files
-by non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md` will always
-indicate the date of the most recent write to the listed file, including any of its branches.
+2. When a concurrent read-modify-write race is detected by the MCP tool, the bridge "branches" the
+   memory file by writing the memory data to a filename uniquely associated with that conversation
+   (e.g., `core-20260311-195918.md`).  The original memory file remains unmodified.
 
-Branched files are expected to be rare.
+3. Later, during off-hours wake up periods, Claude Desktop or a sub-agent detects these "branched"
+   memory files based on their names, and merges the branched files. This preserves memories from
+   all branches.
 
-Advantages of this system include:
+4. If branched versions of files exist when memory is read or searched, they will be included in the
+   results, suitably annotated to indicate that branching happened.
+
+5. File names that appear in `index.md` do not change. `index.md` continues to reference memory
+   files by non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md`
+   will always indicate the date of the most recent write to the listed file, including any of its
+   branches.
+
+Branched files are expected to be rare, as they are only created when multiple concurrent
+conversations update the same memory file.
+
+Advantages of this approach include:
 
 - The race condition is solved.
+
 - Normal memory writes become faster because they don't require a read-modify-write cycle with Etag checks.
+
 - Race avoidance is done by the bridge instead of by Claude, which saves tokens.
 
 Disadvantages of this system include:
 
 - Merges cost tokens if Claude does it, though simple merges could be done by a human.
+
 - When reading memories from branched files, more memory data is returned (until a merge happens),
-  which costs tokens.<br/>
+  which costs tokens.
 
 <span style="color: orange;">**QUESTIONS:**</span>
 
@@ -1093,6 +1101,7 @@ Disadvantages of this system include:
 
 2. Should the branched files be included in `index.md` with their unique names?
 
-3. Should `index.md` contain only the number of branches for each file (instead of all branched names)?
+3. Should `index.md` contain only the number of branches for each file (instead of all branched
+   names)?
 
 4. What alternatives are there?
