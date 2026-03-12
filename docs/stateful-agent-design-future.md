@@ -1069,9 +1069,17 @@ suitably annotated to indicate that branching happened. For example, if `core.md
 versions `core-20260311-070933.md` and `core-20260311-195918.md`, then reading file `core.md` will
 return the contents of that file plus its associated branched files.
 
-File names that appear in `index.md` do not change. It will continue to reference memory file by
-non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md` will always
+File names that appear in `index.md` do not change. `index.md` continues to reference memory files
+by non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md` will always
 indicate the date of the most recent write to the listed file, including any of its branches.
+
+<span style="color: orange;">**QUESTIONS:**</span>
+
+1. Should the branched files be included in `index.md` with their unique names?
+
+2. Should `index.md` contain only just the number of branches for each time?
+
+3. What alternatives are there?
 
 Branched files are expected to be rare.
 
