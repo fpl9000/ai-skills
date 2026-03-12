@@ -1093,6 +1093,6 @@ Disadvantages of this system include:
 
 2. Should the branched files be included in `index.md` with their unique names?
 
-3. Should `index.md` contain only just the number of branches for each time?
+3. Should `index.md` contain only the number of branches for each file (instead of all branched names)?
 
 4. What alternatives are there?
