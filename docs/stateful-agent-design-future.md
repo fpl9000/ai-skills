@@ -1073,29 +1073,26 @@ File names that appear in `index.md` do not change. `index.md` continues to refe
 by non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md` will always
 indicate the date of the most recent write to the listed file, including any of its branches.
 
-<span style="color: orange;">**QUESTIONS:**</span>
-
-1. Should the branched files be included in `index.md` with their unique names?
-
-2. Should `index.md` contain only just the number of branches for each time?
-
-3. What alternatives are there?
-
 Branched files are expected to be rare.
 
 Advantages of this system include:
 
 - The race condition is solved.
-
 - Normal memory writes become faster because they don't require a read-modify-write cycle with Etag checks.
-
 - Race avoidance is done by the bridge instead of by Claude, which saves tokens.
 
 Disadvantages of this system include:
 
 - Merges cost tokens if Claude does it, though simple merges could be done by a human.
-
 - When reading memories from branched files, more memory data is returned (until a merge happens),
   which costs tokens.<br/>
-  <span style="color: orange;">**QUESTION:**</span> Can the bridge mitigate this by returning only
-  the original file plus diffs with its branches?
+
+<span style="color: orange;">**QUESTIONS:**</span>
+
+1. Should the bridge return only the original file plus diffs with its branches?
+
+2. Should the branched files be included in `index.md` with their unique names?
+
+3. Should `index.md` contain only just the number of branches for each time?
+
+4. What alternatives are there?
