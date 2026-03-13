@@ -1051,26 +1051,28 @@ The current Layer 2 memory system design has a race condition: when multiple con
 conversations read the same memory file (e.g., `core.md`), modify it in-context, then write back the
 modified version, the last write will overwrite the earlier ones, causing memory data to be lost.
 
-Earlier, we considered implementing optimistic concurrency control using timestamps or
-[Etags](https://en.wikipedia.org/wiki/HTTP_ETag) in memory files. In the earlier approach, if a
-memory file is modified by another conversation after the current conversation has read it, it would
-be re-read, re-modified, and re-written. This is unacceptably token intensive.
+Previously, we considered implementing optimistic concurrency control for memory files using
+timestamps. If a memory file needed to be updated, but it had been modified by another conversation
+after the current conversation last read the file, Claude would know to re-read, re-modify, and
+re-write the file. This unacceptably increases token and context usage. It also depends on Claude's
+compliance to instructions, which can fail unexpectedly.
 
 This section proposes the following alternative approach:
 
-1. The existing MCP tools `safe_write_file` and `safe_append_file` will implement optimistic
-   concurrency control via Etags.
+1. The MCP tools that write memory data (currently `safe_write_file`, `safe_append_file`, and any
+   added in the future) will implement optimistic concurrency control via timestamps.
 
-2. When a concurrent read-modify-write race is detected by the MCP tool, the bridge "branches" the
-   memory file by writing the memory data to a filename uniquely associated with that conversation
-   (e.g., `core-20260311-195918.md`).  The original memory file remains unmodified.
+2. When a concurrent read-modify-write race is detected by an MCP tool for a given file (e.g.,
+   `core.md`), the bridge "branches" the memory file by writing the memory data to a filename
+   uniquely associated with that conversation (e.g., `core-a1b2c3d4.md`).  The original memory file
+   remains unmodified.
 
 3. Later, during off-hours wake up periods, Claude Desktop or a sub-agent detects these "branched"
    memory files based on their names, and merges the branched files. This preserves memories from
    all branches.
 
-4. If branched versions of files exist when memory is read or searched, they will be included in the
-   results, suitably annotated to indicate that branching happened.
+4. If branched versions of files exist when memory is read or searched, results from all branches
+   will be included in the results, suitably annotated to indicate that branching happened.
 
 5. File names that appear in `index.md` do not change. `index.md` continues to reference memory
    files by non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md`
@@ -1083,25 +1085,26 @@ conversations update the same memory file.
 Advantages of this approach include:
 
 - The race condition is solved.
-
-- Normal memory writes become faster because they don't require a read-modify-write cycle with Etag checks.
-
-- Race avoidance is done by the bridge instead of by Claude, which saves tokens.
+- Claude is never involved in the optimistic concurrency control logic, which is faster and saves
+  token and context usage.
 
 Disadvantages of this system include:
 
-- Merges cost tokens if Claude does it, though simple merges could be done by a human.
-
+- Merges cost tokens if Claude does it, though simple merges could be done by a cheaper model
+  (Sonnet or Haiku).
 - When reading memories from branched files, more memory data is returned (until a merge happens),
-  which costs tokens.
+  which uses more tokens and context.
 
 <span style="color: orange;">**QUESTIONS:**</span>
 
-1. Should the bridge return only the original file plus diffs with its branches?
+1. Should the "timestamps" described above be one of the following:
 
-2. Should the branched files be included in `index.md` with their unique names?
+   - The filesystem modification times of memory files.
+   - An internal mapping of memory file versions updated on each read and write.
+   - A custom timestamp field stored in the memory file content (e.g., YAML front matter).
+   - Something else?
 
-3. Should `index.md` contain only the number of branches for each file (instead of all branched
-   names)?
+2. How does the bridge know which conversation is writing a given memory file? Does it need to be
+   passed as a parameter to the tools?
 
-4. What alternatives are there?
+3. What is the exact file naming convention for branched files?
