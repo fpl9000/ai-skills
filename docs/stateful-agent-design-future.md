@@ -1095,7 +1095,7 @@ Disadvantages of this system include:
 - When reading memories from branched files, more memory data is returned (until a merge happens),
   which uses more tokens and context.
 
-<span style="color: orange;">**QUESTIONS:**</span>
+**QUESTIONS:**
 
 1. How should the "timestamps" described above be implemented?  Should it be:
 
@@ -1107,15 +1107,14 @@ Disadvantages of this system include:
    - An internal mapping of memory file versions, tracked on each read and updated on each write.
 
    - A custom timestamp field stored in the memory file content (e.g., YAML front matter).<br/>
-     <span style="color: orange">**Issue:**</span> Absent a `safe_edit_file` tool, this requires
-     episodic memory files to be completely re-written via `safe_write_file` whenever the
-     frontmatter changes.
+     **Issue:** Absent a `safe_edit_file` tool, this requires episodic memory files to be completely
+     re-written via `safe_write_file` whenever the frontmatter changes.
 
    - What other options exist?
 
 2. Is there any value in tracking the time of creation of a brancg (in addition to its time of last
-   modification) as an aid to merging?<br/> <span style="color: orange">**Issue:**</span> The bridge
-   would have to persist this somewhere in the filesystem, so it survives restarts.
+   modification) as an aid to merging?<br/> **Issue:** The bridge would have to persist this
+   somewhere in the filesystem, so it survives restarts.
 
 2. How do the bridge tools know which conversation is reading/writing a given memory file? Does it
    need to be passed as a parameter to the tools — or can it be inferred by the tools somehow?
