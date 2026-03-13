@@ -1097,14 +1097,27 @@ Disadvantages of this system include:
 
 <span style="color: orange;">**QUESTIONS:**</span>
 
-1. Should the "timestamps" described above be one of the following:
+1. How should the "timestamps" described above be implemented?  Should it be:
 
-   - The filesystem modification times of memory files.
-   - An internal mapping of memory file versions updated on each read and write.
-   - A custom timestamp field stored in the memory file content (e.g., YAML front matter).
-   - Something else?
+   - The hash of the file's contents.  **Issue:** This does not capture the temporal aspect of
+     modifications, which would be valuable during merges.
 
-2. How does the bridge know which conversation is writing a given memory file? Does it need to be
-   passed as a parameter to the tools?
+   - The filesystem modification times of the memory files.
+
+   - An internal mapping of memory file versions, tracked on each read and updated on each write.
+
+   - A custom timestamp field stored in the memory file content (e.g., YAML front matter).<br/>
+     <span style="color: orange">**Issue:**</span> Absent a `safe_edit_file` tool, this requires
+     episodic memory files to be completely re-written via `safe_write_file` whenever the
+     frontmatter changes.
+
+   - What other options exist?
+
+2. Is there any value in tracking the time of creation of a brancg (in addition to its time of last
+   modification) as an aid to merging?<br/> <span style="color: orange">**Issue:**</span> The bridge
+   would have to persist this somewhere in the filesystem, so it survives restarts.
+
+2. How do the bridge tools know which conversation is reading/writing a given memory file? Does it
+   need to be passed as a parameter to the tools — or can it be inferred by the tools somehow?
 
 3. What is the exact file naming convention for branched files?
