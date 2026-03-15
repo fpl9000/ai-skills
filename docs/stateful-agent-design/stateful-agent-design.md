@@ -3,8 +3,7 @@
 **Version:** 1.0 (Draft)<br/>
 **Date:** February - March 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
-**Companion documents:**
-- [Stateful Agent Proposal](stateful-agent-proposal.md) — architecture evaluation, rationale, and open question resolutions.
+**Companion document:** — [Stateful Agent Proposal](stateful-agent-proposal.md) — architecture evaluation, rationale, and open question resolutions.
 
 ## Contents
 
@@ -63,9 +62,9 @@ These principles are inherited from the proposal and govern all design decisions
 
 3. **Single binary.** The MCP bridge compiles to a single static Go binary with no runtime dependencies. Installation is copying the `.exe` file.
 
-4. **Lean bridge with local file access and command execution.** The bridge provides sub-agent lifecycle management tools (`spawn_agent`, `check_agent`), a direct local command execution tool (`run_command`), and mutex-protected memory file writer tools (`safe_write_file`, `safe_append_file`). The `run_command` tool executes shell commands on the local machine and returns stdout/stderr directly. The memory write tools intentionally overlap with the Filesystem extension's `write_file` — this is by design, not redundancy (see item #5 below for the rationale). All other filesystem operations (read, list, search, and non-memory writes) are handled by the Filesystem extension.
+4. **Lean bridge with local file access and command execution.** The bridge provides sub-agent lifecycle management tools (`spawn_agent`, `check_agent`), a direct local command execution tool (`run_command`), and mutex-protected memory file access tools (`safe_read_file`, `safe_write_file`, `safe_append_file`). The memory write tools intentionally replace the Filesystem extension's tools so they can implement I/O serialization and memory branching. All other filesystem operations are handled by the Filesystem extension.
 
-5. **Single-writer model with mutex protection.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents have read-only access to Layer 2 memory. The bridge's in-process write mutex serializes all memory file writes (see open question #1 in section [Open Questions](#11-open-questions) for details).
+5. **Single-writer memory.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents have read-only access to Layer 2 memory.
 
 6. **Compliance-based memory management.** Claude's memory updates are guided by skill instructions (compliance), not enforced by tool constraints. This is pragmatic — the alternative (a dedicated memory server with structured CRUD) is more complex and can be added later if compliance proves insufficient.
 
@@ -81,6 +80,7 @@ These principles are inherited from the proposal and govern all design decisions
 | **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for reading memory files and all non-memory file operations. |
 | **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file writes (`safe_write_file` and `safe_append_file`). Prevents concurrent conversations from interleaving or overwriting each other's memory updates. |
 | **Memory skill** | The .zip file uploaded to Claude Desktop containing SKILL.md — instructions for managing Layer 2 memory. |
+| **Memory Branch** | A copy of a memory file created to avoid losing data due to a read-modify-write memory update.
 | **Sync window** | The 25-second window during which `spawn_agent` and `run_command` wait for their subprocess to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. Shared implementation via the async executor (see [Section 3.10](#310-async-executor)). |
 | **Block** | An individual markdown file in the `blocks/` directory. Each block covers a project, topic, or time period. |
 | **Block reference** | A row in `index.md` mapping a block filename to its summary and last-updated date. |
