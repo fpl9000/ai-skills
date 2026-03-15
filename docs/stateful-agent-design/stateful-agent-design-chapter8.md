@@ -37,6 +37,9 @@ These are standard Go tests (`go test ./...`) that test the bridge in isolation.
 | Temp file cleanup on failure | Simulate write error (e.g., disk full) | Temp file is cleaned up, error returned |
 | Atomic replacement | Write while another thread reads | Reader sees either old or new content, never partial |
 | Returns path in response | Any valid write | Response includes the absolute path that was written |
+| Unknown session_id | Valid path + content + invalid session | Error: "Unknown session_id" |
+| Race detection → branch | Read file, external write, then safe_write_file | branch_created: true, path is branch file |
+| No race → normal write | Read file, no external changes, then safe_write_file | branch_created: false, path is base file |
 
 #### 8.1.1a safe_append_file Tests
 
@@ -48,6 +51,8 @@ These are standard Go tests (`go test ./...`) that test the bridge in isolation.
 | Path traversal attempt | Path with `..` escaping memory dir | Error: path validation rejects it |
 | Empty text | Valid path + empty string | Success (no-op write, 0 bytes) |
 | Parent dir creation | Path where parent dir doesn't exist | Parent directories created, file written |
+| Unknown session_id | Valid path + text + invalid session | Error: "Unknown session_id" |
+| Race detection → branch | Read file, external write, then safe_append_file | branch_created: true, branch contains base + appended text |
 
 #### 8.1.1b Write Mutex Serialization Tests
 
@@ -116,7 +121,46 @@ echo "Working directory: $(pwd)"
 | Stderr capture | `run_command("echo error >&2")` | stderr contains "error" |
 | Pipeline | `run_command("echo hello \| tr a-z A-Z")` | stdout contains "HELLO" |
 
-#### 8.1.5 Job Lifecycle Tests
+#### 8.1.5 memory_session_start Tests
+
+| Test Case | Input | Expected Behavior |
+|-----------|-------|-------------------|
+| Basic session creation | No params | Returns unique session_id (8 chars), started_at timestamp |
+| Session ID uniqueness | Create 100 sessions | All IDs are distinct |
+| Session ID format | Create session | ID matches `ses-[0-9a-f]{4}` pattern |
+| Max sessions eviction | Create max_sessions + 1 | Oldest session evicted, newest created successfully |
+| Branches exist flag (no branches) | Clean memory dir | Returns `branches_exist: false` |
+| Branches exist flag (with branches) | Create a branch file in memory dir | Returns `branches_exist: true` |
+
+#### 8.1.6 safe_read_file Tests
+
+| Test Case | Input | Expected Behavior |
+|-----------|-------|-------------------|
+| Read existing file | Valid path + session_id | Returns content, records ModTime in session tracker |
+| Read non-existent file | Path to missing file | Error: "File does not exist" |
+| Path outside memory dir | Path under `C:\temp\` | Error: "restricted to memory directory" |
+| Unknown session_id | Valid path + invalid session_id | Error: "Unknown session_id" |
+| Read file with no branches | File has no branch files | `has_branches: false`, empty branches array |
+| Read file with branches | File has 2 branch files | `has_branches: true`, branches array has 2 entries with content |
+| Branch chronological order | File has branches from different times | Branches sorted by creation timestamp |
+| ModTime tracking | Read file, check session tracker | Tracker has correct ModTime for the file |
+| Path traversal attempt | Path with `..` escaping memory dir | Error: path validation rejects it |
+
+#### 8.1.7 Branching Tests
+
+| Test Case | Setup | Expected Behavior |
+|-----------|-------|-------------------|
+| No race (normal write) | Session reads file, no other writes, session writes | Write succeeds to base file, `branch_created: false` |
+| Race detected → branch created | Session A reads, Session B writes, Session A writes | Session A's write goes to branch file, `branch_created: true` |
+| Branch naming format | Trigger a branch | Branch filename matches `<stem>.branch-<timestamp>-<hex4>.<ext>` |
+| Branch creation timestamp | Trigger a branch | Timestamp in filename matches current time |
+| Append with race → branch | Session A reads, Session B writes, Session A appends | Append creates branch with base content + appended text |
+| Branching disabled | Set `branching.enabled: false`, trigger race | Last-writer-wins behavior, `branch_created: false` |
+| First write (no prior read) | Session writes to file it never read | No race possible, write to base file |
+| New file creation | Session writes to non-existent path | File created normally, no branching |
+| Multiple branches same file | Three sessions race on same file | Two branch files created alongside unchanged base |
+
+#### 8.1.8 Job Lifecycle Tests
 
 | Test Case | Expected Behavior |
 |-----------|-------------------|
@@ -125,14 +169,14 @@ echo "Working directory: $(pwd)"
 | Job ID uniqueness | 1000 sequential job IDs are all unique |
 | Mixed job sources | Jobs from both spawn_agent and run_command coexist in job manager |
 
-#### 8.1.6 MCP Integration Tests
+#### 8.1.9 MCP Integration Tests
 
 These tests verify the bridge works correctly as an MCP server. Use the `mcp-go` SDK's test utilities or send raw JSON-RPC messages over a pipe.
 
 | Test Case | Expected Behavior |
 |-----------|-------------------|
 | MCP initialization handshake | Bridge responds with capabilities and tool list |
-| Tool listing | Returns spawn_agent, check_agent, run_command, safe_write_file, safe_append_file |
+| Tool listing | Returns memory_session_start, safe_read_file, safe_write_file, safe_append_file, spawn_agent, check_agent, run_command |
 | Tool call with valid params | Returns well-formed MCP result |
 | Tool call with missing required param | Returns MCP error with descriptive message |
 | Two concurrent tool calls (via pipe) | Both complete correctly (test serialization) |
@@ -147,10 +191,11 @@ Memory skill testing is behavioral — it verifies that Claude follows the SKILL
 1. Ensure memory directory has `core.md` and `index.md` with known content.
 2. Start a new Claude Desktop conversation.
 3. Send a message: "What do you know about me?"
-4. Verify (via bridge log or observation) that Claude read `core.md` and `index.md` before responding.
-5. Verify Claude's response incorporates content from the memory files.
+4. Verify (via bridge log) that Claude called `memory_session_start` first.
+5. Verify that Claude read `core.md` and `index.md` via `safe_read_file` (not `Filesystem:read_file`).
+6. Verify Claude's response incorporates content from the memory files.
 
-**Pass criteria:** Claude reads both files before its first response and integrates the content naturally.
+**Pass criteria:** Claude calls `memory_session_start` first, reads both files via `safe_read_file` before its first response, and integrates the content naturally.
 
 #### 8.2.2 Session Start — Cold Start
 
@@ -193,11 +238,14 @@ Memory skill testing is behavioral — it verifies that Claude follows the SKILL
 #### 8.2.6 Correct Tool Usage (Mutex-Protected Writes Only)
 
 **Test procedure:**
-1. Monitor the bridge log and Claude Desktop's tool usage during a memory-writing session.
-2. Verify that all writes to memory files use `Bridge:safe_write_file` or `Bridge:safe_append_file`.
-3. Verify that no writes to the memory directory use `Filesystem:write_file`, `Filesystem:edit_file`, `bash_tool`, `create_file`, or `str_replace`.
+1. Monitor the bridge log and Claude Desktop's tool usage during a memory session.
+2. Verify that `memory_session_start` was called before any memory reads or writes.
+3. Verify that all reads of memory files use `Bridge:safe_read_file` (not `Filesystem:read_file`).
+4. Verify that all writes to memory files use `Bridge:safe_write_file` or `Bridge:safe_append_file`.
+5. Verify that all memory tool calls include a valid `session_id`.
+6. Verify that no memory operations use `Filesystem:read_file`, `Filesystem:write_file`, `Filesystem:edit_file`, `bash_tool`, `create_file`, or `str_replace`.
 
-**Pass criteria:** All memory writes go through the bridge's mutex-protected tools. No Filesystem extension writes or cloud VM tools used for memory files.
+**Pass criteria:** All memory operations go through the bridge's session-tracked tools. No Filesystem extension or cloud VM tools used for memory files.
 
 #### 8.2.7 Compliance Monitoring Script
 
@@ -315,7 +363,7 @@ The system is considered ready for daily use when:
 
 | # | Criterion | Verified by |
 |---|-----------|-------------|
-| AC1 | Bridge starts and registers all 5 tools with Claude Desktop | MCP integration test |
+| AC1 | Bridge starts and registers all 7 tools with Claude Desktop | MCP integration test |
 | AC2 | spawn_agent completes fast tasks synchronously (< 25s) | Sub-agent test 8.3.1 |
 | AC3 | spawn_agent handles slow tasks asynchronously (> 25s) | Sub-agent test 8.3.4 |
 | AC4 | check_agent returns correct status and results for both spawn_agent and run_command jobs | check_agent tests 8.1.3 |
@@ -328,4 +376,8 @@ The system is considered ready for daily use when:
 | AC11 | Memory persists across conversations | Integration test 8.4.1 |
 | AC12 | Sub-agent directory sandbox blocks unauthorized access | Sub-agent test 8.3.3 |
 | AC13 | Both MCP servers (bridge + filesystem) work simultaneously | Integration test 8.4.3 |
-| AC14 | No memory writes use cloud VM tools | Skill test 8.2.6 |
+| AC14 | No memory operations use cloud VM tools or Filesystem extension | Skill test 8.2.6 |
+| AC15 | memory_session_start returns unique session IDs and branches_exist flag | memory_session_start tests 8.1.5 |
+| AC16 | safe_read_file returns content with branch annotations when branches exist | safe_read_file tests 8.1.6 |
+| AC17 | safe_write_file detects races and creates branches instead of overwriting | Branching tests 8.1.7 |
+| AC18 | Memory skill calls memory_session_start before any memory reads/writes | Skill test 8.2.1 |

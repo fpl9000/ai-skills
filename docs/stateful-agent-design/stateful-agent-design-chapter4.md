@@ -19,6 +19,7 @@
   - [4.7 File Format: decisions.md](#47-file-format-decisionsmd)
   - [4.8 Block Naming Conventions](#48-block-naming-conventions)
   - [4.9 Why Markdown (Not JSON, SQLite, or YAML)](#49-why-markdown-not-json-sqlite-or-yaml)
+  - [4.10 Branching and Merge](#410-branching-and-merge)
 
 ## 4. Memory System (Layer 2)
 
@@ -54,7 +55,9 @@ C:\franl\.claude-agent-memory\
     ├── reference-go-patterns.md #   Persistent reference material
     ├── decisions.md             #   Cross-project architectural decisions
     ├── episodic-2026-02.md      #   February 2026 conversation log
-    └── episodic-2026-03.md      #   March 2026 conversation log
+    ├── episodic-2026-03.md      #   March 2026 conversation log
+    └── *.branch-*.*             #   Branch files (temporary, created by race
+                                 #   detection, merged and deleted during off-hours)
 ```
 
 **Loading rules:**
@@ -285,3 +288,23 @@ This decision is fundamental and is not revisited in the design. The rationale:
 | **SQLite** | *Rejected:* Opaque binary format. Cannot be inspected in a text editor or GitHub web UI. Merge conflicts are unresolvable. Overkill for the expected data volume (dozens of files, hundreds of KB). |
 | **YAML** | *Rejected:* Fragile whitespace sensitivity. Poor for long-form prose. Acceptable for metadata (hence the optional YAML frontmatter), but not for content bodies. |
 | **Markdown** | *Accepted:* Human-readable, human-editable, Git-friendly diffs, viewable in any text editor or GitHub, Claude-native format, no parsing dependencies. Trade-off: lookups require reading files, not querying an index — acceptable at our scale. |
+
+### 4.10 Branching and Merge
+
+When the bridge detects a concurrent read-modify-write race on a memory file, it writes the racing conversation's changes to a "branch" file instead of overwriting the base file. This preserves data from all concurrent conversations.
+
+**Branch files are transient.** They exist only until a merge process reconciles them with the base file. They are not referenced by `index.md` (which always uses canonical filenames) and are not part of the permanent memory structure.
+
+**`index.md` interaction:** The `Updated` column in `index.md` always reflects the most recent modification to a file *or any of its branches*. This ensures that index-based relevance decisions account for recent branch activity. File names in the `Block` column are always canonical (non-branched) names.
+
+**Merge semantics:** Merges are *semantic*, not textual. A merge sub-agent reads the base file and all its branches, understands the meaning of each version's content, and produces a single unified file that preserves important information from all versions. This is necessary because memory files are prose markdown — a line-based three-way merge (as in `git merge`) would produce incoherent results when two conversations independently rewrite the same paragraph.
+
+**Example scenario:**
+
+1. Conversation A reads `core.md` (which lists Project X as "in progress").
+2. Conversation B also reads `core.md`.
+3. Conversation A updates `core.md` to mark Project X as "completed" and adds Project Y.
+4. Conversation B attempts to update `core.md` to add a new preference. The bridge detects the race (file modified since B's read) and writes B's version to `core.branch-20260313T1423-a1b2.md`.
+5. Later, a merge sub-agent reads both versions. It produces a merged `core.md` that marks Project X as "completed" (from A), includes Project Y (from A), and includes the new preference (from B). The branch file is deleted.
+
+See [Chapter 3, Section 3.12](stateful-agent-design-chapter3.md#312-branching) for the branch file naming convention, detection mechanism, and merge process details.

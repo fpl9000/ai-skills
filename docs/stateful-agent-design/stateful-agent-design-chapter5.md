@@ -43,20 +43,33 @@ about the user, their projects, and your shared history.
 
 ## CRITICAL: Use the Correct Tools for Memory Operations
 
-For READING memory files: use `Filesystem:read_file` (the Anthropic Filesystem extension).
+ALL memory file operations MUST go through the bridge's memory tools. These tools
+provide session tracking, race detection, and branching to prevent concurrent
+conversations from overwriting each other's updates.
 
-For WRITING memory files: ALWAYS use `Bridge:safe_write_file` (full file replacement)
-or `Bridge:safe_append_file` (append to episodic logs). These tools are mutex-protected
-and scoped to the memory directory. They prevent concurrent conversations from
-overwriting each other's updates.
+1. **Session initialization:** Call `Bridge:memory_session_start` once at the start
+   of every conversation. This returns a `session_id` that you MUST pass to all
+   subsequent memory tool calls. Store this ID and use it consistently.
 
-NEVER use `Filesystem:write_file` or `Filesystem:edit_file` for memory files — those
-bypass the write mutex and can cause data loss if two conversations write simultaneously.
+2. **Reading memory files:** Use `Bridge:safe_read_file(path, session_id)`.
+   This records the file version so the bridge can detect races on later writes.
+   If branched versions of the file exist (from a prior concurrent write race),
+   their content will be included in the response, annotated as branches.
+
+3. **Writing memory files:** Use `Bridge:safe_write_file(path, content, session_id)`
+   for full file replacement, or `Bridge:safe_append_file(path, text, session_id)`
+   for appending (primarily for episodic logs). If the bridge detects that another
+   conversation modified the file since you last read it, your write is automatically
+   redirected to a branch file — no data is lost.
+
+NEVER use `Filesystem:read_file`, `Filesystem:write_file`, or `Filesystem:edit_file`
+for memory files — those bypass session tracking, race detection, and branching.
 
 NEVER use cloud VM tools (`bash_tool`, `create_file`, `str_replace`) for persistent data.
 The cloud VM filesystem is ephemeral and resets between sessions.
 
-Memory files live at `C:\franl\.claude-agent-memory\` — always access them via the tools above.
+Memory files live at `C:\franl\.claude-agent-memory\` — always access them via the
+bridge memory tools listed above.
 
 ## Memory Directory
 
@@ -66,20 +79,39 @@ Structure:
 - core.md — Your identity summary and active project list. Always load this first.
 - index.md — Table mapping block filenames to summaries. Always load after core.md.
 - blocks\ — Individual content files. Load on demand based on conversation topic.
+- *.branch-*.* — Temporary branch files from concurrent write races (if any exist).
 
 ## Session Start Protocol
 
 At the start of every conversation, BEFORE responding to the user's first message:
 
-1. Read core.md via `Filesystem:read_file`
-2. Read index.md via `Filesystem:read_file`
-3. Scan the index for blocks relevant to the user's opening message
-4. If a relevant block exists, read it via `Filesystem:read_file`
-5. Now respond to the user, informed by your loaded context
+1. Call `Bridge:memory_session_start` to get a session_id. Store it for the session.
+   If the response includes `branches_exist: true`, note this — you may want to
+   trigger a merge later (or mention it to the user).
+2. Read core.md via `Bridge:safe_read_file(path, session_id)`
+3. Read index.md via `Bridge:safe_read_file(path, session_id)`
+4. Scan the index for blocks relevant to the user's opening message
+5. If a relevant block exists, read it via `Bridge:safe_read_file(path, session_id)`
+6. Now respond to the user, informed by your loaded context
 
 If core.md does not exist, this is a first-run scenario. Create the memory directory
 structure and seed core.md with basic information from Layer 1 (your built-in memory)
 and the current conversation.
+
+## Handling Branches
+
+If `safe_read_file` returns branches for a file (the `has_branches` field is true),
+this means another conversation's changes were saved to a branch file during a
+concurrent write race. The branch content represents changes that haven't been
+merged yet.
+
+When you encounter branches:
+- Consider ALL versions (base + branches) when answering questions about the topic.
+- The base file is the "main line" and branches contain divergent changes.
+- You can offer to merge branches by spawning a sub-agent, or mention to the user
+  that unmerged branches exist.
+- Do NOT manually rewrite the base file to include branch content — use the merge
+  process instead (spawn a sub-agent with merge instructions).
 
 ## During the Conversation
 
@@ -87,30 +119,31 @@ and the current conversation.
 - When the conversation shifts to a topic listed in index.md that you haven't loaded
 - When the user asks "what do you remember about X?" and X matches a block
 - When you need project context to give an informed answer
+- Always use `Bridge:safe_read_file(path, session_id)` — never `Filesystem:read_file`
 
 ### When to Write Memory
 Write memory updates incrementally as significant information emerges. Do NOT
 accumulate changes and batch-write at session end — sessions can end abruptly.
 
-**Write to core.md** (via `Bridge:safe_write_file`) when:
+**Write to core.md** (via `Bridge:safe_write_file(path, content, session_id)`) when:
 - A new project starts or an existing project's status changes significantly
 - Key facts about the user change (role, location, preferences)
 - Keep core.md under ~1,000 tokens. Move detailed content to blocks.
 - Provide the COMPLETE updated file content (safe_write_file does full replacement)
 
-**Write to index.md** (via `Bridge:safe_write_file`) when:
+**Write to index.md** (via `Bridge:safe_write_file(path, content, session_id)`) when:
 - You create a new block (add a row)
 - A block's summary needs updating (edit the Summary column)
 - A block's content changes (update the Updated column)
 - Provide the COMPLETE updated file content
 
-**Write to blocks** (via `Bridge:safe_write_file`) when:
+**Write to blocks** (via `Bridge:safe_write_file(path, content, session_id)`) when:
 - Significant project decisions are made
 - Technical details worth remembering emerge
 - The user shares information that will be useful in future sessions
 - Provide the COMPLETE updated file content
 
-**Append to episodic log** (via `Bridge:safe_append_file`) when:
+**Append to episodic log** (via `Bridge:safe_append_file(path, text, session_id)`) when:
 - Periodically during long sessions (every 30–60 minutes)
 - At natural breakpoints in the conversation
 - Before the session ends (if you sense the user is wrapping up)
@@ -133,7 +166,11 @@ into existing blocks, create a new block file:
 - Date-stamp significant decisions and status changes.
 - When updating a file with `Bridge:safe_write_file`, provide the COMPLETE updated
   content. The tool does a full file replacement (it does not do surgical edits).
-  Read the file first if you don't already have its content in context.
+  Read the file first via `Bridge:safe_read_file` if you don't already have its
+  content in context. Always include your session_id in every tool call.
+- If a write returns `branch_created: true`, this means the file was modified by
+  another conversation since you last read it. Your changes were saved to a branch
+  file. This is normal — the branch will be merged later.
 
 ## Session End
 
@@ -147,12 +184,14 @@ If the user says goodbye, thanks you, or the conversation is clearly winding dow
 
 If the user asks "what do you remember about X?":
 1. Check index.md for blocks related to X
-2. Read relevant blocks
-3. Combine with any Layer 1 (built-in) memory you have
-4. Respond naturally, as if recalling from your own knowledge
+2. Read relevant blocks via `Bridge:safe_read_file(path, session_id)`
+3. If any blocks have branches, consider all versions
+4. Combine with any Layer 1 (built-in) memory you have
+5. Respond naturally, as if recalling from your own knowledge
 
 If the user asks to correct or delete a memory:
-1. Read the file, make the correction, and write the updated content via `Bridge:safe_write_file`
+1. Read the file via `Bridge:safe_read_file`, make the correction, and write via
+   `Bridge:safe_write_file(path, content, session_id)`
 2. Acknowledge the correction
 
 If the user asks to see their memory files:
@@ -170,20 +209,25 @@ Session Start
 │
 ├─ 1. Skill instructions loaded into context (automatic, ~500 tokens)
 ├─ 2. Layer 1 memory loaded into context (automatic, ~500–2,000 tokens)
-├─ 3. Read core.md (Filesystem:read_file, ~500–1,000 tokens)
-├─ 4. Read index.md (Filesystem:read_file, ~300–800 tokens)
-├─ 5. Evaluate user's first message against index entries
-├─ 6. Read relevant blocks if any match (Filesystem:read_file, varies)
-└─ 7. Respond to user's first message
+├─ 3. Call Bridge:memory_session_start → receive session_id (store for session)
+│     If branches_exist is true, note for potential merge
+├─ 4. Read core.md (Bridge:safe_read_file with session_id, ~500–1,000 tokens)
+├─ 5. Read index.md (Bridge:safe_read_file with session_id, ~300–800 tokens)
+├─ 6. Evaluate user's first message against index entries
+├─ 7. Read relevant blocks if any match (Bridge:safe_read_file, varies)
+└─ 8. Respond to user's first message
 │
 Session Active
 │
-├─ On topic change → Check index, load relevant blocks
+├─ On topic change → Check index, load relevant blocks (Bridge:safe_read_file)
 ├─ On significant information → Update relevant block or core.md (Bridge:safe_write_file)
 ├─ On new project/topic → Create new block + update index.md (Bridge:safe_write_file)
 ├─ On decision made → Update decisions.md or project block (Bridge:safe_write_file)
 ├─ Every 30–60 minutes → Append episodic log entry (Bridge:safe_append_file)
-└─ On context pressure → Summarize verbose blocks to free tokens
+├─ On context pressure → Summarize verbose blocks to free tokens
+├─ On branch_created response → Note that branching occurred (merge needed later)
+└─ On branches_exist at session start → Optionally trigger merge via sub-agent
+│     (All write/append calls include session_id)
 │
 Session End (if detectable)
 │
