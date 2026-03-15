@@ -1,39 +1,42 @@
-# Stateful Agent System: Future Enhancements
+# Stateful Agent System: Detailed Design
 
 **Version:** 1.0 (Draft)<br/>
-**Date:** March 2026<br/>
+**Date:** February - March 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
-**Companion document:** [Stateful Agent Design](stateful-agent-design.md) — design of the agent system.
+
+**Companion documents:**
+- [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
+- [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
 
 ## Contents
 
-- [1. Overview](#1-overview)
-  - [1.1 FTS5 Search Index (Option 3)](#11-fts5-search-index-option-3)
-  - [1.2 Memory-Aware Tools](#12-memory-aware-tools)
-  - [1.3 Architecture B2 Upgrade](#13-architecture-b2-upgrade)
-  - [1.4 GitHub Backup Automation](#14-github-backup-automation)
-  - [1.5 GitHub Relay: Claude.ai to Local Bridge Communication](#15-github-relay-claudeai-to-local-bridge-communication)
-    - [1.5.1 Message Protocol](#151-message-protocol)
-    - [1.5.2 Supported Operations](#152-supported-operations)
-    - [1.5.3 The `claude_prompt` Flow and `relay_respond` Tool](#153-the-claude_prompt-flow-and-relay_respond-tool)
-    - [1.5.4 Security](#154-security)
-    - [1.5.5 Bridge Relay Integration](#155-bridge-relay-integration)
-    - [1.5.6 Claude.ai Workflow](#156-claudeai-workflow)
-    - [1.5.7 AutoHotkey Prompt Injection (TBD)](#157-autohotkey-prompt-injection-tbd)
-    - [1.5.8 Cleanup and Hygiene](#158-cleanup-and-hygiene)
-    - [1.5.9 Relationship to Section 1.3 (Architecture B2 Upgrade)](#159-relationship-to-section-13-architecture-b2-upgrade)
-    - [1.5.10 Relay Script Inventory](#1510-relay-script-inventory)
-    - [1.5.11 GitHub Skill Relay Transport Additions](#1511-github-skill-relay-transport-additions)
-    - [1.5.12 AI Messaging Skill](#1512-ai-messaging-skill)
-  - [1.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#16-proposed-solution-to-concurrent-read-modify-write-race-condition)
+- [9. Future Enhancements](#1-overview)
+  - [9.1 FTS5 Search Index (Option 3)](#11-fts5-search-index-option-3)
+  - [9.2 Memory-Aware Tools](#12-memory-aware-tools)
+  - [9.3 Architecture B2 Upgrade](#13-architecture-b2-upgrade)
+  - [9.4 GitHub Backup Automation](#14-github-backup-automation)
+  - [9.5 GitHub Relay: Claude.ai to Local Bridge Communication](#15-github-relay-claudeai-to-local-bridge-communication)
+    - [9.5.1 Message Protocol](#151-message-protocol)
+    - [9.5.2 Supported Operations](#152-supported-operations)
+    - [9.5.3 The `claude_prompt` Flow and `relay_respond` Tool](#153-the-claude_prompt-flow-and-relay_respond-tool)
+    - [9.5.4 Security](#154-security)
+    - [9.5.5 Bridge Relay Integration](#155-bridge-relay-integration)
+    - [9.5.6 Claude.ai Workflow](#156-claudeai-workflow)
+    - [9.5.7 AutoHotkey Prompt Injection (TBD)](#157-autohotkey-prompt-injection-tbd)
+    - [9.5.8 Cleanup and Hygiene](#158-cleanup-and-hygiene)
+    - [9.5.9 Relationship to Section 9.3 (Architecture B2 Upgrade)](#159-relationship-to-section-13-architecture-b2-upgrade)
+    - [9.5.10 Relay Script Inventory](#1510-relay-script-inventory)
+    - [9.5.11 GitHub Skill Relay Transport Additions](#1511-github-skill-relay-transport-additions)
+    - [9.5.12 AI Messaging Skill](#1512-ai-messaging-skill)
+  - [9.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#16-proposed-solution-to-concurrent-read-modify-write-race-condition)
 
-## 1. Overview
+## 9. Future Enhancements
 
 These are planned upgrades that are deliberately deferred from the initial implementation. Each addresses a limitation documented in the proposal. This document references terms and concepts from *[Stateful Agent Design](stateful-agent-design.md)* without definition, so please read that design first.
 
 This document was previously section 9, "Future Enhancements", in that design.
 
-### 1.1 FTS5 Search Index (Option 3)
+### 9.1 FTS5 Search Index (Option 3)
 
 **Trigger:** When the number of blocks exceeds ~50 and filename-based retrieval from `index.md` becomes cumbersome.
 
@@ -66,7 +69,7 @@ Also investigate semantic memory storage and search technologies such as:
 - [tristan-mcinnis/claude-code-agentic-semantic-memory-system-mcp](https://github.com/tristan-mcinnis/claude-code-agentic-semantic-memory-system-mcp)\
   *Specifically designed for Claude Code. TypeScript MCP server using PostgreSQL + pgvector for semantic search. Supports project namespaces, knowledge graph relations, local embeddings (no external API needed), and intent-based natural language triggers. More opinionated/Claude-specific than the others.*
 
-### 1.2 Memory-Aware Tools
+### 9.2 Memory-Aware Tools
 
 **Trigger:** When compliance-based memory management via the skill proves insufficient — Claude frequently forgets to update `index.md`, corrupts YAML frontmatter, or uses incorrect naming conventions.
 
@@ -80,7 +83,7 @@ Also investigate semantic memory storage and search technologies such as:
 
 These tools trade skill simplicity (fewer instructions needed) for bridge complexity (more code to maintain). They also provide the "unambiguous tool names" benefit described in proposal Open Question #22 — reducing the risk of Claude using cloud VM tools for memory operations.
 
-### 1.3 Architecture B2 Upgrade
+### 9.3 Architecture B2 Upgrade
 
 **Trigger:** If Claude Desktop App's UI limitations or stability issues become a persistent problem.
 
@@ -92,7 +95,7 @@ These tools trade skill simplicity (fewer instructions needed) for bridge comple
 
 The bridge codebase, memory directory, and skill are all unchanged. Only the transport layer changes.
 
-### 1.4 GitHub Backup Automation
+### 9.4 GitHub Backup Automation
 
 **Trigger:** After the system is stable and the memory directory has valuable content.
 
@@ -111,7 +114,7 @@ git push origin main
 The `.search-index.db` file (if it exists) should be in `.gitignore`.
 
 
-### 1.5 GitHub Relay: Claude.ai to Local Bridge Communication
+### 9.5 GitHub Relay: Claude.ai to Local Bridge Communication
 
 **Trigger:** When mobile or web access to the local stateful agent is desired — e.g., using the Claude app on a phone to invoke tools on the home machine.
 
@@ -155,7 +158,7 @@ claude-relay/
 └── .gitignore
 ```
 
-#### 1.5.1 Message Protocol
+#### 9.5.1 Message Protocol
 
 Each request/response pair shares a unique message ID (a timestamp-based UUID or similar). The protocol uses a simple state machine:
 
@@ -200,7 +203,7 @@ Each request/response pair shares a unique message ID (a timestamp-based UUID or
 | `failed` | `responses/` | Operation failed; `result.error` contains details |
 | `expired` | `requests/` | TTL exceeded without pickup (set by cleanup) |
 
-#### 1.5.2 Supported Operations
+#### 9.5.2 Supported Operations
 
 The relay supports exactly three operations, with a clear split: two are handled entirely by the MCP bridge (no inference), and one delegates to Claude Desktop for full agent-loop processing.
 
@@ -219,12 +222,12 @@ The relay supports exactly three operations, with a clear split: two are handled
 
 The `claude_prompt` operation is the "full agent loop" path — it gives Claude Desktop complete autonomy to read memory, run commands, spawn sub-agents, or do anything else its tools allow. The other two operations are fast, deterministic shortcuts that bypass inference entirely.
 
-#### 1.5.3 The `claude_prompt` Flow and `relay_respond` Tool
+#### 9.5.3 The `claude_prompt` Flow and `relay_respond` Tool
 
 The `claude_prompt` operation requires a round-trip through Claude Desktop:
 
 1. The MCP bridge picks up a `claude_prompt` request from the relay repo.
-2. The bridge injects the prompt into Claude Desktop via an AutoHotkey script (mechanism TBD — see Section 1.5.7).
+2. The bridge injects the prompt into Claude Desktop via an AutoHotkey script (mechanism TBD — see Section 9.5.7).
 3. The injected prompt includes a preamble instructing Claude Desktop to call the `relay_respond` tool when it has completed the task:
 
    ```
@@ -277,7 +280,7 @@ mcp.NewTool(
 
 If Claude Desktop calls `relay_respond` with an unknown or already-completed `relay_id`, the handler returns a tool error.
 
-#### 1.5.4 Security
+#### 9.5.4 Security
 
 The relay repo is private, but defense-in-depth applies:
 
@@ -517,7 +520,7 @@ The relay repo is private, but defense-in-depth applies:
 
 4. **Audit log:** All relay activity is logged to the bridge's log file, including rejected requests and responses with the rejection reason (bad HMAC, disallowed operation, rate-limited).
 
-#### 1.5.5 Bridge Relay Integration
+#### 9.5.5 Bridge Relay Integration
 
 The relay polling loop runs as a goroutine within the MCP bridge process. Its responsibilities:
 
@@ -555,7 +558,7 @@ relay:
   log_file: C:\franl\.claude-agent-memory\relay.log
 ```
 
-#### 1.5.6 Claude.ai Workflow
+#### 9.5.6 Claude.ai Workflow
 
 From Claude.ai (web or mobile), the interaction pattern is:
 
@@ -574,7 +577,7 @@ The round-trip latency depends on the operation:
 
 **Timeout behavior:** If no response appears within a configurable timeout (default: 2 minutes for bridge-local ops, 5 minutes for `claude_prompt`), Claude.ai reports that the local machine may be offline or the operation is still in progress.
 
-#### 1.5.7 AutoHotkey Prompt Injection (TBD)
+#### 9.5.7 AutoHotkey Prompt Injection (TBD)
 
 The mechanism for injecting a prompt into Claude Desktop's UI is deferred to a future design iteration. The approach will use an AutoHotkey script that:
 
@@ -584,7 +587,7 @@ The mechanism for injecting a prompt into Claude Desktop's UI is deferred to a f
 
 Design considerations include: handling the case where Claude Desktop is mid-conversation, ensuring the prompt is injected cleanly (no partial sends), and dealing with Claude Desktop's window state (minimized, behind other windows, etc.).
 
-#### 1.5.8 Cleanup and Hygiene
+#### 9.5.8 Cleanup and Hygiene
 
 - The bridge deletes request files after writing the corresponding response.
 - Response files are deleted after the configured TTL.
@@ -592,11 +595,11 @@ Design considerations include: handling the case where Claude Desktop is mid-con
 - The relay repo should stay lean — it is a message queue, not a data store. The `.gitignore` should exclude any local state files.
 - GitHub API rate limits (5,000 authenticated requests/hour) are more than sufficient for relay traffic at expected volumes.
 
-#### 1.5.9 Relationship to Section 1.3 (Architecture B2 Upgrade)
+#### 9.5.9 Relationship to Section 1.3 (Architecture B2 Upgrade)
 
 If the bridge gains Streamable HTTP transport and a Cloudflare Tunnel (Section 1.3), Claude.ai could potentially connect directly — bypassing the GitHub relay entirely. The relay is the pragmatic v1 solution that works within Claude.ai's current egress restrictions. The two approaches are complementary: the relay can remain as a fallback for environments where tunnel setup is impractical.
 
-#### 1.5.10 Relay Script Inventory
+#### 9.5.10 Relay Script Inventory
 
 Three new scripts are added to the github skill's `scripts/` directory. All use PEP 723 inline metadata and run via `uv run`.
 
@@ -645,9 +648,9 @@ Output (JSON to stdout):
     On not found: {"error": "Message not found", "id": "<id>"}  (exit code 1)
 ```
 
-#### 1.5.11 GitHub Skill Relay Transport Additions
+#### 9.5.11 GitHub Skill Relay Transport Additions
 
-The following section is appended to the existing `github/SKILL.md` when the relay is implemented. It covers the transport protocol only — the semantic layer (operations, decision tree) is in the ai-messaging skill ([Section 1.5.12](#1512-ai-messaging-skill)).
+The following section is appended to the existing `github/SKILL.md` when the relay is implemented. It covers the transport protocol only — the semantic layer (operations, decision tree) is in the ai-messaging skill ([Section 9.5.12](#1512-ai-messaging-skill)).
 
 ````markdown
 ---
@@ -786,7 +789,7 @@ in the HMAC (it is informational only).
 
 ````
 
-#### 1.5.12 AI Messaging Skill
+#### 9.5.12 AI Messaging Skill
 
 The AI Messaging skill is a new skill created at `ai-skills/ai-messaging/SKILL.md`. It contains only a `SKILL.md` file (no scripts) and depends on the github skill's relay transport scripts.
 
