@@ -63,9 +63,9 @@ These principles are inherited from the proposal and govern all design decisions
 
 3. **Single binary.** The MCP bridge compiles to a single static Go binary with no runtime dependencies. Installation is copying the `.exe` file.
 
-4. **Lean bridge with local file access and command execution.** The bridge provides sub-agent lifecycle management tools (`spawn_agent`, `check_agent`), a direct local command execution tool (`run_command`), and mutex-protected memory file writer tools (`safe_write_file`, `safe_append_file`). The `run_command` tool executes shell commands on the local machine and returns stdout/stderr directly. The memory write tools intentionally overlap with the Filesystem extension's `write_file` — this is by design, not redundancy (see item #5 below for the rationale). All other filesystem operations (read, list, search, and non-memory writes) are handled by the Filesystem extension.
+4. **Bridge-mediated memory access with session tracking.** The bridge provides sub-agent lifecycle management tools (`spawn_agent`, `check_agent`), a direct local command execution tool (`run_command`), a session initialization tool (`memory_session_start`), a session-tracked memory reader (`safe_read_file`), and mutex-protected memory file writers (`safe_write_file`, `safe_append_file`). The `run_command` tool executes shell commands on the local machine and returns stdout/stderr directly. All memory file operations (read and write) go through the bridge, which tracks per-session file versions to detect concurrent read-modify-write races. The memory tools intentionally overlap with the Filesystem extension's `read_file` and `write_file` — this is by design, not redundancy (see item #5 below for the rationale). Non-memory filesystem operations (list, search, and non-memory reads/writes) are handled by the Filesystem extension.
 
-5. **Single-writer model with mutex protection.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents have read-only access to Layer 2 memory. The bridge's in-process write mutex serializes all memory file writes (see open question #1 in section [Open Questions](#11-open-questions) for details).
+5. **Single-writer model with mutex protection and branching.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents have read-only access to Layer 2 memory. The bridge's in-process write mutex serializes all memory file I/O. When a concurrent read-modify-write race is detected (via per-session file version tracking), the bridge creates a "branch" of the memory file instead of overwriting the other conversation's changes. Branches are merged later during off-hours via a semantic merge process (see [Chapter 3, Section 3.12](stateful-agent-design-chapter3.md#312-branching) for details).
 
 6. **Compliance-based memory management.** Claude's memory updates are guided by skill instructions (compliance), not enforced by tool constraints. This is pragmatic — the alternative (a dedicated memory server with structured CRUD) is more complex and can be added later if compliance proves insufficient.
 
@@ -77,10 +77,14 @@ These principles are inherited from the proposal and govern all design decisions
 | **Sub-agent** | An ephemeral Claude Code CLI instance (`claude -p`) spawned by the bridge. One-shot, stateless, no Layer 1 memory. |
 | **Layer 1** | Anthropic's built-in memory. Auto-generated summary (~500–2,000 tokens) injected into every conversation. Influenced indirectly via `memory_user_edits` steering instructions. ~24-hour lag for updates. |
 | **Layer 2** | Our supplementary memory system. Markdown files at `C:\franl\.claude-agent-memory\`. Under our full control. Updates are immediate. |
-| **MCP bridge** | The Go binary that serves as an MCP server, providing `spawn_agent`, `check_agent`, `run_command`, `safe_write_file`, and `safe_append_file` tools. |
-| **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for reading memory files and all non-memory file operations. |
-| **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file writes (`safe_write_file` and `safe_append_file`). Prevents concurrent conversations from interleaving or overwriting each other's memory updates. |
+| **MCP bridge** | The Go binary that serves as an MCP server, providing `memory_session_start`, `safe_read_file`, `safe_write_file`, `safe_append_file`, `spawn_agent`, `check_agent`, and `run_command` tools. |
+| **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for non-memory file operations. Memory file reads go through the bridge's `safe_read_file` tool instead. |
+| **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file I/O (`safe_read_file`, `safe_write_file`, and `safe_append_file`). Prevents concurrent conversations from interleaving or corrupting memory updates. |
 | **Memory skill** | The .zip file uploaded to Claude Desktop containing SKILL.md — instructions for managing Layer 2 memory. |
+| **Session ID** | A short, bridge-generated identifier (e.g., `ses-7ka2`) that uniquely identifies a conversation's memory session. Passed as a parameter to all memory tools so the bridge can track which files each conversation has read and detect stale-read races. |
+| **Session tracker** | An in-memory map in the bridge (`session_id → file_path → last_seen_modtime`) that records when each session last read each memory file. Used by `safe_write_file` and `safe_append_file` to detect concurrent read-modify-write races. |
+| **Branch (memory)** | A copy of a memory file created when a concurrent read-modify-write race is detected. Named with a timestamp and random suffix (e.g., `core.branch-20260313T1423-a1b2.md`). The original file is left unmodified; the racing conversation's changes go to the branch file. |
+| **Merge (memory)** | A semantic merge process that reconciles a branched memory file with its base file. Performed by a sub-agent during off-hours. The merger reads both versions, understands the meaning of each set of changes, and produces a unified result. |
 | **Sync window** | The 25-second window during which `spawn_agent` and `run_command` wait for their subprocess to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. Shared implementation via the async executor (see [Section 3.10](#310-async-executor)). |
 | **Block** | An individual markdown file in the `blocks/` directory. Each block covers a project, topic, or time period. |
 | **Block reference** | A row in `index.md` mapping a block filename to its summary and last-updated date. |
@@ -110,21 +114,22 @@ These principles are inherited from the proposal and govern all design decisions
 │  │  (our Go binary)     │  │  (@modelcontextprotocol/     │      │
 │  │                      │  │   server-filesystem)         │      │
 │  │  Tools:              │  │                              │      │
-│  │  • spawn_agent       │  │  Tools:                      │      │
-│  │  • check_agent       │  │  • read_file                 │      │
-│  │  • run_command       │  │  • write_file                │      │
+│  │  • memory_session_   │  │  Tools:                      │      │
+│  │      start           │  │  • read_file                 │      │
+│  │  • safe_read_file    │  │  • write_file                │      │
 │  │  • safe_write_file   │  │  • edit_file                 │      │
 │  │  • safe_append_file  │  │  • create_directory          │      │
-│  │       │              │  │  • list_directory            │      │
-│  │       │ subprocess   │  │  • search_files              │      │
-│  │       ▼              │  │  • search_files              │      │
-│  │  ┌────────────┐      │  │  • ... (11 tools total)      │      │
-│  │  │ claude -p  │      │  │                              │      │
-│  │  │ (sub-agent)│      │  │  Allowed dirs:               │      │
-│  │  └────────────┘      │  │  • C:\franl                  │      │
-│  └──────────────────────┘  │  • C:\temp                   │      │
-│                            │  • C:\apps                   │      │
-│                            └──────────────────────────────┘      │
+│  │  • spawn_agent       │  │  • list_directory            │      │
+│  │  • check_agent       │  │  • search_files              │      │
+│  │  • run_command       │  │  • ... (11 tools total)      │      │
+│  │       │              │  │                              │      │
+│  │       │ subprocess   │  │  Allowed dirs:               │      │
+│  │       ▼              │  │  • C:\franl                  │      │
+│  │  ┌────────────┐      │  │  • C:\temp                   │      │
+│  │  │ claude -p  │      │  │  • C:\apps                   │      │
+│  │  │ (sub-agent)│      │  │                              │      │
+│  │  └────────────┘      │  │                              │      │
+│  └──────────────────────┘  └──────────────────────────────┘      │
 │                                                                  │
 │  Local filesystem: C:\franl\.claude-agent-memory\                │
 │  ├── core.md                                                     │
@@ -139,23 +144,37 @@ These principles are inherited from the proposal and govern all design decisions
 
 ### 2.2 Data Flow
 
-**Memory read (session start):**
+**Session initialization:**
 ```
 Claude LLM
-  → calls Filesystem:read_file("C:\franl\.claude-agent-memory\core.md")
-  → calls Filesystem:read_file("C:\franl\.claude-agent-memory\index.md")
-  → (optionally) calls Filesystem:read_file for relevant blocks
+  → calls Bridge:memory_session_start()
+  → Bridge generates a unique session ID (e.g., "ses-7ka2")
+  → Bridge registers the session in its internal tracker
+  → Returns session_id to Claude (used in all subsequent memory tool calls)
+```
+
+**Memory read (session start and during session):**
+```
+Claude LLM
+  → calls Bridge:safe_read_file(path, session_id)
+  → Bridge acquires write mutex, reads file, records ModTime for this session
+  → If branched versions exist, their content is included (annotated)
+  → Returns file content (+ branch content if any)
+  Claude should NEVER use Filesystem:read_file for memory files — that
+  bypasses session tracking and prevents race detection.
 ```
 
 **Memory write (during session):**
 ```
 Claude LLM
-  → calls Bridge:safe_write_file (for core.md, index.md, or block updates)
-  → calls Bridge:safe_append_file (for episodic log entries)
-  Both tools acquire the bridge's write mutex before writing,
-  preventing concurrent conversations from interleaving writes.
+  → calls Bridge:safe_write_file(path, content, session_id)
+  → Bridge acquires write mutex
+  → Bridge compares file's current ModTime against this session's last-seen ModTime
+  → If ModTime matches (no race): atomic write replaces the file
+  → If ModTime differs (race detected): writes to a branch file instead
+  → Returns success (with branch_created flag if applicable)
   Claude should NEVER use Filesystem:write_file or Filesystem:edit_file
-  for memory files — those bypass the mutex.
+  for memory files — those bypass the mutex and session tracking.
 ```
 
 **Sub-agent invocation:**
@@ -185,11 +204,11 @@ Claude LLM
 
 The bridge is deliberately minimal. It does **not** provide:
 
-- Basic filesystem tools (read, list, search) — handled by the Filesystem extension. The bridge provides `safe_write_file` and `safe_append_file` specifically for memory files; all non-memory file writes use the Filesystem extension.
+- Non-memory filesystem tools (list, search) — handled by the Filesystem extension. The bridge provides `safe_read_file`, `safe_write_file`, and `safe_append_file` specifically for memory files; all non-memory file operations use the Filesystem extension.
 - Network request tools (http_get, http_post) — deferred. Sub-agents or `run_command` (e.g., `run_command("curl ...")`) can perform network operations. Dedicated network tools can be added to the bridge later if needed.
 - Memory-aware tools (update_memory_block, memory_search) — deferred to future enhancement. See [Chapter 9, Future Enhancements](stateful-agent-design-chapter9.md).
 
-This keeps the initial bridge small: five tool handlers, a write mutex, the async executor, and the job lifecycle manager.
+This keeps the initial bridge focused: seven tool handlers, a write mutex, a session tracker, branching logic, the async executor, and the job lifecycle manager.
 
 ---
 
