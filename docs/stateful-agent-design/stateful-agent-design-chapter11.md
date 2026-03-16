@@ -105,3 +105,7 @@
       The `RELAY_HMAC_SECRET` environment variable value is stored in the user's Claude.ai personal instructions (the `<userPreferences>` block), alongside the existing `GITHUB_TOKEN` and Bluesky credentials. These instructions are shared by both Claude Desktop and Claude.ai, so both environments have access to the secret.
 
       See [Chapter 9, Future Enhancements, Section 9.5.10](stateful-agent-design-chapter9.md#9510-relay-script-inventory) for the script specifications, [Section 9.5.11](stateful-agent-design-chapter9.md#1511-github-skill-relay-transport-additions) for the github skill SKILL.md additions, and [Section 9.5.12](stateful-agent-design-chapter9.md#9512-ai-messaging-skill) for the ai-messaging skill's complete SKILL.md.
+
+13. **Memory search tool** — Do we need a tool to search memory files?  The Filesystem's search tool cannot annotate branched memory files the way `safe_read_file` does.
+
+    - *Resolution:* TBD
