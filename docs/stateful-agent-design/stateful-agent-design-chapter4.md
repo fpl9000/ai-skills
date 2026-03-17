@@ -32,7 +32,7 @@ The full memory system has two layers with distinct characteristics:
 | **Storage** | Anthropic's cloud (opaque) | Local markdown files |
 | **Capacity** | ~500–2,000 tokens (Anthropic-managed) | Unbounded (loaded on demand) |
 | **Loaded when** | Every turn (automatic) | At session start + on demand |
-| **Update mechanism** | Indirect via `memory_user_edits` steering instructions | Direct via Filesystem:write_file, edit_file, Bridge:append_file |
+| **Update mechanism** | Indirect via `memory_user_edits` steering instructions | Direct via Bridge:safe_write_file, safe_append_file |
 | **Update lag** | ~24 hours (nightly regeneration) | Immediate |
 | **Content** | Identity, preferences, high-level project list | Deep project context, episodic recall, decisions, technical notes |
 | **Editable by user** | Via Claude.ai Settings > Memory | Via any text editor |
@@ -308,3 +308,4 @@ When the bridge detects a concurrent read-modify-write race on a memory file, it
 5. Later, a merge sub-agent reads both versions. It produces a merged `core.md` that marks Project X as "completed" (from A), includes Project Y (from A), and includes the new preference (from B). The branch file is deleted.
 
 See [Chapter 3, Section 3.12](stateful-agent-design-chapter3.md#312-branching) for the branch file naming convention, detection mechanism, and merge process details.
+
