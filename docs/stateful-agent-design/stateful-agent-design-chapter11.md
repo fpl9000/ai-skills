@@ -108,12 +108,23 @@
 
 13. **Memory search tool** — Do we need a tool to search memory files?  The Filesystem extension's search tool does not respect the Go mutex and cannot annotate branched memory files the way `safe_read_file` does.
 
-    - *Resolution:* TBD
+    - *Resolution:* Deferred to v1.1. The mutex bypass is a non-issue for search specifically: the mutex exists to make the `Stat()` + `Read()` pair atomic for session-tracking purposes, but a search is a read-only informational query that doesn't establish a baseline for a future write. If Claude finds relevant content via search, it will then call `safe_read_file` on the specific file, which goes through the mutex and registers the read in the session tracker. The search result is just a pointer to the right file; the session-tracked read happens afterward.
+
+      The branch-awareness gap is more substantive — `Filesystem:search_files` would return hits on branch files (e.g., `core.branch-20260313T1423-a1b2.md`) without semantic context about what a branch file is. The v1 workaround is acceptable: Claude can use `Filesystem:search_files` on the memory directory as a best-effort fallback, and the skill instructions should include guidance such as "if search returns a hit on a `.branch-*` file, call `safe_read_file` on the corresponding base file instead." This covers the branch-awareness gap without adding a new bridge tool.
+
+      When a `safe_search_file` tool is implemented in v1.1, it should: (a) accept a search string and `session_id`; (b) search across all base files *and* their branches in the memory directory; (c) return results annotated with whether each hit is from a base file or a branch; and (d) *not* register reads in the session tracker (search results are informational, not baselines for writes — Claude will call `safe_read_file` on specific files afterward). It should acquire the mutex only briefly to get a consistent snapshot of the file list, then release it before performing text matching (which could be slow on many files and should not block writes).
 
 14. **Memory edit tool** — Some memory blocks are written in their entirety using `safe_write_file`. Is there value in having a `safe_edit_file` that enables sub-string replacement within a memory file?
 
-    - *Resolution:* TBD
+    - *Resolution:* No `safe_edit_file` for v1. The rationale is that surgical edits interact poorly with the branching system and provide insufficient benefit given expected file sizes.
+
+      The core problem is branching semantics. When `safe_write_file` detects a race, it redirects the complete file content to a branch — the branch is a self-contained, independently readable document. If `safe_edit_file` detected a race, it would face an awkward choice: (a) apply the edit to the *stale* version Claude has in context and write the full result to the branch (silently rebasing onto an outdated snapshot), or (b) store the edit operation itself in a structured format and have the merge sub-agent apply it (adding complexity to the merge process). Neither is clean.
+
+      There is also a correctness issue. Claude formulates an edit by identifying a substring based on content it read earlier via `safe_read_file`. If another conversation has modified the file since that read, the substring might no longer exist, or might exist in a different context. `safe_write_file` sidesteps this entirely: Claude produces a complete, coherent document representing its intended state, and the bridge either accepts it (no race) or branches it (race). The merge sub-agent then reconciles two complete documents, which is a well-defined semantic task.
+
+      The one concern is output token cost for large blocks. If a block grows to 5,000 tokens and Claude only needs to change one paragraph, full rewrite costs ~5,000 output tokens. But this is self-correcting: the design already prescribes size budgets for files (`core.md` at 500–1,000 tokens, blocks at manageable sizes), and blocks that grow too large should be split. If that discipline is maintained, full-file replacement remains cheap. This can be revisited if memory files grow larger than anticipated in practice.
 
 15. **Error in section 4.1** — Section 4.1, "Two-layer Memory Model", has an error in the "Update mechanism" row of the table. That row shows this text in the "Layer 2 (Supplementary)" column: "Direct via Filesystem:write_file, edit_file, Bridge:append_file", but the Filesystem extension's tools are not used to access Layer 2 memory files.
 
-    - *Resolution:* TBD
+    - *Resolution:* Fixed. The text in section 4.1's "Update mechanism" row for "Layer 2 (Supplementary)" has been corrected from "Direct via Filesystem:write_file, edit_file, Bridge:append_file" to "Direct via Bridge:safe_write_file, safe_append_file". The original text was written before the session-tracked branching system (OQ#1 v2 resolution), which moved all memory file operations to the bridge's safe tools. The Filesystem extension tools (`write_file`, `edit_file`) are not used for memory files because they bypass the write mutex and session tracking. The reference to `edit_file` has also been removed, consistent with the OQ#14 resolution (no `safe_edit_file` for v1).
+
