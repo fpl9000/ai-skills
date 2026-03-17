@@ -28,7 +28,7 @@ stateful-memory.zip
 └── SKILL.md           # Instructions for Layer 2 memory lifecycle
 ```
 
-**Why no scripts?** In the B1 architecture, all memory operations are performed via MCP tools (Filesystem extension for read/write/edit, bridge for append). No Python or shell scripts are needed. This eliminates dependency management and makes the skill trivially portable.
+**Why no scripts?** All memory read/write operations are performed via the bridge's MCP tools (`safe_read_file`, `safe_write_file`, `safe_append_file`), with `Filesystem:search_files` available as an interim search fallback (see [OQ#13](stateful-agent-design-chapter11.md)). No Python or shell scripts are needed. This eliminates dependency management and makes the skill trivially portable.
 
 ### 5.2 SKILL.md Content
 
@@ -43,8 +43,8 @@ about the user, their projects, and your shared history.
 
 ## CRITICAL: Use the Correct Tools for Memory Operations
 
-ALL memory file operations MUST go through the bridge's memory tools. These tools
-provide session tracking, race detection, and branching to prevent concurrent
+All memory file reads and writes MUST go through the bridge's memory tools. These
+tools provide session tracking, race detection, and branching to prevent concurrent
 conversations from overwriting each other's updates.
 
 1. **Session initialization:** Call `Bridge:memory_session_start` once at the start
@@ -62,8 +62,20 @@ conversations from overwriting each other's updates.
    conversation modified the file since you last read it, your write is automatically
    redirected to a branch file — no data is lost.
 
+4. **Searching memory files:** Use `Filesystem:search_files` on the memory directory.
+   The bridge does not yet have a dedicated search tool (planned for v1.1), so
+   searching via the Filesystem extension is the accepted v1 workaround.
+   **Important:** If a search result hits a `.branch-*` file (e.g.,
+   `core.branch-20260313T1423-a1b2.md`), do NOT read the branch file directly.
+   Instead, call `Bridge:safe_read_file` on the corresponding base file (e.g.,
+   `core.md`), which will return both the base content and all branch content in
+   a properly annotated structure.
+
 NEVER use `Filesystem:read_file`, `Filesystem:write_file`, or `Filesystem:edit_file`
 for memory files — those bypass session tracking, race detection, and branching.
+`Filesystem:search_files` is the one exception, permitted only for search (not for
+reading file content). After finding a file via search, always read it through
+`Bridge:safe_read_file`.
 
 NEVER use cloud VM tools (`bash_tool`, `create_file`, `str_replace`) for persistent data.
 The cloud VM filesystem is ephemeral and resets between sessions.
@@ -120,6 +132,19 @@ When you encounter branches:
 - When the user asks "what do you remember about X?" and X matches a block
 - When you need project context to give an informed answer
 - Always use `Bridge:safe_read_file(path, session_id)` — never `Filesystem:read_file`
+
+### When to Search Memory
+If you need to find content in memory but the index doesn't clearly identify which
+block contains it (e.g., the user asks about a specific term or decision and the
+index summaries are too terse to match):
+
+1. Use `Filesystem:search_files` on the memory directory (`C:\franl\.claude-agent-memory\`)
+2. Review the search results. If any hit is on a `.branch-*` file, note the
+   corresponding base filename (e.g., `core.branch-20260313T1423-a1b2.md` → `core.md`)
+3. Call `Bridge:safe_read_file(path, session_id)` on the base file — this returns
+   both the base content and any branch content in a properly annotated structure
+4. Never read a branch file directly via `Filesystem:read_file` — always go through
+   `safe_read_file` on the base file
 
 ### When to Write Memory
 Write memory updates incrementally as significant information emerges. Do NOT
@@ -184,10 +209,15 @@ If the user says goodbye, thanks you, or the conversation is clearly winding dow
 
 If the user asks "what do you remember about X?":
 1. Check index.md for blocks related to X
-2. Read relevant blocks via `Bridge:safe_read_file(path, session_id)`
-3. If any blocks have branches, consider all versions
-4. Combine with any Layer 1 (built-in) memory you have
-5. Respond naturally, as if recalling from your own knowledge
+2. If the index clearly identifies a relevant block, read it via
+   `Bridge:safe_read_file(path, session_id)`
+3. If the index doesn't clearly match (summaries are too terse), fall back to
+   `Filesystem:search_files` on the memory directory to find which files mention X.
+   If search hits a `.branch-*` file, read the corresponding base file via
+   `safe_read_file` instead.
+4. If any loaded blocks have branches, consider all versions
+5. Combine with any Layer 1 (built-in) memory you have
+6. Respond naturally, as if recalling from your own knowledge
 
 If the user asks to correct or delete a memory:
 1. Read the file via `Bridge:safe_read_file`, make the correction, and write via
@@ -283,3 +313,4 @@ spawn_agent(
 **Step 3:** The primary agent applies fixes:
 - **Layer 1 fixes:** Add steering edits via `memory_user_edits` tool. These are incorporated by Anthropic's nightly regeneration (~24-hour lag).
 - **Layer 2 fixes:** Edit files directly via `Bridge:safe_write_file` (immediate effect).
+
