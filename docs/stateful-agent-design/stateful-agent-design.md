@@ -255,8 +255,8 @@ See [Stateful Agent System: Detailed Design – Chapter 9](stateful-agent-design
 
 ## 10. References
 
-- **Proposal document:** [stateful-agent-proposal.md](stateful-agent-proposal.md) — Architecture evaluation, 27 open question resolutions, rationale for all major decisions.
-- **Previous skill design (superseded):** [stateful-agent-skill-design.md](stateful-agent-skill-design.md) — Earlier design for a standalone skill without MCP bridge. Concepts carried forward; implementation approach replaced.
+- **Proposal document:** [stateful-agent-proposal.md](../../docs/stateful-agent-proposal.md) — Architecture evaluation, 27 open question resolutions, rationale for all major decisions.
+- **Previous skill design (superseded):** [agent-memory-design.md](../../docs/agent-memory-design.md) — Earlier design for a standalone skill without MCP bridge. Concepts carried forward; implementation approach replaced.
 - **Tim Kellogg's Strix architecture:** [Memory Architecture for a Synthetic Being](https://timkellogg.me/blog/2025/12/30/memory-arch) — Three-tier hierarchical memory model that inspired our core/index/blocks structure.
 - **claude_life_assistant:** [GitHub](https://github.com/lout33/claude_life_assistant) — Luis Fernando's minimal stateful agent demonstrating the core concept.
 - **mark3labs/mcp-go:** [GitHub](https://github.com/mark3labs/mcp-go) — Go SDK for the Model Context Protocol.
