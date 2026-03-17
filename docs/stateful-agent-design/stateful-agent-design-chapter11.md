@@ -109,3 +109,11 @@
 13. **Memory search tool** — Do we need a tool to search memory files?  The Filesystem's search tool cannot annotate branched memory files the way `safe_read_file` does.
 
     - *Resolution:* TBD
+
+14. **Memory edit tool** — Some memory blocks are written in their entirety using `safe_write_file`. Is there value in having a `safe_edit_file` that enables sub-string replacement within a memory file?
+
+    - *Resolution:* TBD
+
+15. **Error in section 4.1** — Section 4.1, "Two-layer Memory Model", has an error in the "Update mechanism" row of the table. That row shows this text in the "Layer 2 (Supplementary)" column: "Direct via Filesystem:write_file, edit_file, Bridge:append_file", but the Filesystem extension's tools are not used to access Layer 2 memory files.
+
+    - *Resolution:* TBD
