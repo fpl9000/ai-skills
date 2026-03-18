@@ -142,11 +142,11 @@ If Dispatch does not gain Windows support and MCP bridge access within a reasona
 │  Claude.ai       │       │   GitHub     │       │  Local Machine       │
 │  (phone/web)     │       │   Private    │       │  (Windows 11)        │
 │                  │  PUT  │   Repo       │  GET  │                      │
-│  GitHub skill ───────────▶ requests/   ─────────▶  MCP Bridge          │
-│                  │       │              │       │    │                  │
-│                  │  GET  │              │  PUT  │    ├─ memory_query    │
-│  GitHub skill ◀─────────── responses/ ◀──────────   ├─ shell_command   │
-│                  │       │              │       │    └─ claude_prompt   │
+│  GitHub skill ───────────▶ requests/   ─────────▶  MCP Bridge         │
+│                  │       │              │       │    │                 │
+│                  │  GET  │              │  PUT  │    ├─ memory_query   │
+│  GitHub skill ◀─────────── responses/ ◀──────────   ├─ shell_command  │
+│                  │       │              │       │    └─ claude_prompt  │
 └──────────────────┘       └──────────────┘       └──────────────────────┘
 ```
 
