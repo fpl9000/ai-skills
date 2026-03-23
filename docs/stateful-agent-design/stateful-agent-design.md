@@ -3,7 +3,7 @@
 **Version:** 1.0 (Draft)<br/>
 **Date:** February - March 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
-**Companion document:** [Stateful Agent Proposal](stateful-agent-proposal.md) — architecture evaluation, rationale, and open question resolutions.
+**Companion document:** [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
 
 ## Contents
 

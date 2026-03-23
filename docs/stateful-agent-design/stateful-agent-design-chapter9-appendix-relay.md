@@ -3,7 +3,6 @@
 **Version:** 1.0 (Draft)<br/>
 **Date:** February - March 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
-
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
 - [Chapter 9: Future Enhancements](stateful-agent-design-chapter9.md) — parent chapter; Section 9.5 references this appendix.
