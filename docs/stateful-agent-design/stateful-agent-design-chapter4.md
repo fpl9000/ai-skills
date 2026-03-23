@@ -291,7 +291,8 @@ This decision is fundamental and is not revisited in the design. The rationale:
 
 ### 4.10 Branching and Merge
 
-When the bridge detects a concurrent read-modify-write race on a memory file, it writes the racing conversation's changes to a "branch" file instead of overwriting the base file. This preserves data from all concurrent conversations.
+When the bridge detects a concurrent read-modify-write race on a memory file, it writes the racing conversation's changes to a "branch" file instead of overwriting the base file. This preserves data from all concurrent conversations. See [Chapter 3, Section 3.12](stateful-agent-design-chapter3.md#312-branching) for the branch file naming convention, detection mechanism, and merge process details.
+
 
 **Branch files are transient.** They exist only until a merge process reconciles them with the base file. They are not referenced by `index.md` (which always uses canonical filenames) and are not part of the permanent memory structure.
 
@@ -306,6 +307,3 @@ When the bridge detects a concurrent read-modify-write race on a memory file, it
 3. Conversation A updates `core.md` to mark Project X as "completed" and adds Project Y.
 4. Conversation B attempts to update `core.md` to add a new preference. The bridge detects the race (file modified since B's read) and writes B's version to `core.branch-20260313T1423-a1b2.md`.
 5. Later, a merge sub-agent reads both versions. It produces a merged `core.md` that marks Project X as "completed" (from A), includes Project Y (from A), and includes the new preference (from B). The branch file is deleted.
-
-See [Chapter 3, Section 3.12](stateful-agent-design-chapter3.md#312-branching) for the branch file naming convention, detection mechanism, and merge process details.
-
