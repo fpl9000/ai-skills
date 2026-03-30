@@ -51,7 +51,7 @@ Add the bridge server entry:
 {
   "mcpServers": {
     "mcp-bridge": {
-      "command": "C:\\franl\\git\\mcp-bridge\\mcp-bridge.exe",
+      "command": "C:\\franl\\.claude-agent-memory\\bin\\mcp-bridge\\mcp-bridge.exe",
       "args": ["--config", "C:\\franl\\.claude-agent-memory\\bridge-config.yaml"]
     }
   }
