@@ -9,7 +9,7 @@
 
 ## Contents
 
-- [7. Deployment](#7-deployment)
+- [7. Build and Deployment](#7-build-and-deployment)
   - [7.1 Build the Bridge](#71-build-the-bridge)
   - [7.2 Claude Desktop Configuration](#72-claude-desktop-configuration)
   - [7.3 Filesystem Extension Configuration](#73-filesystem-extension-configuration)
@@ -18,7 +18,7 @@
   - [7.6 Skill Installation](#76-skill-installation)
   - [7.7 CLAUDE.md Update](#77-claudemd-update)
 
-## 7. Deployment
+## 7. Build and Deployment
 
 ### 7.1 Build the Bridge
 

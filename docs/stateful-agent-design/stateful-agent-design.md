@@ -45,7 +45,7 @@ The stateful agent system consists of three components that together give Claude
 
 | Component | Type | Location | Purpose |
 |-----------|------|----------|---------|
-| MCP Bridge Server<br/>(aka "the bridge") | Go binary | `C:\franl\git\mcp-bridge\mcp-bridge.exe` | Sub-agent spawning, mutex-protected memory writes |
+| MCP Bridge Server<br/>(aka "the bridge") | Go binary | `C:\franl\.claude-agent-memory\bin\mcp-bridge.exe` | Sub-agent spawning, mutex-protected memory reads/writes. Source code located in `C:\franl\git\mcp-bridge\` |
 | Anthropic Filesystem Extension | MCP server | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) |
 | Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage |
 | Memory skill | .zip file | Uploaded via Claude Desktop Settings | Instructions for memory lifecycle |
@@ -235,7 +235,7 @@ See [Stateful Agent System: Detailed Design – Chapter 6](stateful-agent-design
 
 ---
 
-## 7. Deployment
+## 7. Build and Deployment
 
 See [Stateful Agent System: Detailed Design – Chapter 7](stateful-agent-design-chapter7.md).
 
