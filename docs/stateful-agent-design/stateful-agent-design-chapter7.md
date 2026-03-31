@@ -37,6 +37,13 @@ go build -o mcp-bridge.exe .
 
 No CGO, no external dependencies. The binary is self-contained.
 
+Install the bridge with these Bash commands:
+
+```bash
+$ mkdir -p ~/.claude-agent-memory/bin
+$ cp mcp-bridge.exe ~/.claude-agent-memory/bin
+```
+
 ### 7.2 Claude Desktop Configuration
 
 Edit Claude Desktop's MCP configuration file:
