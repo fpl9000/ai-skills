@@ -56,8 +56,8 @@ mcp-bridge/
 ```
 
 **Dependencies:**
-- `github.com/mark3labs/mcp-go` — MCP SDK for Go (stdio transport, tool registration)
-- Go standard library — everything else (os/exec, sync, time, encoding/json, log, filepath)
+- `github.com/mark3labs/mcp-go` — MCP SDK for Go (see [Chapter 12, Appendix: mark3labs/mcp-go SDK Reference](stateful-agent-design-chapter12.md#12-appendix-mark3labsmcp-go-sdk-reference) for details).
+- Go standard library — everything else (os/exec, sync, time, encoding/json, log, filepath).
 
 No CGO. No external C libraries. Pure Go for single-binary compilation.
 
