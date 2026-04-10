@@ -35,7 +35,7 @@
 
 The stateful agent system consists of three components that together give Claude persistent memory, local machine access, and task delegation capabilities:
 
-1. **MCP Bridge Server** — A Go binary that runs locally, providing sub-agent spawning and mutex-protected memory file writes to the Claude Desktop App via the MCP protocol over stdio.
+1. **MCP Bridge Server** — A Go binary that runs locally, providing sub-agent spawning and mutex-protected memory file writes to be used by the Claude Desktop App via the MCP protocol over stdio.
 
 2. **Memory System (Layer 2)** — A directory of markdown files on the local filesystem that stores deep project context, episodic recall, decision history, and technical notes. This supplements Anthropic's built-in memory (Layer 1), which is limited to ~500–2,000 tokens.
 
