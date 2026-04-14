@@ -30,6 +30,9 @@
 
 ## 3. MCP Bridge Server
 
+The MCP bridge server is a Go binary that runs locally, providing Bash access, sub-agent spawning,
+and memory access to be used by the Claude Desktop App via the MCP protocol.
+
 ### 3.1 Go Module Structure
 
 ```
