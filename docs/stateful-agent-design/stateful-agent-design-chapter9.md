@@ -19,6 +19,9 @@
     - [9.5.2 GitHub Relay (Fallback)](#952-github-relay-fallback)
     - [9.5.3 Architecture B2 as Long-Term Solution](#953-architecture-b2-as-long-term-solution)
   - [9.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#16-proposed-solution-to-concurrent-read-modify-write-race-condition)
+  - [9.7 Importance Scoring on Blocks and Episodic Entries](#97-importance-scoring-on-blocks-and-episodic-entries)
+  - [9.8 Reflection Synthesis for Episodic Logs](#98-reflection-synthesis-for-episodic-logs)
+  - [9.9 A `reflections.md` Block Type](#99-a-reflectionsmd-block-type)
 
 ## 9. Future Enhancements
 
@@ -66,7 +69,7 @@ Also investigate semantic memory storage and search technologies such as:
 **Candidate tools:**
 
 | Tool | Purpose |
-|------|---------|
+|------|---------| 
 | `update_memory_block(block, content)` | Write block content, auto-update `index.md` summary/date, validate YAML frontmatter |
 | `create_memory_block(name, content)` | Create block with validated name, add `index.md` row, generate YAML frontmatter |
 | `append_episodic_log(entry)` | Append entry to current month's episodic file, create file if needed, update `index.md` |
@@ -261,3 +264,156 @@ Disadvantages of this system include:
    need to be passed as a parameter to the tools — or can it be inferred by the tools somehow?
 
 3. What is the exact file naming convention for branched files?
+
+---
+
+### 9.7 Importance Scoring on Blocks and Episodic Entries
+
+**Inspiration:** The [HermitClaw](https://github.com/brendanhogan/hermitclaw) agent, which implements the memory architecture from [Park et al., 2023](https://arxiv.org/abs/2304.03442), assigns every memory object an importance score (1–10, LLM-evaluated) at write time. This score is then combined with recency and semantic relevance at retrieval time to rank memories. Computing importance eagerly at write time is cheap; recomputing it at every retrieval would be expensive.
+
+**Motivation:** Claude currently makes block-loading decisions by matching the current conversation's topic against the one-line summaries in `index.md`. This handles *relevance* well, but *importance* is invisible — two blocks might both match the current topic, while one contains a critical architectural decision and the other contains a routine note. Without importance scores, Claude has no principled way to prioritize.
+
+**Trigger:** When block count grows to the point where `index.md` topic-matching alone produces ambiguous or low-confidence loading decisions.
+
+**Design:** Add an `importance` field (integer, 1–10) to the YAML frontmatter of all content blocks. The memory skill's write instructions include a single additional step: before closing a block write, assign an importance score using this scale:
+
+| Score | Meaning |
+|-------|---------|
+| 1–3 | Routine notes, transient context, easily reconstructed information |
+| 4–6 | Useful project context, preferences, resolved questions |
+| 7–8 | Significant decisions, design constraints, hard-won knowledge |
+| 9–10 | Foundational decisions that affect the entire system; rarely changes |
+
+```yaml
+---
+created: 2026-02-15
+updated: 2026-05-02
+importance: 8          # 1=routine notes, 10=foundational/system-wide decision
+tags: [project, go, mcp]
+---
+```
+
+For episodic log entries, importance is recorded as a parenthetical annotation on the section heading, keeping the cost to a single added token cluster per entry:
+
+```markdown
+## 2026-05-02 — Branching race condition resolved (importance: 9)
+Merged PR #27. HMAC authentication protocol for relay finalized. ...
+```
+
+The `index.md` table may optionally surface an `Importance` column to make the signal available at the index scan stage, before any block is loaded:
+
+```markdown
+| Block | Summary | Importance | Updated |
+|-------|---------|------------|---------|
+| project-mcp-bridge.md | MCP bridge server: Go implementation, tool design | 7 | 2026-05-01 |
+| decisions.md | Cross-project architectural decisions and rationale | 9 | 2026-05-02 |
+```
+
+**Implementation cost:** Low. No bridge changes required. The change is purely additive to the file format and skill instructions. Existing blocks can be back-filled with importance scores during any routine memory maintenance session.
+
+**Relationship to Section 9.1 (FTS5 Search):** If a search index is later added, the `importance` field becomes a first-class filter and sort key in search queries — e.g., `memory_search("race condition", min_importance=7)`.
+
+---
+
+### 9.8 Reflection Synthesis for Episodic Logs
+
+**Inspiration:** HermitClaw's reflection mechanism (inherited from Park et al., 2023) periodically synthesizes raw memory observations into higher-level insight statements — "reflections" — which are stored back into the memory stream as first-class objects. Over time, reflections accumulate at increasing levels of abstraction, capturing patterns that no individual memory entry makes explicit.
+
+**Motivation:** Episodic log files (`episodic-YYYY-MM.md`) accumulate entries indefinitely. An aging month's file is unlikely to be loaded in a typical session, yet it may contain *implicit insights* — patterns about effective approaches, recurring mistakes and corrections, stable preferences confirmed by experience — that are never extracted and promoted to where they'd actually be useful. The episodic log faithfully records *what happened*; reflection synthesis extracts *what was learned*.
+
+**Trigger:** When a month's episodic file is 3+ months old and therefore unlikely to be loaded in normal sessions. This can be checked opportunistically at the start of off-hours maintenance cycles.
+
+**Process:**
+
+1. A maintenance sub-agent reads the aging episodic file in full.
+2. It identifies any content that has become a *persistent fact* — likely to remain relevant beyond that specific month. Categories:
+   - Behavioral preferences confirmed by experience (→ `core.md`)
+   - Project decisions whose rationale should survive the project context (→ `decisions.md`)
+   - Patterns or lessons that apply across conversations (→ `reflections.md`, see Section 9.9)
+   - Significant technical discoveries relevant to an active project block (→ that project block)
+3. The identified content is promoted to its target location using the normal block-write path (with importance scoring per Section 9.7).
+4. The episodic file is condensed in place: prose entries are replaced by one-sentence structural summaries, preserving the date/title scaffold as an audit trail while dramatically reducing token cost if the file is ever loaded again.
+
+**Example — before condensation:**
+
+```markdown
+## 2026-02-19 — Proposal session 9: Hybrid sync/async execution
+Discovered Claude Desktop's 60-second MCP timeout. Redesigned spawn_agent with hybrid
+sync/async model. Resolved Open Questions #18 (system prompt), #4 (layer reconciliation),
+#10 (concurrent writes), #9 (layer boundary), #19 (CLAUDE.md optimization). The 25-second
+sync window was chosen to stay under Claude Desktop's ~30-second reliability threshold.
+```
+
+**After condensation:**
+
+```markdown
+## 2026-02-19 — Proposal session 9: Hybrid sync/async execution *(condensed)*
+Resolved OQs #4, #9, #10, #18, #19. Key outcome: hybrid sync/async spawn_agent design.
+See decisions.md for rationale.
+```
+
+**Promoted to `decisions.md`:**
+
+```markdown
+## 2026-02-19 — Hybrid sync/async execution model (importance: 9)
+spawn_agent uses a 25-second sync window chosen to stay under Claude Desktop's ~30-second
+reliability threshold. Tasks completing within the window return results directly; longer
+tasks return a job_id for async polling. Rationale: simpler than progress tokens, no
+protocol extensions needed, enables parallel sub-agents as natural extension.
+```
+
+**Implementation cost:** Medium. Requires a maintenance sub-agent capable of reading an episodic file, classifying content, writing to multiple target files, and condensing the source file — all in a single pass. The bridge's existing `safe_write_file` and `safe_append_file` tools are sufficient; no new bridge tools are needed. The primary cost is authoring the sub-agent prompt and skill instructions carefully enough that the classification step is reliable.
+
+**Relationship to Section 9.6 (Race Condition):** The condensation write to the episodic file is a full rewrite (`safe_write_file`), which means it is subject to the branching race detection mechanism. Since maintenance runs are typically off-hours with no concurrent conversations, this is unlikely to be a problem in practice.
+
+---
+
+### 9.9 A `reflections.md` Block Type
+
+**Inspiration:** HermitClaw's depth-1 and depth-2 reflections capture *meta-level* insights about how the agent operates — not facts about specific projects, but patterns in how it thinks, what approaches consistently succeed, and what failure modes recur. These reflections are distinct from decisions (which are project-scoped), references (which are domain knowledge), and episodic logs (which are chronological records). They form a separate category: *learned operational patterns*.
+
+**Motivation:** The current block taxonomy — `project-*.md`, `reference-*.md`, `episodic-YYYY-MM.md`, `decisions.md` — covers what work was done and what was decided, but has no natural home for meta-level patterns. Examples of content that belongs in this category but currently has no clear destination:
+
+- *"When a session ends mid-task on a Go project, the next session works best if it reads the relevant project block before any other context — resuming without it consistently causes repeated groundwork."*
+- *"Fran's approach to ambiguous architectural questions reliably starts with the minimal-viable option, not the optimal one. Proposals that lead with the ideal design tend to stall."*
+- *"Reflection synthesis passes (Section 9.8) should not be triggered mid-session — the token cost of reading a full episodic file competes with the active task."*
+
+**Design:** Add a single `reflections.md` block in the `blocks/` directory. Unlike other blocks, it is not created directly during conversations — it is populated exclusively by reflection synthesis passes (Section 9.8) and periodic maintenance. The block uses the standard YAML frontmatter format with a high default importance score (since operational patterns are broadly applicable), organized by theme:
+
+```markdown
+---
+created: 2026-05-01
+updated: 2026-05-15
+importance: 8
+tags: [reflections, meta, operational]
+---
+
+# Operational Reflections
+
+## Session Continuity
+- Starting a session that resumes a Go project without first reading the project block
+  consistently causes repeated groundwork. Always load the relevant project block before
+  responding on first turn. *(derived: 2026-05 from episodic-2026-02, episodic-2026-03)*
+
+## Architectural Approach
+- Fran's default problem-solving mode leads with the minimal-viable option before the
+  optimal one. Proposals structured the other way tend to stall at the review stage.
+  *(derived: 2026-05 from episodic-2026-02, episodic-2026-04)*
+
+## Maintenance Scheduling
+- Reflection synthesis passes should not run mid-session; the full episodic file read
+  competes with the active task's context budget. Schedule for off-hours only.
+  *(derived: 2026-05)*
+```
+
+The `*(derived: ...)` annotation records the source episodic files from which the reflection was extracted, providing an audit trail analogous to HermitClaw's `references` field on reflection memory objects.
+
+**`index.md` entry:**
+
+```markdown
+| reflections.md | Learned operational patterns derived from episodic synthesis | 8 | 2026-05-15 |
+```
+
+**Loading behavior:** `reflections.md` should be loaded opportunistically — when the session involves meta-level questions about how to work effectively, when beginning a new project phase, or when the skill detects that `core.md` does not already address the relevant pattern. It should *not* be loaded by default on every session start, as its content is already incorporated into `core.md` for the most stable patterns.
+
+**Implementation cost:** Low, contingent on Section 9.8 being implemented first. The block format requires no new bridge tooling. The main investment is the synthesis prompt that correctly identifies meta-level patterns versus project-specific decisions during the episodic condensation pass.
