@@ -671,7 +671,7 @@ func HandleSafeWriteFile(params SafeWriteFileParams) SafeWriteFileResult:
         currentModTime = os.Stat(absPath).ModTime()
         lastSeenModTime = sessionTracker.GetLastRead(params.SessionID, absPath)
 
-        if lastSeenModTime != nil && currentModTime.After(*lastSeenModTime):
+        if lastSeenModTime == nil || currentModTime.After(*lastSeenModTime):
             // Race detected: the file was modified by another conversation
             // since this session last read it. Write to a branch file instead
             // of overwriting the other conversation's changes.
@@ -778,7 +778,7 @@ func HandleSafeAppendFile(params SafeAppendFileParams) SafeAppendFileResult:
         currentModTime = os.Stat(absPath).ModTime()
         lastSeenModTime = sessionTracker.GetLastRead(params.SessionID, absPath)
 
-        if lastSeenModTime != nil && currentModTime.After(*lastSeenModTime):
+        if lastSeenModTime == nil || currentModTime.After(*lastSeenModTime):
             // Race detected. For append operations, the branch file is created
             // by copying the current base file content, then appending to the copy.
             // This preserves the full context in the branch.
@@ -889,7 +889,9 @@ Branching is the mechanism that resolves the concurrent read-modify-write race c
 
 **When branching occurs:** A branch is created when ALL of the following conditions are true: (a) `config.Branching.Enabled` is `true`; (b) the target file already exists on disk; (c) the session tracker has a recorded `ModTime` for this file in the current session (meaning `safe_read_file` was previously called); (d) the file's current `ModTime` is newer than the session's recorded `ModTime` (meaning another conversation wrote to the file after this session last read it).
 
-**When branching does NOT occur:** If the session has never read the file (e.g., creating a brand-new block), no baseline exists and no race is possible — the write proceeds normally. If branching is disabled in config, all writes use last-writer-wins semantics (the v1 behavior). If the `ModTime` matches, no race has occurred and the write proceeds normally.
+**When branching does NOT occur:** If the target file does not exist at write time (true first-ever creation by anyone), no baseline exists and no race is possible — the write proceeds normally. If branching is disabled in config, all writes use last-writer-wins semantics (the v1 behavior). If the `ModTime` matches the session's last-seen value, no race has occurred and the write proceeds normally.
+
+**When the file exists but this session has never read it**, that is treated as a race: another conversation created or modified the file since this session began, and this session's write is redirected to a branch. This covers the "simultaneous first write" scenario where two conversations independently decide to create the same new block file — the second writer always branches rather than silently overwriting the first.
 
 **Branch file naming convention:**
 
