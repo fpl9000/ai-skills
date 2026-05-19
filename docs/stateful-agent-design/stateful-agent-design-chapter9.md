@@ -9,16 +9,16 @@
 
 ## Contents
 
-- [9. Future Enhancements](#1-overview)
-  - [9.1 FTS5 Search Index (Option 3)](#11-fts5-search-index-option-3)
-  - [9.2 Memory-Aware Tools](#12-memory-aware-tools)
-  - [9.3 Architecture B2 Upgrade](#13-architecture-b2-upgrade)
-  - [9.4 GitHub Backup Automation](#14-github-backup-automation)
+- [9. Future Enhancements](#9-overview)
+  - [9.1 FTS5 Search Index (Option 3)](#91-fts5-search-index-option-3)
+  - [9.2 Memory-Aware Tools](#92-memory-aware-tools)
+  - [9.3 Architecture B2 Upgrade](#93-architecture-b2-upgrade)
+  - [9.4 GitHub Backup Automation](#94-github-backup-automation)
   - [9.5 Remote Access: Mobile-to-Local Communication](#95-remote-access-mobile-to-local-communication)
     - [9.5.1 Dispatch Integration (Preferred Path)](#951-dispatch-integration-preferred-path)
     - [9.5.2 GitHub Relay (Fallback)](#952-github-relay-fallback)
     - [9.5.3 Architecture B2 as Long-Term Solution](#953-architecture-b2-as-long-term-solution)
-  - [9.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#16-proposed-solution-to-concurrent-read-modify-write-race-condition)
+  - [9.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#96-proposed-solution-to-concurrent-read-modify-write-race-condition)
   - [9.7 Importance Scoring on Blocks and Episodic Entries](#97-importance-scoring-on-blocks-and-episodic-entries)
   - [9.8 Reflection Synthesis for Episodic Logs](#98-reflection-synthesis-for-episodic-logs)
   - [9.9 A `reflections.md` Block Type](#99-a-reflectionsmd-block-type)
