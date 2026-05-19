@@ -130,3 +130,66 @@ The chapters most affected:
 Before redesigning, you need to settle **Option A vs B vs C** for prose block conflict surfacing. My recommendation is Option A for v1 — it keeps the bridge simple, eliminates branch filename exposure, and still leverages LLM judgment for the hard semantic merges. But it does mean the LLM still _does_ merges; it just no longer _manages_ them. That feels like the right division of labor.
 
 Do you want to settle that, and then we can sketch out the revised Chapter 3 structure before touching any files?
+
+I replied:
+
+> Let me try to better understand a subset of what you just wrote. You said:
+>
+> > *The bridge already has an implicit session anchor available: the stdio connection itself. Each Claude Desktop instance that connects to the bridge gets a dedicated stdin/stdout stream. That stream has a lifetime — it begins when Claude Desktop starts and ends when it exits. The bridge can assign an internal session to each connection automatically, with no tool call required.*
+>
+>I don't think there can be more than one instance of Claude Desktop. When I try to launch a new instance from the Windows 11 start menu, it simply activates the existing Claude Desktop app. Of course, there can be multiple conversations active within that single Claude Desktop app. Is that why the LLM needs to call `memory_session_start` at the start of a new conversation?
+
+Claude replied:
+
+You're absolutely right to push back on that, and I was wrong. Let me correct it clearly.
+
+The stdio connection is **per-Claude-Desktop-process**, not per-conversation. Since only one Claude Desktop instance can run, all conversations — however many are open simultaneously in different tabs — share that single pipe to the bridge. From the bridge's perspective, every tool call arrives over the same stream with no intrinsic marker indicating which conversation it came from.
+
+So yes, that's precisely why `memory_start_conversation` (or `memory_session_start` in the current design) is necessary — it's the only mechanism by which a conversation can say "I am a distinct entity, give me my own read-history slot in the session tracker."
+
+I overstated what the stdio connection buys you. What it actually tells the bridge is:
+
+- **One connection is alive** — Claude Desktop is running
+- **The connection dropped** — Claude Desktop exited, all sessions can be cleaned up
+
+That's useful for one thing: automatic cleanup on shutdown. But it can't substitute for per-conversation identity.
+
+---
+
+## What This Means for the Redesign
+
+The session ID genuinely needs to come from the LLM, because the bridge has no other way to correlate a `memory_write_block` call with the specific conversation that previously called `memory_get_block`. The MCP stdio protocol carries no conversation metadata — it's just JSON-RPC requests arriving over a pipe.
+
+However, the memory-aware tools redesign still dramatically improves things — the session ID just needs to be handled differently than it is today:
+
+**The current design's fragility** comes from the session ID being a value the LLM must:
+
+1. Receive from `memory_session_start`
+2. Store in context
+3. Remember to pass as an explicit parameter to every subsequent tool call
+4. Recover from if lost to compaction
+
+**With memory-aware tools**, the session ID becomes an **implicit parameter** — the bridge stores it internally keyed to a handle, and the tools don't expose it in their signatures at all. The flow becomes:
+
+```
+memory_start_conversation()  →  (bridge internally creates/resets session, 
+                                  returns nothing meaningful — just "ok")
+memory_get_block("core")     →  (bridge looks up session by connection + 
+                                  some lightweight per-call context... )
+```
+
+But wait — that last step still has the same problem. If two conversations both call `memory_get_block("core")` concurrently, the bridge sees two identical tool calls arriving over the same pipe with no way to tell which belongs to which conversation. It needs _something_ in the call to distinguish them.
+
+So the session ID really does need to be threaded through every call. The question is whether the LLM is explicitly aware of it or whether it's hidden inside the tool layer somehow.
+
+One viable approach: **embed the session ID in the tool namespace rather than the parameters.** The SKILL instructs Claude to call `memory_start_conversation` once, receive a short token (say, `s_a3f2`), and then all memory tools for that conversation are prefixed or scoped so Claude passes it as a fixed preamble — more like an environment variable than a parameter it reasons about. The SKILL would say: "store this token and pass it identically to every memory tool call — treat it as opaque infrastructure, not as meaningful data." That reduces the cognitive surface without eliminating the ID.
+
+---
+
+## The Honest Summary
+
+The memory-aware tools redesign still delivers major benefits — invisible branches, atomic index updates, simpler SKILL — but it **cannot** eliminate the session ID requirement, because that requirement is imposed by a genuine architectural constraint: multiple conversations sharing one MCP connection with no protocol-level conversation tagging. That's a limitation of the MCP stdio transport, not the design.
+
+The right goal for the redesign is to make session ID management **as automatic and failure-tolerant as possible**, not to eliminate it. Probably the most important improvement is robust handling of a lost or unknown session ID: rather than returning an error the LLM must recover from, the bridge could silently re-initialize the session and continue — accepting that some race-detection history is lost (spurious branches possible) rather than blocking the conversation entirely.
+
+Does that reframing of the goal make sense before we proceed to thinking about the revised tool surface?
