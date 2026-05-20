@@ -295,7 +295,7 @@ The wake-up phase is the right place for merges. It also means merges happen whe
 - Session tracking implicit in the bridge, surfaced to LLM as an opaque **handle** returned by every tool
 - Graceful re-initialization on unknown handle (spurious branches, not hard error)
 - Branches completely invisible to the LLM — Option B, background merge in wake-up phase
-- `index.md` managed as a structured object via `memory_get_index` / `memory_update_index_entry`, with mechanical row-level merge rules applied by the bridge
+- `index.md` fetched as a structured object via `memory_get_index` (but still need to design how to update it)
 - `memory_start_conversation` requires no meaningful return value beyond the handle
 - `memory_write_block` atomically updates the index entry as part of the same operation
 
