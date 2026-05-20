@@ -263,3 +263,36 @@ Combined with the memory-aware tools redesign — where branches are invisible, 
 
 Should we now settle the Option A/B/C question for prose block conflict surfacing, and then start sketching the revised chapter structure?
 
+> I like the idea of returning the session ID in every tool's return value. Would calling it a "handle" instead of a "session ID" make the LLM more likely to treat it as an opaque value to be remembered, since handles are commonly returned by APIs for the purpose of being passed to other APIs?
+> 
+> Regarding options A/B/C, option A is unusual because it exposes branches to the LLM, even though our plan is to hide branches from it. I worry this might cause the LLM some confusion, since it would see memories it didn't create. This could be mitigated by changing the skill to teach the LLM about branches, but that also exposes branches to the LLM and increases the instruction load in the skill. For these reasons, I'm not a fan of option A.
+> 
+> Option C has a similar issue: it can return a memory block containing memories that the current conversation didn't create, thus "leaking" memories between conversations. Again, I'm not sure the potential confusion is worth whatever value this option offers.
+> 
+> Option B is closest to our original conception of branching: each conversation sees only its branch of any given file (or the base file if no branches exist), and merging is done in the background, perhaps during an unattended "wake-up" phase of operation.
+> 
+> My take is that hiding branches from the LLM is the way to go, and it follows the "Simplicity" design principle called out in the original design. Let's go with option B.
+> 
+> NOTE: I notice this conversation is getting long. Neither of us has a good sense for how much of its context is in use. I've saved this conversation in an Obsidian vault starting from my "big red flag" prompt, which began our discussion of the leaky abstraction issue. I don't want to risk context compaction happening during the design update, so I'm going to start a new conversation for that, and point it at the markdown file created by Obsidian. But please feel free to respond here about what I said above this note.
+
+Both points are well-taken.
+
+**On "handle" vs "session ID":** Yes, this is a meaningful terminology choice. "Session ID" implies something the LLM should _understand_ — a session is a concept it might reason about, wonder if it's expired, try to interpret. "Handle" is a well-established programming concept meaning "an opaque token returned by a system for the sole purpose of passing back to that same system." LLMs trained on code have seen this pattern thousands of times — file handles, window handles, database connection handles. The implicit contract of a handle is: don't inspect it, don't modify it, just give it back. That's exactly the behavior we want. Good instinct.
+
+**On Option B:** Your reasoning is tight and I agree with the conclusion. Options A and C both leak the _existence_ of branches into the LLM's awareness, which partially undermines the abstraction we're trying to build. Option A asks the LLM to _perform_ merges on content it didn't create; Option C silently serves content from another conversation's branch, which is a subtle form of the same confusion. Both also increase SKILL complexity, which runs directly counter to the Simplicity principle.
+
+Option B keeps the abstraction clean: from the LLM's perspective, memory reads always return _the_ current state of a block, full stop. The background merge process is purely a bridge concern. The cost is that a conversation might briefly see slightly stale content if a merge hasn't completed yet — but that's a much smaller problem than branch confusion, and it's the same trade-off every eventually-consistent system makes.
+
+The wake-up phase is the right place for merges. It also means merges happen when there's no conversation competing for context, which makes the merge sub-agent's job easier and cheaper.
+
+**On context management:** Smart move. The decisions we've made here that need to carry into the new conversation are:
+
+- Memory-aware tools replacing the current file-centric API
+- Session tracking implicit in the bridge, surfaced to LLM as an opaque **handle** returned by every tool
+- Graceful re-initialization on unknown handle (spurious branches, not hard error)
+- Branches completely invisible to the LLM — Option B, background merge in wake-up phase
+- `index.md` managed as a structured object via `memory_get_index` / `memory_update_index_entry`, with mechanical row-level merge rules applied by the bridge
+- `memory_start_conversation` requires no meaningful return value beyond the handle
+- `memory_write_block` atomically updates the index entry as part of the same operation
+
+That's the full set of architectural decisions from this conversation. Good luck with the new one — I'll be ready to work from the Obsidian file.
