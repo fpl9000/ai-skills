@@ -5,10 +5,10 @@
 **Status:** Working draft. Expected to evolve as open questions are resolved.
 
 **Source materials:**
-- [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of the design discussion with Claude Sonnet 4.6
-- [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — review of that discussion
-- [design-review.md](./design-review.md) — critical design review by Claude Opus
-- [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the current design
+- [memory-aware-tools-idea.md](stateful-agent-design/memory-aware-tools-idea.md) — transcript of the design discussion with Claude Sonnet 4.6
+- [memory-aware-tools-analysis.md](memory-aware-tools-analysis.md) — review of that discussion
+- [design-review.md](design-review.md) — critical design review by Claude Opus
+- [stateful-agent-design.md](stateful-agent-design.md) and chapter files — the current design
 
 ---
 
