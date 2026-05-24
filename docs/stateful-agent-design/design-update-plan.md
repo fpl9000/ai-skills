@@ -1,14 +1,14 @@
 # Stateful Agent Design — Update Plan
 
-**Author:** Claude Opus 4.7 (with guidance from Fran)  
-**Date:** May 2026  
+**Author:** Claude Opus 4.7 (with guidance from Fran)
+**Date:** May 2026
 **Status:** Working draft. Expected to evolve as open questions are resolved.
 
-**Source materials:**  
-- [memory-aware-tools-idea.md](stateful-agent-design/memory-aware-tools-idea.md) — transcript of the design discussion with Claude Sonnet 4.6
-- [memory-aware-tools-analysis.md](memory-aware-tools-analysis.md) — review of that discussion
-- [design-review.md](design-review.md) — critical design review by Claude Opus
-- [stateful-agent-design.md](stateful-agent-design.md) and chapter files — the current design
+**Source materials:**
+- [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of the design discussion with Claude Sonnet 4.6
+- [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — review of that discussion
+- [design-review.md](./design-review.md) — critical design review by Claude Opus
+- [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the current design
 
 ---
 
@@ -54,8 +54,8 @@ memory_append_block(handle, name, content)
 Notes:
 
 - The handle is returned in **every** tool response, not just from `memory_start_conversation`. This refreshes the handle in the LLM's context on every memory tool call, dramatically reducing the chance that compaction can lose it.
-- There is no separate index-update tool. The `summary` parameter to `memory_write_block` carries any index changes, and the bridge applies them atomically with the block write.
-- `memory_get_index()` returns the index as a structured object. The bridge owns the on-disk markdown format and any future schema migrations.
+- There is no separate index-update tool. The `summary` parameter to `memory_write_block` is stored in the block file's YAML frontmatter (see §2.8). The bridge writes the body and frontmatter together as one file, so no cross-file coordination is needed.
+- `memory_get_index()` returns a structured object assembled by the bridge from the blocks directory. It is a derived view, not a stored file (see §2.8).
 
 ### 2.2 Branches are invisible to the LLM
 
@@ -86,7 +86,7 @@ Once a branch exists for `(H, B)`, all future operations from H on B route throu
 Merges happen in the background, not during active conversations. The merge process:
 
 - Selects all peer branches of a base block B, along with B itself.
-- Performs the merge (mechanically for the index; via an LLM sub-agent for prose blocks).
+- Performs the merge via an LLM sub-agent. The body of the merged block is produced semantically; the merged file's frontmatter (`summary`, `updated_at`) is regenerated — the new `summary` typically derived by the sub-agent from the merged body, the `updated_at` set to the merge time.
 - Atomically replaces the base file with the merged result.
 - Deletes all branch files for B.
 - Clears all map entries `(*, B)` so future reads from any handle see the merged base.
@@ -103,35 +103,57 @@ For v1 simplicity, the lock can be the existing process-wide mutex held for the 
 
 If the bridge receives a memory tool call with a handle it doesn't recognize (e.g., because the bridge restarted, or the handle was evicted, or the LLM fabricated one), it silently creates a new session under that handle (or, alternatively, generates a fresh handle and returns it — see §3.4) and proceeds normally. This converts a class of hard errors into a class of spurious branches, which the system already handles gracefully.
 
-### 2.8 Index is always canonical, mechanically merged
+### 2.8 Index is a derived view, not a stored file
 
-The index does not branch. When a block write triggers a per-handle branch, the index entry is **still updated in place on the canonical index**, applying row-level mechanical merge rules:
+The original draft of §2.8 said "the index doesn't branch and is mechanically merged in place on every write." Fran pointed out the problem with that: applied to a single write, "latest wins" reduces to "always replace," so writes to a block's summary from conversation Y would land directly in the canonical index and be visible to conversation X — leaking semantic information across conversation boundaries. The mechanical merge rules in the original §2.8 only do non-trivial work when multiple peer branches fold back into one canonical state, but the original §2.8 said no peer branches of the index ever exist. So the merge rules never fired and the leakage was real.
 
-- `updated_at` → latest wins.
-- `summary` → latest wins (if the writer supplied one; otherwise unchanged).
-- New rows → union.
-- Deleted rows (not yet supported in v1, but for future): deletion-wins or latest-wins depending on policy.
+The resolution: **the index is not stored as a separate file at all.** Each block's `summary` and `updated_at` live in YAML frontmatter inside the block file itself. The bridge manages frontmatter transparently — the LLM never sees it. `memory_get_block` strips the frontmatter and returns only the body; `memory_write_block` accepts the body and an optional `summary`, and writes a file containing the appropriate frontmatter and the body.
 
-This eliminates the design-review §1.2 concern that semantic merges don't work for structured tables. The index has no merge problem because the merge is mechanical and immediate.
+`memory_get_index(handle)` is implemented as a walk of the blocks directory:
 
-### 2.9 Atomic block-plus-index update — ordering and recovery
+1. Enumerate block files.
+2. For each block name B, choose which file to read: H's branch of B if one exists in the bridge's handle→branch map, else the base file.
+3. Extract `summary` and `updated_at` from the chosen file's frontmatter.
+4. Return the assembled index.
 
-The "atomic" claim is best-effort across two files with a documented recovery path. The ordering on a write to block B with optional summary S:
+This eliminates the leakage problem by construction. H's index view is built from the files H can see, which are H's branches and the bases of blocks H hasn't branched — exactly what H's per-block view returns. The index and the blocks are guaranteed consistent because they come from the same files.
+
+Block file format on disk:
+
+```yaml
+---
+summary: "Discussion of the X feature design"
+updated_at: 2026-05-20T14:23:00Z
+---
+# Markdown body of the block goes here
+...
+```
+
+The user can still inspect block metadata by looking at the top of any block file. A human-readable `index.md` no longer exists as part of normal operation; if one is wanted for debugging, a `memory_dump_index(handle, path)` tool could be added later that writes a snapshot of the current derived index to a user-named file outside the memory directory.
+
+**Performance:** `memory_get_index` is O(n_blocks) in the worst case. The bridge maintains an in-memory cache keyed by the blocks directory's most recent mtime; the walk runs only when the cache is stale. For per-handle views, the cache holds one assembled index per handle, invalidated when that handle writes a block or when the base changes. Steady-state cost is one cached lookup.
+
+**Schema evolution:** YAML frontmatter is naturally extensible. Adding fields (e.g., `importance` per design §9.7) is backwards-compatible. Removing or renaming fields requires a migration sweep at bridge startup.
+
+### 2.9 Atomic block write — ordering and recovery
+
+With the index folded into block files (per §2.8), the "atomic block-plus-index write" problem reduces to "atomic single-file write," which is solvable with the standard temp-and-rename approach:
 
 1. Determine target file (base or branch for handle H, per §2.3).
-2. Write content to a temp file alongside the target (e.g., `B.md.tmp.<random>`).
-3. `fsync` the temp file.
-4. Atomic rename: temp → target file. **At this point, the block content is committed to disk under its canonical name.**
-5. Read current index into memory, apply mechanical merge for B's row (update `updated_at`, optionally `summary`).
-6. Write the updated index to its own temp file, fsync, atomic-rename onto the canonical `index.md`.
+2. Compose the file content: frontmatter (with `updated_at` set to now, and `summary` set to the provided value or the previous summary preserved) plus the body.
+3. Write the composed content to a temp file alongside the target (e.g., `<name>.md.tmp.<random>`).
+4. `fsync` the temp file.
+5. Atomic rename: temp → target file.
+
+There is no second file to keep in sync. The frontmatter and body are written together as one operation, so they can never be out of sync.
 
 Crash recovery handled by a startup sweeper:
 
-- Orphan temp files (`*.tmp.*`) are deleted at bridge startup.
-- For each block, the sweeper compares the block file's ModTime against the index's `updated_at` for that block. If the block is newer, the sweeper rebuilds that index row (using the block's stored frontmatter summary, if present, or leaving the existing summary unchanged).
-- Branch files with no corresponding entry in the handle→branch map (because they belong to a forgotten handle from a prior bridge instance) are flagged for merge during the next wake-up phase.
+- Orphan temp files (`*.tmp.*`) older than a few seconds are deleted at bridge startup.
+- Branch files with no entry in the handle→branch map (because they belong to a handle from a prior bridge instance) are flagged for merge during the next wake-up phase. The handle is forgotten but the data is preserved.
+- Block files missing required frontmatter (e.g., user-edited without preserving it) get a default frontmatter inserted on the next read or scheduled write — the bridge does not silently lose the data but does not refuse to read it.
 
-The window of inconsistency (block updated, index not yet updated) is short and recoverable. Readers calling `memory_get_index()` during this window may see a stale `updated_at` for B — acceptable for a metadata table.
+This is materially simpler than the original §2.9, which had to coordinate two file writes. The simpler invariant is easier to verify and easier to recover from.
 
 ### 2.10 Episodic logs handled separately (provisional)
 
@@ -181,7 +203,7 @@ If we treat Y's write as a branch-triggering event (because X has an outstanding
 - X re-reads B and sees C₁ (consistent with X's previous read).
 - The base is unchanged.
 
-This is stricter conversation isolation, but the cost is significant: in a system with even modest concurrency, almost every write would branch (because at any moment some conversation somewhere probably has an outstanding read of any frequently-touched file like `core.md` or `index.md`). The merge load could explode.
+This is stricter conversation isolation, but the cost is significant: in a system with even modest concurrency, almost every write would branch (because at any moment some conversation somewhere probably has an outstanding read of any frequently-touched file like `core.md` or a hot block). The merge load could explode.
 
 **Trade-offs:**
 
@@ -217,8 +239,8 @@ Decisions needed:
 
 For `memory_write_block(handle, name, content, summary?)`:
 
-- **For new blocks** (no existing index entry): `summary` is required. The bridge rejects the call with a clear error if absent.
-- **For existing blocks:** `summary` is optional. If absent, the existing index summary is preserved unchanged. If present (including empty string), it replaces the existing summary.
+- **For new blocks** (no existing block file with that name visible to this handle): `summary` is required. The bridge rejects the call with a clear error if absent.
+- **For existing blocks:** `summary` is optional. If absent, the existing summary in the block's frontmatter is preserved unchanged. If present (including empty string), it replaces the existing frontmatter summary.
 - **Length:** capped at, say, 200 characters. Truncated with a warning if exceeded.
 
 ### 3.6 Schema for `memory_get_index()`
@@ -292,17 +314,20 @@ Largest single change. The chapter needs substantial rewriting:
 - Session tracker (currently `session_id → file_path → last_seen_modtime`) replaced by handle map (`handle → block_name → branch_file_path`) plus per-handle read-baseline tracking for race detection.
 - Race detection logic rewritten around the per-handle branch model (§2.3 of this plan).
 - Branching mechanism rewritten: instead of "create a branch on race," the model is "if no branch exists for this handle+block, create one on race; otherwise reuse."
-- Atomic block+index write logic specified (§2.9 of this plan).
+- Atomic block write logic specified (§2.9 of this plan; single-file write with frontmatter, no cross-file coordination).
+- Derived-view index implementation specified (§2.8 of this plan; bridge walks blocks directory, reads frontmatter, assembles index on demand with caching).
 - Merge mutex specified (§2.6 of this plan).
 - New tool: `memory_run_maintenance(handle)` for manual merge trigger (if §3.1 lands on the manual-first approach).
 
 ### 4.3 Chapter 4 (Memory System Layer 2)
 
-Moderate change. The file formats on disk are mostly unchanged:
+Larger change than initially scoped, due to §2.8:
 
+- Block files now carry YAML frontmatter (`summary`, `updated_at`). Chapter 4 needs to document this format.
+- `index.md` as a stored file is **removed**. The chapter should describe the index as a derived view assembled by the bridge from block frontmatter.
 - Branch file naming convention updated (now includes handle, per §3.8 of this plan).
-- Maintenance rule about Claude updating `index.md` is **removed** — the bridge handles it.
-- The episodic-log section stays as-is if §2.10 lands on "separate concept"; otherwise needs a substantive rewrite.
+- Maintenance rule about Claude updating `index.md` is **removed** — there is no `index.md` to maintain.
+- The episodic-log section stays as-is if §2.10 lands on "separate concept"; otherwise needs a substantive rewrite. Note that episodic logs likely also need frontmatter (for date-range or last-appended-at metadata) if we want them to participate in the derived index.
 
 ### 4.4 Chapter 5 (Memory Skill)
 
@@ -315,7 +340,7 @@ Largest simplification. The SKILL should be **much** shorter:
 - No `branches_exist` flag handling.
 - New: clear instruction to call `memory_start_conversation` once per conversation and to use the most recently returned handle.
 - New: optional guidance on the `summary` parameter for `memory_write_block`.
-- Retained: when to read core vs. blocks vs. index; when to create a new block vs. update an existing one; how to structure block content.
+- Retained: when to read core vs. blocks vs. consult the index; when to create a new block vs. update an existing one; how to structure block content. (Note that "the index" is now described as a roll-up the bridge produces — the LLM doesn't read a file, it calls `memory_get_index`.)
 
 ### 4.5 Chapter 6 (Sub-Agent System)
 
@@ -332,8 +357,9 @@ Moderate change. New test cases needed for:
 - Handle round-trip across compaction simulation.
 - Per-handle branch isolation (X's writes invisible to Y).
 - Read-your-own-writes across multiple writes from the same handle.
-- Mechanical index merge correctness.
-- Atomic block+index ordering (crash simulation).
+- Derived-view index correctness (assembles correctly from block frontmatter; per-handle views show correct branch/base mix).
+- Single-file atomic block write (crash simulation between temp-write and rename).
+- Frontmatter handling (preserved across writes when summary not supplied; updated when supplied; gracefully defaulted if missing on read).
 - Graceful re-init on unknown handle.
 - Maintenance flow: branch creation, merge, base file replacement.
 
@@ -370,4 +396,17 @@ Each step lands as its own PR for review. This keeps any individual PR small eno
 
 ## 6. Working Notes (Iterative)
 
-A scratchpad for decisions, course-corrections, or additional clarifications added as the plan evolves. Initially empty.
+A scratchpad for decisions, course-corrections, or additional clarifications added as the plan evolves.
+
+### 2026-05-23 — §2.8 revised: index becomes a derived view
+
+Fran identified that the original §2.8 (index doesn't branch, mechanically merged in place on every write) had a memory-leakage problem: applied to a single write, "latest wins" reduces to "always replace," so Y's summary updates would land in the canonical index and be visible to X immediately. The leak was real.
+
+Two resolutions were considered:
+
+- **Option 1: Index branches per-handle like blocks do.** Symmetric with the block model, but reintroduces a semantic-merge problem (one the redesign was supposed to eliminate) and adds two-file cross-branch atomicity per write.
+- **Option 2 (chosen): Index becomes a derived view.** Block-level metadata (`summary`, `updated_at`) lives in each block's YAML frontmatter. `memory_get_index(handle)` walks the blocks directory and assembles the index on demand, using per-handle branches where present. Cached by mtime. The leak is impossible by construction because the index and blocks come from the same files.
+
+Knock-on effects: §2.9 simplified (single-file atomic write, no cross-file coordination); Chapter 4 needs more rewriting than initially scoped (block files now have frontmatter, `index.md` no longer exists); §2.5 (merge) now regenerates frontmatter from the merged content rather than mechanically merging an index file; test-case list in §4.7 updated accordingly.
+
+Open sub-question: episodic logs may also need frontmatter if we want them to appear in the derived index — flagged in §4.3 for the rewrite to address.
