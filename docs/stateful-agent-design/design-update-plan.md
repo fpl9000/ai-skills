@@ -33,7 +33,7 @@ memory_start_conversation()
     → { handle: "<bridge-generated>" }
 
 memory_get_core(handle)
-    → { handle, content: "..." }
+    → { handle, content: "...", changed_since_last_read: bool }
 
 memory_write_core(handle, content)
     → { handle, ok: true }
@@ -42,13 +42,16 @@ memory_get_index(handle)
     → { handle, index: { blocks: [{ name, summary, updated_at }, ...] } }
 
 memory_get_block(handle, name)
-    → { handle, content: "..." }
+    → { handle, content: "...", changed_since_last_read: bool }
 
 memory_write_block(handle, name, content, summary?)
     → { handle, ok: true }
 
 memory_append_block(handle, name, content)
     → { handle, ok: true }
+
+memory_run_maintenance(handle)
+    → { handle, ok: true, merged_blocks: N, errors?: [...] }
 ```
 
 Notes:
@@ -56,6 +59,7 @@ Notes:
 - The handle is returned in **every** tool response, not just from `memory_start_conversation`. This refreshes the handle in the LLM's context on every memory tool call, dramatically reducing the chance that compaction can lose it.
 - There is no separate index-update tool. The `summary` parameter to `memory_write_block` is stored in the block file's YAML frontmatter (see §2.8). The bridge writes the body and frontmatter together as one file, so no cross-file coordination is needed.
 - `memory_get_index()` returns a structured object assembled by the bridge from the blocks directory. It is a derived view, not a stored file (see §2.8).
+- `memory_run_maintenance()` is invoked manually by the LLM when the user asks for memory maintenance. It dispatches sub-agents to semantically merge branched memory blocks (see §2.5, §3.1).
 
 ### 2.2 Branches are invisible to the LLM
 
@@ -81,27 +85,50 @@ This is the mechanism by which read-your-own-writes is preserved: once H writes 
 
 Once a branch exists for `(H, B)`, all future operations from H on B route through that branch. The branch itself is never branched. This keeps the branch storage model flat: at any moment, B has zero or more peer branches, each owned by exactly one handle.
 
-### 2.5 Background merge during a wake-up phase (Option B)
+### 2.5 Merge process (triggered by `memory_run_maintenance`)
 
-Merges happen in the background, not during active conversations. The merge process:
+The merge is the action that folds peer branches of a block back into a single canonical base. It is triggered when the user asks Claude to run memory maintenance (per §3.1), which causes the LLM to call `memory_run_maintenance(handle)`. The bridge then enumerates all blocks with pending branches and, for each, runs the following process:
 
 - Selects all peer branches of a base block B, along with B itself.
+- Acquires the merge mutex (per §2.6), blocking all other memory I/O for the duration of this block's merge.
 - Performs the merge via an LLM sub-agent. The body of the merged block is produced semantically; the merged file's frontmatter (`summary`, `updated_at`) is regenerated — the new `summary` typically derived by the sub-agent from the merged body, the `updated_at` set to the merge time.
 - Atomically replaces the base file with the merged result.
 - Deletes all branch files for B.
 - Clears all map entries `(*, B)` so future reads from any handle see the merged base.
+- Releases the mutex.
 
-The wake-up phase mechanism (what schedules and runs this) is still **open** — see §3.1 below.
+The merge work itself runs in sub-agents (separate LLM invocations spawned by the bridge), not in the calling conversation's main reasoning context. In that sense the merge is "in the background" — the calling LLM doesn't have to reason about the merge content. But the maintenance call is synchronous: it returns to the calling LLM only after all merges complete.
 
 ### 2.6 Merge holds a mutex that blocks memory I/O
 
 While a merge is in progress, the bridge holds a lock that blocks all `memory_*` tool calls for the file being merged. This prevents new branches from being created during the merge and prevents reads from seeing partial merge state.
 
-For v1 simplicity, the lock can be the existing process-wide mutex held for the duration of the merge. A finer-grained per-file lock is a future optimization. Because merges run during a wake-up phase (no active conversations expected), the impact of process-wide locking is small.
+For v1 simplicity, the lock can be the existing process-wide mutex held for the duration of the merge. A finer-grained per-file lock is a future optimization. Because merges only run when the user invokes `memory_run_maintenance` (per §3.1), and typically at a time the user chooses for that purpose, the impact of process-wide locking is small in practice.
 
-### 2.7 Graceful re-initialization on unknown handle
+### 2.7 Error on unknown or malformed handle (with lazy adoption from disk)
 
-If the bridge receives a memory tool call with a handle it doesn't recognize (e.g., because the bridge restarted, or the handle was evicted, or the LLM fabricated one), it silently creates a new session under that handle (or, alternatively, generates a fresh handle and returns it — see §3.4) and proceeds normally. This converts a class of hard errors into a class of spurious branches, which the system already handles gracefully.
+If the bridge receives a memory tool call with a handle it doesn't recognize, it first attempts lazy adoption from disk before returning an error (per §3.11).
+
+**The procedure for an unrecognized handle:**
+
+1. If the handle is malformed (wrong length, wrong character set), return `MALFORMED_HANDLE` immediately — no adoption attempt.
+2. If the handle is well-formed but not in the in-memory map, scan the blocks directory for branch files matching `*.branch-<handle>-*.<ext>`.
+3. If any branch files are found, reconstruct the corresponding `(handle, block_name) → branch_file_path` entries in the map, treat the handle as live, and proceed with the original tool call. Per-handle read-baseline state is *not* recovered (it was purely in-memory), so the first read for any block by the recovered handle sets a fresh baseline and the `changed_since_last_read` flag is `false` on first reads.
+4. If no branch files match, return `INVALID_HANDLE`. The SKILL teaches the LLM to call `memory_start_conversation` to obtain a fresh handle and retry.
+
+The error response carries a clear textual description (see §3.10 for the error-response convention). The recovery procedure, taught by the SKILL, is uniform across all handle error cases: call `memory_start_conversation` to obtain a fresh handle, then retry the original operation with the new handle.
+
+**Cases that produce a handle error after the procedure above:**
+- Handle parameter omitted entirely → MCP schema-validation error before the call reaches the bridge.
+- Handle malformed (wrong length, wrong character set, etc.) → bridge returns `MALFORMED_HANDLE`.
+- Handle well-formed but neither in the in-memory map nor present in any branch filename on disk → bridge returns `INVALID_HANDLE`. Common causes: LLM fabricated the handle; the handle was issued by a long-departed bridge instance for a conversation that never branched; the LLM is in a brand-new conversation that hasn't called `memory_start_conversation` yet but is somehow passing a handle.
+
+**Cases that no longer produce a handle error (thanks to lazy adoption):**
+- The bridge restarts (e.g., Claude Desktop close/reopen) and a conversation resumes with its prior handle still in context, and that conversation had created at least one branch → the bridge adopts the branches from disk and the call proceeds normally.
+
+**Important corner case:** A resumed conversation whose prior handle had *no* branches on disk (because it never wrote, or only wrote to base files) will still get `INVALID_HANDLE` — there's nothing on disk to discover. The conversation recovers cleanly via `memory_start_conversation` with no data lost (since base writes are visible to anyone reading the base). This is the right behavior: handles without disk-persistent state are not preserved, but no information is lost.
+
+The earlier draft of §2.7 specified silent re-init under any unknown handle. That was rescinded in favor of the explicit-error approach as part of resolving §3.3, then refined further when §3.11 added lazy adoption from branch filenames. Net trade-off: predictable bridge behavior, no handle-collision risk, simpler internal state, and the common close-reopen case still works transparently because of the disk-recoverable portion of the handle→branch map.
 
 ### 2.8 Index is a derived view, not a stored file
 
@@ -150,7 +177,7 @@ There is no second file to keep in sync. The frontmatter and body are written to
 Crash recovery handled by a startup sweeper:
 
 - Orphan temp files (`*.tmp.*`) older than a few seconds are deleted at bridge startup.
-- Branch files with no entry in the handle→branch map (because they belong to a handle from a prior bridge instance) are flagged for merge during the next wake-up phase. The handle is forgotten but the data is preserved.
+- Branch files with no entry in the handle→branch map (because they belong to a handle from a prior bridge instance) are flagged for merge during the next `memory_run_maintenance` call. The handle is forgotten but the data is preserved.
 - Block files missing required frontmatter (e.g., user-edited without preserving it) get a default frontmatter inserted on the next read or scheduled write — the bridge does not silently lose the data but does not refuse to read it.
 
 This is materially simpler than the original §2.9, which had to coordinate two file writes. The simpler invariant is easier to verify and easier to recover from.
@@ -176,21 +203,33 @@ Appends are serialized by the bridge mutex. They never produce branches. The sem
 
 These need answers before the rewrite. Listed roughly in order of consequence.
 
-### 3.1 Wake-up phase mechanism
+### 3.1 Wake-up phase mechanism ✅ RESOLVED
 
-What schedules and runs the periodic merge process? Candidate approaches:
+**Decision:** For v1, merges are triggered manually via the bridge tool `memory_run_maintenance(handle)`. The SKILL teaches the LLM to call this tool when the user asks (in any phrasing) to run memory maintenance, merge branches, consolidate memory, etc. The bridge enumerates all pending branches and dispatches an LLM sub-agent to perform the semantic merge for each block. The maintenance call holds the merge mutex per §2.6 and blocks until all merges complete.
 
-- **Windows Task Scheduler + `claude -p`.** A scheduled task invokes `claude -p` with a merge-orchestrator prompt that talks to the bridge over MCP (requires `claude -p` to be configured with the bridge MCP server) or directly to the bridge via a maintenance-mode CLI. Robust on Windows, but requires `claude -p` to be set up with MCP access to the bridge.
-- **AutoHotkey driving Claude Chat.** AHK sends a prompt to the Claude Chat window during off-hours. Fragile (GUI automation), but works on the user's existing setup.
-- **Lazy merge at session start.** When `memory_start_conversation` is called, the bridge synchronously merges any pending branches before returning. Pros: zero external scheduling, fully automatic. Cons: every conversation pays the merge cost at startup, including the LLM-merge token cost; the merge sub-agent must be invocable from inside the bridge's startup path.
-- **Manual user trigger.** The user asks Claude (or the bridge directly) to "run merges now." Simple, no automation, but means merges accumulate until the user notices.
-- **Hybrid: manual trigger now, automated later.** v1 ships with manual; an automated mechanism is added in v1.1 once one approach proves out.
+Automated triggers (Windows Task Scheduler + `claude -p`, AutoHotkey driving Claude Chat, lazy merge at session start) are deferred to v1.x. The manual approach is correct (merges happen when asked) and operable (the user controls timing). It sidesteps the unattended-execution problem entirely and lets us defer the AHK/Task Scheduler decision until we see how the system performs in practice. If branches accumulate uncomfortably, the SKILL can be updated to have the LLM suggest running maintenance — but that's a soft mitigation, not a v1 requirement.
 
-**Recommendation for v1:** manual trigger plus a `memory_run_maintenance(handle)` tool the user can ask Claude to invoke. This sidesteps the unattended-execution problem entirely and lets us defer the AHK/Task Scheduler decision. The system is then correct (merges happen) and operable (the user controls when), just not fully automatic.
+**Tool surface change (§2.1):** Add `memory_run_maintenance(handle)` to the seven existing tools. Initial signature:
 
-### 3.2 Should writes branch when other sessions have outstanding reads?
+```
+memory_run_maintenance(handle)
+    → { handle, ok: true, merged_blocks: N, errors?: [...] }
+```
 
-The existing design branches on read-modify-write races: X writes B against a stale baseline. The new question (Fran's note 2) is whether to *also* branch on a different scenario:
+**SKILL change (§4.4):** The SKILL teaches the LLM that:
+- The tool exists and what it does at a conceptual level (merges branched memory back together).
+- It should be called when the user explicitly asks for memory maintenance, merging, or consolidation.
+- The call may take a noticeable amount of time, during which other memory operations from any conversation will block. This is acceptable because the user has asked for it.
+
+**Deferred to the rewrite:**
+- Exact return shape (do we list merged block names? include per-block error details? include count of branches found vs. successfully merged?).
+- Whether to support partial maintenance (`memory_run_maintenance(handle, block_name?)`) for merging a single block, or always merge everything pending. Default: merge everything. Partial maintenance is a v1.x option if it proves useful.
+- Behavior when called with no pending branches. Default: return `{ ok: true, merged_blocks: 0 }` immediately.
+- **MCP tool-call timeout handling.** A synchronous `memory_run_maintenance` call could exceed the MCP tool-call timeout if many branches accumulate (e.g., 10 blocks × ~30s per sub-agent merge = 5 minutes). Three approaches to consider in the rewrite: (a) cap the call at N blocks per invocation and return `{ more_pending: true }` if more remain, letting the LLM call again; (b) plug into the existing async sub-agent infrastructure (Chapter 6) — `memory_run_maintenance` returns an agent ID and the LLM polls; (c) keep it fully synchronous and accept that very large merge batches require the user to wait or split their request. Recommendation is (a) for v1: easy to implement, easy for the LLM to handle, no async-polling complexity. The cap should be tunable.
+
+### 3.2 Should writes branch when other sessions have outstanding reads? ✅ RESOLVED
+
+The existing design branches on read-modify-write races: X writes B against a stale baseline. The new question (Fran's note 2) was whether to *also* branch on a different scenario:
 
 - X reads B at T₁ (sees content C₁).
 - Y reads B at T₁ (sees C₁).
@@ -198,42 +237,87 @@ The existing design branches on read-modify-write races: X writes B against a st
 - X's context is compacted; C₁ rolls out.
 - X re-reads B at T₃ and sees Y's content C₂.
 
-If we treat Y's write as a branch-triggering event (because X has an outstanding read of B), then:
+If we treated Y's write as a branch-triggering event (because X has an outstanding read of B):
 - Y writes to a branch instead of the base.
 - X re-reads B and sees C₁ (consistent with X's previous read).
 - The base is unchanged.
 
 This is stricter conversation isolation, but the cost is significant: in a system with even modest concurrency, almost every write would branch (because at any moment some conversation somewhere probably has an outstanding read of any frequently-touched file like `core.md` or a hot block). The merge load could explode.
 
-**Trade-offs:**
+**Trade-offs considered:**
 
-| | Branch on RMW race only (current) | Branch also on read-then-write-by-another (proposed) |
+| | Branch on RMW race only (v1) | Branch also on read-then-write-by-another (deferred) |
 |---|---|---|
 | Reader sees other conversations' writes on re-read? | Yes (consistency = filesystem-style) | No (consistency = snapshot isolation) |
 | Branch frequency | Low (only on actual race) | Potentially very high |
 | Merge load | Low | High |
 | LLM mental-model surprise on re-read | Possible | Eliminated |
 
-**Recommendation:** Defer this to a v1.x decision. Ship v1 with branch-on-RMW-race-only and add an explicit caveat in the SKILL or design doc that re-reads of a block may show updates from other conversations. Monitor in practice whether the surprise is real or theoretical. If it becomes a problem, revisit.
+**Decision:** Ship v1 with **branch-on-RMW-race-only** semantics. Defer the stricter snapshot-isolation behavior until we have practical experience with how often the surprise actually occurs in real use. The merge-load risk of the stricter approach is concrete; the surprise it would prevent is hypothetical until observed.
 
-An intermediate option: have `memory_get_*` return a flag `{ changed_since_last_read: true }` on a re-read that shows different content than the last read by this handle. The LLM can then choose to acknowledge the change. This is a low-cost mitigation that preserves the existing branching policy.
+**Mitigation included in v1:** `memory_get_core` and `memory_get_block` return a `changed_since_last_read: true` flag when the content returned to this handle differs from the content this handle most recently read for the same target. Implementation: the bridge tracks, per handle, the hash (or just the ModTime + size) of the most recent content returned for each block name. On the next read for the same target, if the new content's signature differs, the flag is set.
 
-### 3.3 Handle as required parameter vs. optional with auto-init
+The flag lets the LLM notice that another conversation has modified shared memory and react appropriately (e.g., re-read related blocks, mention it to the user if relevant, or re-derive any conclusions that depended on the prior content). Importantly, the LLM is **not** told *what* changed or *who* changed it — just that the content is different from what it last saw. This preserves the per-conversation isolation principle (X can't introspect Y's activity) while still letting X know its prior view is stale.
 
-When the LLM calls a memory tool without first calling `memory_start_conversation`, two behaviors are possible:
+**Response shape (updates §2.1):**
 
-- **Required:** MCP validates the parameter; the call fails without a handle. The LLM must always call `memory_start_conversation` first. SKILL enforces this.
-- **Optional with auto-init:** The handle parameter is optional. If absent, the bridge generates one, includes it in the response, and from then on the LLM uses it. `memory_start_conversation` becomes a courtesy, not a requirement.
+```
+memory_get_core(handle)
+    → { handle, content: "...", changed_since_last_read: bool }
 
-**Recommendation:** **Required parameter.** The MCP schema-validation gives a clean enforcement mechanism that doesn't rely on SKILL prose. The auto-init path adds bridge complexity for marginal benefit, and the design has the graceful-re-init path (§2.7) as the safety net for any case where the LLM passes a stale or invalid handle. Calling `memory_start_conversation` once per conversation is a tiny compliance burden and the SKILL can frame it as "always start with this, like opening a file before reading."
+memory_get_block(handle, name)
+    → { handle, content: "...", changed_since_last_read: bool }
+```
 
-### 3.4 Handle generation policy
+The flag is `false` on the first read of a target by this handle, on subsequent reads where the content is unchanged, and on any read that returns a per-handle branch (because the branch was last written by this handle, so "what this handle last saw" matches by construction). The flag is `true` only when this handle previously read this target and the content has since changed without this handle writing it.
 
-Decisions needed:
+**Re-visit criteria:** If user feedback or observation indicates that the surprise from `changed_since_last_read` is too disruptive — for example, the LLM frequently gets confused on re-reads despite the flag, or important information gets overwritten across conversations in ways the merge can't recover — revisit the stricter-isolation option. Until then, the v1 behavior is the default.
 
-- **Format and length:** 4 alphanumeric characters (per the discussion) is fine for the expected single-user concurrency. Spelling it out: lowercase alphanumeric, 4 chars, ~1.6M possibilities. Probably enough; cheap to make 6 or 8 chars if we want headroom.
-- **Generation site:** The bridge generates the handle. The LLM never invents one. Even on the graceful re-init path, if the LLM supplies an unknown handle, the bridge can either honor it or substitute a fresh one. Honoring the LLM-supplied unknown handle is simpler but allows handle collisions (LLM A fabricates handle `h7k3`, currently in use by LLM B → their histories merge silently). **Recommendation:** when the bridge receives an unknown handle, it generates a fresh one and returns that in the response. The SKILL tells the LLM "always use the most recently returned handle."
-- **Persistence:** The handle→state map is in memory. On bridge restart, all handles are invalidated; the next tool call from each conversation triggers graceful re-init. This is consistent with the design-review §3.1 concern; making it persistent across bridge restarts is a v1.x improvement.
+**SKILL change (§4.4):** The SKILL teaches the LLM that re-reading core or a block may yield different content than was previously seen, signaled by `changed_since_last_read: true`. When that flag is set, the LLM should treat any earlier reasoning that depended on the previous content as potentially stale.
+
+### 3.3 Handle as required parameter vs. optional with auto-init ✅ RESOLVED
+
+**Decision:** Handle is a **required parameter**. The MCP schema declares it as required, so omitting it produces a schema-validation error before the call reaches the bridge.
+
+The bridge additionally rejects with an error any of:
+- Handle parameter present but malformed (wrong length, wrong character set, etc.).
+- Handle parameter present and well-formed but not recognized by the bridge (e.g., the bridge restarted and lost its in-memory handle map, or the LLM fabricated a handle).
+
+In all error cases, the bridge returns a clear error message (see §3.10 for the error-response convention) instructing the LLM to call `memory_start_conversation` to obtain a fresh handle. There is **no graceful re-init** in the bridge — the LLM is responsible for recovering by calling `memory_start_conversation`. This keeps the bridge simple and the error semantics predictable.
+
+**Failure modes and recovery:**
+
+| Scenario | What happens |
+|---|---|
+| Handle omitted from tool call | MCP schema validation rejects; LLM calls `memory_start_conversation`, retries |
+| Handle malformed | Bridge returns `MALFORMED_HANDLE`; LLM recovers same way |
+| Handle valid; bridge restarted between calls; conversation had created branches | Bridge adopts branches from disk on first memory call (per §3.11); no error; handle is treated as live |
+| Handle valid; bridge restarted between calls; conversation had not created branches | Bridge returns `INVALID_HANDLE`; LLM recovers via `memory_start_conversation`. No data lost (no branches existed) |
+| Compaction wipes recent responses but LLM remembers older handle still in the bridge's map | No error; handle is still valid |
+| Compaction wipes all memory responses including the original `memory_start_conversation` | LLM has no handle; calls `memory_start_conversation` again on its next memory operation; gets a fresh handle |
+| LLM fabricates a handle | Bridge doesn't find it in the map; scans disk and finds no branches matching that handle; returns `INVALID_HANDLE`; LLM recovers same way |
+
+This eliminates handle-collision risk (the bridge controls handle generation entirely; LLMs can't accidentally land on each other's handles), simplifies the bridge (no auto-init code path), and gives the LLM a single, predictable recovery procedure for any handle problem.
+
+**Knock-on changes:**
+- §2.7 rewritten to specify error-and-recover behavior, refined further by §3.11's lazy-adoption mechanism.
+- The "bridge restart loses handle state" failure mode is mostly mitigated by §3.11's lazy adoption; only conversations that never branched still need to recover via `memory_start_conversation`.
+
+**SKILL change (§4.4):** The SKILL teaches the LLM to call `memory_start_conversation` once at the start of any conversation that will use memory, and to call it again as a recovery step whenever any memory tool returns an unknown-handle or invalid-handle error. The recovery instruction is simple and uniform: "if you get a handle error, get a new handle and retry."
+
+### 3.4 Handle generation policy ✅ RESOLVED
+
+**Format and length.** Handles are **8 lowercase alphanumeric characters** (alphabet `[a-z0-9]`, 8 positions, ~2.8 × 10¹² possibilities). The expansion from 4 to 8 chars costs a few tokens per response and makes handle collisions astronomically unlikely even across bridge restarts and long-lived conversations.
+
+**Generation site.** The bridge mints handles. The LLM never invents one. Following §3.3, an LLM-supplied unrecognized handle produces an `INVALID_HANDLE` error rather than being honored or substituted.
+
+**Collision check.** Before returning a newly minted handle from `memory_start_conversation`, the bridge looks the candidate up in its in-memory handle→state map. If the candidate is already in use (vanishingly unlikely but cheap to verify), the bridge generates another candidate and re-checks. This makes in-flight collision impossible by construction.
+
+**Randomness source.** v1 uses a standard PRNG (`math/rand` in Go, seeded at bridge startup). The probability of meaningful collisions with PRNG output at this handle length is negligible for the expected workload, and an unprivileged LLM has no way to predict or attack handle values through the MCP interface. **Future improvement:** upgrade to a CSPRNG (`crypto/rand`) when the threat model grows to include adversarial scenarios — e.g., if memory ever becomes accessible to untrusted parties, or if handle prediction could enable a meaningful attack. Noted here so it isn't forgotten.
+
+**Persistence.** The handle→state map is in-memory only. On bridge restart all handles are invalidated; the next memory tool call from each conversation receives an `INVALID_HANDLE` error and the LLM recovers via `memory_start_conversation` (per §2.7 / §3.3). Cross-restart persistence is deferred to v1.x.
+
+**Open follow-up resolved in §3.11:** Closing Claude Desktop invalidates every handle simultaneously. The lazy-adoption mechanism specified in §3.11 covers the common case (conversations resume with their handle still in context) so most users never see the impact.
 
 ### 3.5 `summary` parameter contract
 
@@ -268,8 +352,8 @@ Pagination: not in v1. If the index grows past ~500 entries, we revisit.
 
 Open: when does a handle's state get cleaned up?
 
-- **On bridge restart:** all in-memory state is lost. Branches on disk remain and are reaped by the wake-up phase.
-- **On graceful Claude Desktop disconnect:** the bridge sees the stdio pipe close; it could clean up all handles at that point. But the discussion noted (line 153) that this only signals "Claude Desktop exited" — it can't tell which conversations were ongoing. Best behavior: at disconnect, mark all handles as orphaned; their branches will be merged during the next wake-up phase.
+- **On bridge restart:** all in-memory state is lost. Branches on disk remain and are reaped by the next `memory_run_maintenance` call.
+- **On graceful Claude Desktop disconnect:** the bridge sees the stdio pipe close; it could clean up all handles at that point. But the discussion noted (line 153) that this only signals "Claude Desktop exited" — it can't tell which conversations were ongoing. Best behavior: at disconnect, mark all handles as orphaned; their branches will be merged during the next `memory_run_maintenance` call.
 - **On idle timeout:** a handle that hasn't seen activity in N hours could be auto-evicted. Probably not worth the complexity in v1.
 
 ### 3.8 Where do branches store on disk?
@@ -284,15 +368,118 @@ This embeds the handle in the filename, which:
 
 The on-disk layout remains flat: branches sit alongside their base files in the same directory. The SKILL never references this layout; only the bridge does.
 
-### 3.9 Behavior when `memory_run_maintenance` is invoked during an active conversation
+### 3.9 Behavior when `memory_run_maintenance` is invoked during an active conversation ✅ RESOLVED
 
-If the user asks Claude to run maintenance while other conversations are active, what happens?
+**Decision** (falls out of §3.1's resolution): If the user asks Claude to run maintenance while other conversations are active:
 
 - The bridge enumerates pending merges (branches on disk).
-- For each, acquire the merge mutex, perform the merge, release.
-- Other conversations attempting memory I/O during a merge are blocked (per §2.6).
+- For each, acquires the merge mutex, performs the merge via sub-agent, releases.
+- Other conversations attempting memory I/O during a merge block on the mutex.
 
-This works but means the user's "run maintenance now" command may block other conversations briefly. Acceptable for v1; document it.
+This means the user's "run maintenance now" command may briefly block other concurrent conversations. Acceptable for v1; the SKILL should mention this so the LLM can warn the user if it knows other conversations are likely active. (In practice, the user is the one who decides when to run maintenance, so they can pick a moment when other conversations are idle.)
+
+### 3.10 Error response convention ✅ RESOLVED
+
+**Background:** Traditional programming APIs tended toward terse, machine-only error codes (`ENOENT`, error number 17) because the consumer was other code that couldn't usefully act on free-form text. LLMs collapse that gap — the error message itself is the recovery instruction. This lets us provide rich error semantics that improve LLM behavior without complicating the bridge.
+
+**Decision:** Memory tool error responses follow a uniform shape with both a stable machine-readable code and a human/LLM-readable message.
+
+**Schema:**
+
+```
+{
+  "handle": "abc1",         // echoed back if a handle was supplied and is recognized;
+                            //   omitted or null if the error was a handle problem
+  "ok": false,
+  "error": {
+    "code": "INVALID_HANDLE",         // stable identifier; never changes between bridge versions
+    "message": "Handle 'xy77' is not recognized. Call memory_start_conversation to obtain a fresh handle and retry.",
+    "context": { "supplied_handle": "xy77" }   // optional; included only when useful for diagnosis
+  }
+}
+```
+
+**Why both `code` and `message`:**
+
+- The `message` gives the LLM a natural-language explanation it can act on directly, without needing the SKILL to enumerate every possible error code and recovery procedure.
+- The `code` stays stable across message rewordings. Tests, future tooling, and any automated handling can rely on `INVALID_HANDLE` even if the message text is improved later.
+- The `code` is grep-able in server logs without false matches from message text that happens to contain the same words.
+
+**Abstraction discipline (critical):** Error messages must respect the layers established by the design. The LLM operates on the concepts of *handles*, *core*, *blocks*, *summaries*, and *the index*. Branches, mutexes, frontmatter, file paths, the per-handle branch map, and any other implementation detail are bridge-internal and must not appear in error messages.
+
+Good error messages:
+- ✅ `"Block 'foo' does not exist for this handle"` — speaks at the block abstraction.
+- ✅ `"Handle 'xy77' is not recognized. Call memory_start_conversation."` — gives the LLM the recovery path.
+- ✅ `"Summary is required when creating a new block"` — explains the contract.
+- ✅ `"Block name 'foo bar' contains invalid characters; use letters, digits, hyphens, and underscores"` — actionable correction.
+
+Bad error messages (leak the design):
+- ❌ `"Branch 'foo.branch-h7k3-...' already exists"`
+- ❌ `"Cannot acquire merge mutex; try again"`
+- ❌ `"Frontmatter parse failed at line 3"`
+- ❌ `"Failed to atomic-rename temp file"`
+
+For internal errors the LLM cannot recover from (disk failure, invariant violation, sub-agent merge failure), the message is generic ("An internal bridge error occurred; the operation was not completed. Please report this to the user.") and the actual technical detail is written to a server-side log file the user can inspect when debugging.
+
+**Initial error code set:**
+
+| Code | Meaning |
+|---|---|
+| `INVALID_HANDLE` | Handle parameter present and well-formed but not recognized by the bridge |
+| `MALFORMED_HANDLE` | Handle parameter present but format is wrong (length, character set) |
+| `BLOCK_NOT_FOUND` | Read or operation targets a block that doesn't exist for this handle |
+| `INVALID_BLOCK_NAME` | Block name contains disallowed characters or violates naming rules |
+| `SUMMARY_REQUIRED` | `memory_write_block` called for a new block without a `summary` argument |
+| `SUMMARY_TOO_LONG` | `summary` exceeds the configured length cap |
+| `MAINTENANCE_IN_PROGRESS` | Caller-friendly version of "the bridge is currently merging memory and your operation will be retried shortly" — used when blocking on the merge mutex would exceed an acceptable wait |
+| `INTERNAL_ERROR` | Catch-all for anything else; the message stays generic; details go to the server log |
+
+New codes can be added in v1.x as new error situations are identified. The set above is the starting point; not exhaustive.
+
+**Note on schema-validation errors:** If MCP itself rejects a call (e.g., handle parameter omitted entirely from a tool that requires it), the error response shape is whatever MCP returns and is not under the bridge's control. The SKILL teaches the LLM to recover from any handle-related rejection — schema-validation or bridge-issued — via the same procedure: call `memory_start_conversation`, retry.
+
+**SKILL change (§4.4):** The SKILL teaches the LLM to look at the `error.message` first and act on it as natural-language instruction. The `error.code` is mentioned briefly so the LLM can recognize the recovery patterns it sees most often (`INVALID_HANDLE` and `MALFORMED_HANDLE` → call `memory_start_conversation` and retry; `SUMMARY_REQUIRED` → supply a summary and retry; etc.). The SKILL does not enumerate every code exhaustively — for any error the SKILL doesn't specifically cover, the LLM acts on the message.
+
+### 3.11 Bridge lifecycle and orphaned branches ✅ RESOLVED
+
+**Background.** The bridge is an MCP server spawned by Claude Desktop over stdio. When Claude Desktop closes, the stdio pipe closes, the bridge process sees EOF and terminates. Per §3.4, the handle→state map is in-memory only and dies with the bridge.
+
+**Initial concern.** Without recovery, branches from a previous session would become "orphaned" — branch files would remain on disk, but no live handle would own them, so new conversations could not see them. Content would still be safe but invisible to any conversation until `memory_run_maintenance` ran.
+
+**The recovery mechanism (Fran's observation).** Branch filenames already embed the handle (per §3.8: `B.branch-<handle>-<ISO8601compact>.<ext>`). The filesystem is therefore a partial backing store for the handle→branch portion of the bridge's state. When a conversation resumes after Claude Desktop reopens, its LLM context typically still contains the handle from the prior bridge instance (because the handle was echoed in every memory tool response per §2.1, making it robust to compaction). When that conversation makes any memory tool call, the bridge can rebuild the relevant map entries by scanning the directory for branch files whose embedded handle matches.
+
+**The decision: lazy adoption.** On any memory tool call with a handle the bridge doesn't recognize, before returning `INVALID_HANDLE`, the bridge scans the blocks directory for branch files matching the pattern `*.branch-<handle>-*.<ext>`. For each match found, the bridge reconstructs the corresponding map entry `(handle, block_name) → branch_file_path` and treats the handle as live. Only if no branch files match does the bridge proceed to return `INVALID_HANDLE`.
+
+This means:
+- Conversations that resume after a Claude Desktop close, with their handle still in context, see their previous writes naturally. Branches are adopted on first use.
+- Conversations the user has abandoned never make further memory calls; their branches remain on disk and are reaped at the next `memory_run_maintenance`.
+- Conversations whose handle was lost from context (e.g., catastrophic compaction) get `INVALID_HANDLE` on their next memory call, recover via `memory_start_conversation`, and continue with a fresh handle. Their old branches remain on disk and are reaped at the next `memory_run_maintenance`.
+
+**What still cannot be recovered:** The bridge cannot reconstruct per-handle read-baseline tracking from disk — that state was purely in-memory and is gone. After bridge restart and lazy adoption, the bridge has no record of what versions of any blocks the recovered handle previously read. Two consequences, both acceptable:
+
+- **Race detection on writes:** Without a baseline, the bridge cannot tell whether a write from the recovered handle is racing with a concurrent write from another conversation. v1 policy: treat the first write after recovery as having no baseline race signal — write to the existing branch if one exists for `(handle, block)`, otherwise write to the base file. This may very occasionally miss a race, producing one cross-conversation overwrite per bridge restart per affected block. The `memory_run_maintenance` flow surfaces no help here, but the cost is bounded and small. (Stricter alternatives exist — e.g., always branch the first write after recovery — but produce spurious branches every restart, which costs more than it gains.)
+- **`changed_since_last_read`:** On the first read of a block by a recovered handle, the bridge has no prior signature to compare against, so the flag is `false`. This matches the behavior on the very first read by a fresh handle (per §3.2) and is similarly acceptable.
+
+**The bridge's branch reaping in `memory_run_maintenance`:** During maintenance, the bridge enumerates *all* branch files on disk regardless of whether their handles are in the live map. Branches whose handles are still live get merged just like any other; truly-abandoned branches (those whose conversations have gone silent forever) also get merged. From the merge sub-agent's perspective there is no distinction — branched content is branched content.
+
+**Why option C plus lazy adoption is now the right answer.** With lazy adoption, the common case (user reopens Claude Desktop and resumes prior conversations) recovers automatically with no user-visible bookkeeping. Only abandoned conversations leave debris, and abandoned conversations by definition don't surprise anyone. Periodic invocation of `memory_run_maintenance` (the manual-trigger flow from §3.1) cleans the debris when convenient. There is no need to expose a `pending_merges` count, no need to nag the user, no need to scan-and-merge at bridge startup.
+
+**Options revisited:**
+
+| Option | Status |
+|---|---|
+| A. Auto-merge on bridge startup | Rejected. Startup blocking on sub-agent merges is bad UX; merge bugs could prevent app launch. |
+| B. Expose "needs maintenance" flag to LLM | Rejected. Violates §2.2 (branches invisible to LLM). |
+| C. Do nothing beyond manual `memory_run_maintenance` | **Chosen, in combination with lazy adoption.** Simplest; consistent with §3.1's manual-trigger philosophy. The lazy-adoption recovery mechanism handles the common case automatically; manual maintenance handles the rest. |
+| D. Report pending count from `memory_start_conversation` | Rejected. The pending count would mostly reflect debris from abandoned conversations the user doesn't care about, making the signal noisy. Lazy adoption already handles the cases the user *does* care about. |
+
+**Implementation notes:**
+
+- The directory scan in lazy adoption is per-call but cheap (single directory listing with a glob pattern). It runs only on unknown-handle paths, which is the slow path anyway.
+- Optimization deferred to v1.x if it proves necessary: the bridge could perform a single full scan on startup, building a `handle → [branch files]` cache, then consult the cache on unknown-handle calls. For v1, scan-on-demand is fine.
+- Branch filename pattern matching must be tolerant of timestamp variation — the handle is the lookup key, not the timestamp.
+
+**Note on the partial-persistence reality:** §3.4 specifies that handles aren't persisted across bridge restarts. That remains true in a strict sense — handle *identity*, *issuance*, and *read baselines* are not persisted; only the handle → block-branch relationship is recoverable from disk because branch filenames carry the handle. This is a happy accident of §3.8's filename convention rather than an intentional persistence design. Worth noting because future work that changes the branch naming convention must preserve this property or accept that lazy adoption stops working.
 
 ---
 
@@ -310,14 +497,14 @@ This works but means the user's "run maintenance now" command may block other co
 
 Largest single change. The chapter needs substantial rewriting:
 
-- Tool definitions (currently `safe_read_file`, `safe_write_file`, `safe_append_file`, `memory_session_start`) replaced by the seven memory_* tools.
+- Tool definitions (currently `safe_read_file`, `safe_write_file`, `safe_append_file`, `memory_session_start`) replaced by the eight memory_* tools (per §2.1).
 - Session tracker (currently `session_id → file_path → last_seen_modtime`) replaced by handle map (`handle → block_name → branch_file_path`) plus per-handle read-baseline tracking for race detection.
 - Race detection logic rewritten around the per-handle branch model (§2.3 of this plan).
 - Branching mechanism rewritten: instead of "create a branch on race," the model is "if no branch exists for this handle+block, create one on race; otherwise reuse."
 - Atomic block write logic specified (§2.9 of this plan; single-file write with frontmatter, no cross-file coordination).
 - Derived-view index implementation specified (§2.8 of this plan; bridge walks blocks directory, reads frontmatter, assembles index on demand with caching).
 - Merge mutex specified (§2.6 of this plan).
-- New tool: `memory_run_maintenance(handle)` for manual merge trigger (if §3.1 lands on the manual-first approach).
+- New tool `memory_run_maintenance` specified (§2.5, §3.1 of this plan): bridge enumerates pending branches, dispatches sub-agents for semantic merges, holds the merge mutex, returns when all merges complete.
 
 ### 4.3 Chapter 4 (Memory System Layer 2)
 
@@ -340,6 +527,9 @@ Largest simplification. The SKILL should be **much** shorter:
 - No `branches_exist` flag handling.
 - New: clear instruction to call `memory_start_conversation` once per conversation and to use the most recently returned handle.
 - New: optional guidance on the `summary` parameter for `memory_write_block`.
+- New: instruction to call `memory_run_maintenance(handle)` when the user asks for memory maintenance, merging, consolidation, or similar. The SKILL should describe the tool conceptually (it merges branched memory back together; uses sub-agents internally; the call may take a noticeable amount of time and will briefly block other concurrent conversations' memory operations) without exposing implementation details like branches or the mutex.
+- New: instruction on how to interpret `changed_since_last_read` (per §3.2). When `memory_get_core` or `memory_get_block` returns this flag as `true`, the LLM should treat any earlier reasoning that depended on the previous content as potentially stale. The SKILL should frame this in conversational terms (e.g., "this memory has been updated since you last read it; double-check anything you concluded from the earlier version") rather than mechanical terms, and should not reveal that the change came from another conversation — to the LLM, it just looks like the content changed.
+- New: instruction on how to handle error responses (per §3.10). Memory tools may return `{ ok: false, error: { code, message, context? } }`. The LLM should act on the `message` (which is written to be self-explanatory) and recognize a few common patterns: `INVALID_HANDLE` or `MALFORMED_HANDLE` → call `memory_start_conversation` and retry; `SUMMARY_REQUIRED` → supply a summary and retry; `BLOCK_NOT_FOUND` → either create the block (if intended) or check the name; `INTERNAL_ERROR` → mention the failure to the user and don't retry blindly. For codes the SKILL doesn't explicitly cover, follow the `message`'s recovery instructions.
 - Retained: when to read core vs. blocks vs. consult the index; when to create a new block vs. update an existing one; how to structure block content. (Note that "the index" is now described as a roll-up the bridge produces — the LLM doesn't read a file, it calls `memory_get_index`.)
 
 ### 4.5 Chapter 6 (Sub-Agent System)
@@ -410,3 +600,73 @@ Two resolutions were considered:
 Knock-on effects: §2.9 simplified (single-file atomic write, no cross-file coordination); Chapter 4 needs more rewriting than initially scoped (block files now have frontmatter, `index.md` no longer exists); §2.5 (merge) now regenerates frontmatter from the merged content rather than mechanically merging an index file; test-case list in §4.7 updated accordingly.
 
 Open sub-question: episodic logs may also need frontmatter if we want them to appear in the derived index — flagged in §4.3 for the rewrite to address.
+
+### 2026-05-24 — §3.1 and §3.9 resolved: manual-trigger merge via `memory_run_maintenance`
+
+Decision: v1 ships with manual-trigger merging. The bridge exposes a new tool `memory_run_maintenance(handle)` that the SKILL teaches the LLM to call when the user asks for memory maintenance, merging, or consolidation. The bridge enumerates pending branches and dispatches sub-agents to perform each block's semantic merge, holding the merge mutex (§2.6) during the operation. The maintenance call is synchronous from the caller's perspective: it returns when all merges complete.
+
+Rejected for v1 (deferred to v1.x): Windows Task Scheduler + `claude -p`, AutoHotkey driving Claude Chat, lazy-merge-at-session-start. These add automation complexity that we can layer on later once the manual approach proves out in practice. The choice prioritizes correctness and operability over full automation.
+
+Knock-on changes: §2.1 tool surface gains `memory_run_maintenance`; §2.5 retitled and rewritten to reflect manual triggering and synchronous semantics (the merge runs in sub-agents, but the call to `memory_run_maintenance` is synchronous from the caller's view); §2.6 wording adjusted to say merges happen when invoked rather than during a "wake-up phase"; §2.9 crash recovery references the next maintenance call instead of a wake-up phase; §3.7 (handle cleanup) references updated similarly; §3.9 marked resolved as a corollary of §3.1; §4.2 (Chapter 3 changes) updated; §4.4 (SKILL changes) gains an instruction line for `memory_run_maintenance`.
+
+Deferred to the rewrite (recorded inside §3.1): exact return-shape details, whether to support partial maintenance (one block at a time), and the no-op return when there are no pending branches.
+
+### 2026-05-25 — §3.2 resolved: ship v1 with RMW-only branching plus `changed_since_last_read` flag
+
+Decision: v1 keeps the existing RMW-only branching policy — branches are only created when a handle writes against a stale baseline. The stricter snapshot-isolation alternative (also branch when another handle has an outstanding read) is deferred to v1.x because the merge-load risk is concrete while the surprise it would prevent is hypothetical until observed.
+
+To soften the surprise of "X re-reads B and sees Y's content," `memory_get_core` and `memory_get_block` return a new `changed_since_last_read` boolean. The bridge tracks per-handle content signatures (hash or ModTime+size) of the most recent read for each target. On the next read of the same target by the same handle, the flag is set to `true` if the signature changed and `false` otherwise. The flag tells the LLM "your prior view is stale" without revealing what changed or who changed it, preserving per-conversation isolation.
+
+The flag is always `false` on first read of a target, on unchanged re-reads, and when reading the handle's own branch (because the branch's contents track that handle's own last write by construction).
+
+Re-visit criteria recorded inside §3.2: if observation shows the `changed_since_last_read` mitigation is insufficient — e.g., LLM confusion persists, or cross-conversation overwrites cause information loss the merge can't recover — revisit the stricter-isolation option.
+
+Knock-on changes: §2.1 tool signatures for `memory_get_core` and `memory_get_block` updated to include the flag in their response. SKILL change (§4.4) adds a line teaching the LLM how to interpret the flag.
+
+Note on `memory_get_index`: not given a `changed_since_last_read` flag for v1. The index is a directory-style overview and per-block changes are already signaled by the per-block read flag. Can be added later if it proves useful.
+
+### 2026-05-25 — §3.3 resolved: handle is required; no graceful re-init in the bridge
+
+Decision: handle is a required parameter on every memory tool. The MCP schema enforces presence; the bridge enforces format and recognition. Any of (omitted, malformed, unknown) produces an error response. There is no graceful re-init path in the bridge — the LLM recovers from any handle error by calling `memory_start_conversation` to obtain a fresh handle and then retrying.
+
+Rationale: keeping the bridge simple and the error semantics predictable. The "auto-init" alternative (silent re-init under an unknown handle) was attractive for resilience but added bridge complexity, introduced a handle-collision risk, and required the LLM to reason about whether a handle it supplied was honored or substituted. The error-and-recover approach is simpler in every dimension.
+
+Knock-on changes: §2.7 rewritten to remove graceful re-init and document the error-and-recover behavior; §3.4 generation-site bullet updated to remove the substitute-handle option; §3.7 already references maintenance-based reaping of orphaned branches, so no change there.
+
+Failure-mode coverage: bridge restart, compaction-induced handle loss, and LLM handle fabrication all converge on the same recovery procedure — get a new handle, retry. This is something the SKILL can teach in a single sentence.
+
+### 2026-05-25 — §3.10 added and resolved: rich error response convention
+
+Decision: memory tool error responses carry both a stable `error.code` (machine-readable, never changes between versions) and a natural-language `error.message` (the LLM's primary recovery signal), with optional `error.context` for diagnostic data.
+
+Rationale: traditional terse error codes were a concession to consumer code that couldn't act on text. LLMs collapse that gap — the message is the recovery instruction. We can have the readability of natural language and the stability of error codes at the same time without complicating the bridge.
+
+Abstraction discipline noted in §3.10 and worth emphasizing: error messages must never leak implementation details the LLM isn't supposed to know about (branches, the merge mutex, frontmatter, file paths, the per-handle branch map). For internal errors the LLM cannot recover from, the message stays generic and details go to a server-side log file.
+
+Initial error code set (`INVALID_HANDLE`, `MALFORMED_HANDLE`, `BLOCK_NOT_FOUND`, `INVALID_BLOCK_NAME`, `SUMMARY_REQUIRED`, `SUMMARY_TOO_LONG`, `MAINTENANCE_IN_PROGRESS`, `INTERNAL_ERROR`) is starting point, not exhaustive. New codes added as new error situations are identified.
+
+Knock-on changes: §2.7 and §3.3 forward-reference §3.10 for the error-response convention. §4.4 (SKILL changes) gets a bullet for teaching the LLM how to interpret error responses — act on the message; recognize a few common codes; for anything else, follow the message's recovery instructions.
+
+### 2026-05-25 — §3.4 resolved and §3.11 raised
+
+§3.4 resolved with: 8-character lowercase alphanumeric handles, bridge-minted with in-memory map collision check, PRNG for v1 (CSPRNG noted as a future upgrade when threat model warrants), in-memory only (no cross-restart persistence in v1).
+
+§3.11 added in response to Fran's question about Claude Desktop closing terminating the bridge. Confirmed yes — bridge dies with Claude Desktop, all handles invalidated, and (more consequentially) the per-handle branch map is lost while branch files remain on disk. This produces "orphaned branches" — content that's still preserved on disk but invisible to any live conversation until `memory_run_maintenance` scans the filesystem and folds them in.
+
+Four options considered (auto-merge on startup, expose "needs maintenance" flag, do nothing, report pending count from `memory_start_conversation`). Recommended Option D: have `memory_start_conversation` return `{ handle, pending_merges: N }` so the LLM knows whether deferred work exists. Preserves the manual-trigger philosophy from §3.1, respects the branches-invisible principle from §2.2 (count only, not branch identities), and surfaces the issue at the only moment when it actually matters (the start of a new conversation).
+
+§3.11 is currently marked "pending Fran's review."
+
+### 2026-05-25 — §3.11 resolved: lazy adoption from disk eliminates the orphaning problem
+
+Fran observed that branch filenames already embed the handle (per §3.8), so the filesystem is effectively a partial backing store for the handle→branch portion of the bridge's state. After bridge restart, a resumed conversation typically still has its handle in context (because handles are echoed on every memory tool response per §2.1). When that conversation makes its next memory call, the bridge can scan disk for branch files matching the embedded handle and reconstruct the relevant map entries on the fly.
+
+This makes the common close-reopen case transparent: the user reopens Claude Desktop, resumes a conversation, makes a memory call, and the bridge recognizes the handle (after a quick disk scan) and adopts the branches it finds. No `INVALID_HANDLE` error, no user-visible disruption.
+
+What still cannot be recovered: per-handle read-baseline tracking. The bridge can't tell what versions of which blocks the recovered handle previously read. Acceptable degradations: the first write after recovery may miss a race (one cross-conversation overwrite per restart per affected block, bounded); `changed_since_last_read` is `false` on first reads after recovery (matches the behavior for a fresh handle).
+
+Decision: Option C (do nothing beyond manual `memory_run_maintenance`) is the right answer once lazy adoption is in place. Pending merges that don't get adopted (because their conversations were abandoned or lost their handle) are exactly the merges no one cares about right now — they get reaped at the next maintenance run.
+
+Knock-on changes: §2.7 substantially rewritten to specify the lazy-adoption procedure; §3.3 failure-modes table updated to reflect that bridge-restart-with-branches no longer produces an error; §3.4 closing follow-up note resolved against §3.11.
+
+Subtle point worth preserving for future work: §3.4 says handles aren't persisted, but lazy adoption is a *partial* form of persistence — the handle→branch relationship is recoverable from disk thanks to §3.8's filename convention. Any future change to branch naming must preserve this property or accept that lazy adoption stops working. Noted at the end of §3.11.
