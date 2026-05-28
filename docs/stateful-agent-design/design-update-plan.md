@@ -1,7 +1,7 @@
 # Stateful Agent Design — Update Plan
 
-**Author:** Claude Opus 4.7 (with guidance from Fran)
-**Date:** May 2026
+**Author:** Claude Opus 4.7 (with guidance from Fran)  
+**Date:** May 2026  
 **Status:** Working draft. Expected to evolve as open questions are resolved.
 
 **Source materials:**
