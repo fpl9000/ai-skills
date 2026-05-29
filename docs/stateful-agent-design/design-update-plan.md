@@ -105,30 +105,31 @@ While a merge is in progress, the bridge holds a lock that blocks all `memory_*`
 
 For v1 simplicity, the lock can be the existing process-wide mutex held for the duration of the merge. A finer-grained per-file lock is a future optimization. Because merges only run when the user invokes `memory_run_maintenance` (per §3.1), and typically at a time the user chooses for that purpose, the impact of process-wide locking is small in practice.
 
-### 2.7 Error on unknown or malformed handle (with lazy adoption from disk)
+### 2.7 Error on unknown or malformed handle (persisted state first, lazy adoption as backstop)
 
-If the bridge receives a memory tool call with a handle it doesn't recognize, it first attempts lazy adoption from disk before returning an error (per §3.11).
+After a bridge restart, the bridge loads its persisted state (§2.12) at startup, so in the normal case a handle from a prior Claude Desktop session is **already recognized** — it's in the loaded in-memory map, along with its branch map and read baselines. The unknown-handle path described here is therefore the exception, not the rule, once persistence is in place.
 
-**The procedure for an unrecognized handle:**
+**The procedure when the bridge does receive a handle it doesn't recognize:**
 
 1. If the handle is malformed (wrong length, wrong character set), return `MALFORMED_HANDLE` immediately — no adoption attempt.
-2. If the handle is well-formed but not in the in-memory map, scan the blocks directory for branch files matching `*.branch-<handle>-*.<ext>`.
-3. If any branch files are found, reconstruct the corresponding `(handle, block_name) → branch_file_path` entries in the map, treat the handle as live, and proceed with the original tool call. Per-handle read-baseline state is *not* recovered (it was purely in-memory), so the first read for any block by the recovered handle sets a fresh baseline and the `changed_since_last_read` flag is `false` on first reads.
+2. If the handle is well-formed but not in the in-memory map (i.e., not recovered from the persisted state either), scan the blocks directory for branch files matching `*.branch-<handle>-*.<ext>` (lazy adoption, the §3.11 backstop).
+3. If any branch files are found, reconstruct the corresponding `(handle, block_name) → branch_file_path` entries in the map, treat the handle as live, and proceed with the original tool call. Read baselines for this handle cannot be reconstructed by lazy adoption (they live only in the persisted state, which by hypothesis didn't contain this handle), so the first read for any block by the recovered handle sets a fresh baseline and the `changed_since_last_read` flag is `false` on those first reads.
 4. If no branch files match, return `INVALID_HANDLE`. The SKILL teaches the LLM to call `memory_start_conversation` to obtain a fresh handle and retry.
 
 The error response carries a clear textual description (see §3.10 for the error-response convention). The recovery procedure, taught by the SKILL, is uniform across all handle error cases: call `memory_start_conversation` to obtain a fresh handle, then retry the original operation with the new handle.
 
 **Cases that produce a handle error after the procedure above:**
 - Handle parameter omitted entirely → MCP schema-validation error before the call reaches the bridge.
-- Handle malformed (wrong length, wrong character set, etc.) → bridge returns `MALFORMED_HANDLE`.
-- Handle well-formed but neither in the in-memory map nor present in any branch filename on disk → bridge returns `INVALID_HANDLE`. Common causes: LLM fabricated the handle; the handle was issued by a long-departed bridge instance for a conversation that never branched; the LLM is in a brand-new conversation that hasn't called `memory_start_conversation` yet but is somehow passing a handle.
+- Handle malformed → bridge returns `MALFORMED_HANDLE`.
+- Handle well-formed but absent from the persisted state, the in-memory map, and every branch filename on disk → bridge returns `INVALID_HANDLE`. Common causes: the LLM fabricated the handle; the handle was evicted by the §3.7 cleanup policy (which only evicts handles with no branches); a brand-new conversation passed a handle without first calling `memory_start_conversation`.
 
-**Cases that no longer produce a handle error (thanks to lazy adoption):**
-- The bridge restarts (e.g., Claude Desktop close/reopen) and a conversation resumes with its prior handle still in context, and that conversation had created at least one branch → the bridge adopts the branches from disk and the call proceeds normally.
+**Cases that do not produce a handle error:**
+- The bridge restarts and a conversation resumes with its prior handle → the handle is recovered from the persisted state (§2.12), with full branch map and read baselines. Transparent; no degradation.
+- The persisted state is missing or corrupt, but the conversation had created at least one branch → lazy adoption recovers the branch map (but not baselines), and the call proceeds. Degraded but functional.
 
-**Important corner case:** A resumed conversation whose prior handle had *no* branches on disk (because it never wrote, or only wrote to base files) will still get `INVALID_HANDLE` — there's nothing on disk to discover. The conversation recovers cleanly via `memory_start_conversation` with no data lost (since base writes are visible to anyone reading the base). This is the right behavior: handles without disk-persistent state are not preserved, but no information is lost.
+**Important corner case:** A resumed conversation whose handle is absent from the persisted state (e.g., the state file was lost) *and* that never created a branch will get `INVALID_HANDLE` — there's nothing on disk to discover. It recovers cleanly via `memory_start_conversation` with no data lost (base writes are visible to anyone reading the base).
 
-The earlier draft of §2.7 specified silent re-init under any unknown handle. That was rescinded in favor of the explicit-error approach as part of resolving §3.3, then refined further when §3.11 added lazy adoption from branch filenames. Net trade-off: predictable bridge behavior, no handle-collision risk, simpler internal state, and the common close-reopen case still works transparently because of the disk-recoverable portion of the handle→branch map.
+This section evolved across several decisions: silent re-init (original) → explicit error, no re-init (§3.3) → lazy adoption from branch filenames (§3.11) → persisted-state-first with lazy adoption as backstop (§2.12). The current behavior gives predictable bridge semantics, no handle-collision risk, and a fully transparent close-reopen experience in the normal case.
 
 ### 2.8 Index is a derived view, not a stored file
 
@@ -196,6 +197,35 @@ The bridge handles month rotation internally based on system time. This avoids b
 ### 2.11 Append semantics: serialized, never branched
 
 Appends are serialized by the bridge mutex. They never produce branches. The semantic justification: appends are commutative when the order isn't load-bearing, and for episodic logs (the primary use case) chronological ordering is already approximate. Race detection on appends would produce branches that need to be merged for no real benefit; serializing avoids the problem.
+
+### 2.12 Bridge state is persisted across restarts
+
+The bridge persists its in-memory state to disk and reloads it at startup. This supersedes the earlier "in-memory only" decision from §3.4. The motivation: the bridge is spawned by Claude Desktop over stdio and terminates whenever Claude Desktop closes (§3.11). Without persistence, every close-reopen cycle discards all bridge state, and recovery depends entirely on the lazy-adoption mechanism — which cannot recover read baselines and therefore degrades race detection and the `changed_since_last_read` flag after every restart. Persisting the state eliminates that degradation.
+
+**What is persisted.** The bridge state file captures the three pieces of per-conversation state the bridge tracks:
+
+1. The set of live handles.
+2. The per-handle branch map (`handle → block name → branch file path`).
+3. The per-handle read baselines (`handle → block name → content signature`, used for race detection per §2.3 and the `changed_since_last_read` flag per §3.2).
+
+**Storage location and format.** A single JSON file in the memory root, named `.bridge-state.json` (leading dot so it sorts away from memory content and is visually distinct from blocks). It is bridge-private — neither the LLM nor the SKILL ever references it.
+
+**Write strategy.** The bridge writes the state file:
+- On clean shutdown, when it detects EOF on stdin (the normal Claude Desktop close path). This is the common case and captures the most recent state.
+- Periodically as a checkpoint (e.g., every N seconds of activity, or after M state-changing operations), to survive a hard crash where the clean-shutdown write never happens.
+
+All writes use the temp-file-plus-atomic-rename pattern (consistent with §2.9) so a crash mid-write cannot corrupt the file.
+
+**Load and reconcile at startup.** On startup the bridge:
+1. Loads `.bridge-state.json` if present.
+2. Reconciles the loaded state against the filesystem: for each persisted branch-map entry, verify the referenced branch file still exists; drop entries whose files are gone (e.g., merged away by a maintenance run from a different bridge instance, though in a single-bridge deployment this is rare).
+3. Runs lazy adoption (§3.11) as a backstop: scans the blocks directory for branch files not represented in the loaded state and rebuilds map entries for them. This covers the cases where the state file is stale (a branch was created after the last checkpoint), missing, or corrupt.
+
+The relationship between persistence and lazy adoption: **persistence is the primary recovery mechanism; lazy adoption is the reconciliation backstop.** With both in place, the bridge recovers full state (including read baselines) in the normal case, and degrades gracefully to branch-map-only recovery (losing just read baselines) if the state file is unavailable.
+
+**Corruption handling.** If `.bridge-state.json` is present but unparseable, the bridge logs the problem to its server-side log, discards the corrupt file, and falls back to pure lazy adoption — exactly the behavior the design had before persistence was added. The system is therefore never worse off than the lazy-adoption-only design, even in the corruption case.
+
+A few finer points (write cadence specifics, whether to persist incrementally vs. whole-file each time, and the cleanup of stale handles to bound file growth) are detailed in §3.7.
 
 ---
 
@@ -315,9 +345,9 @@ This eliminates handle-collision risk (the bridge controls handle generation ent
 
 **Randomness source.** v1 uses a standard PRNG (`math/rand` in Go, seeded at bridge startup). The probability of meaningful collisions with PRNG output at this handle length is negligible for the expected workload, and an unprivileged LLM has no way to predict or attack handle values through the MCP interface. **Future improvement:** upgrade to a CSPRNG (`crypto/rand`) when the threat model grows to include adversarial scenarios — e.g., if memory ever becomes accessible to untrusted parties, or if handle prediction could enable a meaningful attack. Noted here so it isn't forgotten.
 
-**Persistence.** The handle→state map is in-memory only. On bridge restart all handles are invalidated; the next memory tool call from each conversation receives an `INVALID_HANDLE` error and the LLM recovers via `memory_start_conversation` (per §2.7 / §3.3). Cross-restart persistence is deferred to v1.x.
+**Persistence.** The handle→state map **is persisted across bridge restarts** (per §2.12). This reverses the earlier draft of this bullet, which specified in-memory-only state. The change was made after recognizing that the bridge terminates on every Claude Desktop close (§3.11), so in-memory-only state would be discarded routinely rather than rarely. With persistence, a handle issued in one Claude Desktop session is still valid in the next, and read baselines survive the restart. See §2.12 for the persistence mechanism and §3.7 for the handle-lifetime and cleanup policy that bounds the persisted file's growth.
 
-**Open follow-up resolved in §3.11:** Closing Claude Desktop invalidates every handle simultaneously. The lazy-adoption mechanism specified in §3.11 covers the common case (conversations resume with their handle still in context) so most users never see the impact.
+**Open follow-up resolved in §3.11 and superseded by §2.12:** Closing Claude Desktop terminates the bridge. The originally-planned recovery was the lazy-adoption mechanism in §3.11. With the §2.12 persistence decision, persistence is now the primary recovery mechanism and lazy adoption is the reconciliation backstop.
 
 ### 3.5 `summary` parameter contract
 
@@ -348,25 +378,49 @@ Ordering: stable sort by `name`. (Insertion order would be subtle to maintain ac
 
 Pagination: not in v1. If the index grows past ~500 entries, we revisit.
 
-### 3.7 Handle lifetime and cleanup
+### 3.7 Handle lifetime and cleanup ✅ RESOLVED
 
-Open: when does a handle's state get cleaned up?
+With persistence (§2.12), handles now live across bridge restarts, so the question shifts from "how do we recover after a restart" (answered by §2.12) to "how do we keep the persisted state file from growing without bound." Each handle's persisted footprint is small (an 8-char handle, plus a branch map and a set of read-baseline signatures), but over months of daily use the count of handles grows steadily, and most of them belong to conversations the user will never return to.
 
-- **On bridge restart:** all in-memory state is lost. Branches on disk remain and are reaped by the next `memory_run_maintenance` call.
-- **On graceful Claude Desktop disconnect:** the bridge sees the stdio pipe close; it could clean up all handles at that point. But the discussion noted (line 153) that this only signals "Claude Desktop exited" — it can't tell which conversations were ongoing. Best behavior: at disconnect, mark all handles as orphaned; their branches will be merged during the next `memory_run_maintenance` call.
-- **On idle timeout:** a handle that hasn't seen activity in N hours could be auto-evicted. Probably not worth the complexity in v1.
+**When a handle's state can be cleaned up:**
+
+A handle is eligible for eviction when **both** of the following hold:
+1. It owns no branches (all its branches have been merged away by `memory_run_maintenance`, or it never created any). A handle with live branches must never be evicted, because evicting it would orphan its branch files and lose the read-your-own-writes guarantee for that conversation.
+2. It has been inactive for longer than a retention window (proposed default: 30 days since its last memory tool call). Read baselines for a handle that hasn't been used in a month are very unlikely to ever be consulted again, because the conversation that owned the handle is almost certainly finished.
+
+**When cleanup runs:**
+
+Cleanup is folded into `memory_run_maintenance` (the existing manual-trigger flow from §3.1). After the maintenance pass merges branches, it sweeps the handle table and evicts every handle meeting both eligibility criteria. This keeps cleanup on the same user-controlled cadence as merging — no separate timer, no background thread.
+
+The bridge also opportunistically drops a handle's read baselines for blocks that no longer exist (e.g., a block the baseline references was deleted), since those baselines can never be meaningfully compared again. This is cheap bookkeeping done during the same sweep.
+
+**What eviction does:** removes the handle's entry from the in-memory map and from the next persisted write of `.bridge-state.json`. If an evicted handle is later presented again (e.g., a very old conversation the user returns to after 30+ days), it is treated as unknown: the bridge attempts lazy adoption (finds no branches, since eviction required zero branches), then returns `INVALID_HANDLE`, and the LLM recovers via `memory_start_conversation`. No data is lost because an evicted handle had no branches by definition.
+
+**Write cadence for `.bridge-state.json` (resolving the detail deferred from §2.12):**
+
+- Write on clean shutdown (stdin EOF).
+- Checkpoint during operation after a state-changing operation, debounced so that a burst of writes doesn't cause a burst of disk I/O (proposed: coalesce changes and flush at most once every few seconds, plus an immediate flush after branch creation since that is the most important state to not lose).
+- Whole-file rewrite each time (via temp + atomic rename). Incremental/append-based persistence is a v1.x optimization; for the expected state size (a few hundred handles at most, each small) a whole-file JSON rewrite is well under a millisecond and not worth optimizing.
+
+**Retention window is configurable.** The 30-day default is a starting point. A user who runs many concurrent conversations might want it shorter; a user who returns to old conversations might want it longer. Exposed as a bridge configuration value, not hard-coded.
+
+**Deferred to v1.x:**
+- A hard cap on handle count (evict least-recently-used beyond the cap) as a backstop if the retention window alone proves insufficient. Not expected to be needed for single-user workloads.
+- Incremental persistence (append-only change log + periodic compaction) if whole-file rewrites ever become a bottleneck.
 
 ### 3.8 Where do branches store on disk?
 
-Proposed naming convention: `<basename>.branch-<handle>-<ISO8601compact>.<ext>`. Example: `core.branch-h7k3-20260520T1423.md`.
+Proposed naming convention: `<basename>.branch-<handle>-<ISO8601compact>.<ext>`. Example: `core.branch-h7k3xy90-20260520T1423.md`.
 
 This embeds the handle in the filename, which:
 
-- Lets the bridge reconstruct the handle→branch map from disk on startup (for branches whose handles are still active).
-- Makes orphaned branches (handle no longer active) visible by inspection.
+- Lets the bridge reconstruct the handle→branch map from disk via lazy adoption (§3.11), serving as the reconciliation backstop to the persisted state file (§2.12).
+- Makes branches visible and attributable by inspection (the handle in the name identifies the owning conversation's session).
 - Replaces the random hex suffix from the old design with the handle itself, which is more meaningful.
 
 The on-disk layout remains flat: branches sit alongside their base files in the same directory. The SKILL never references this layout; only the bridge does.
+
+**Status:** Still open pending Fran's confirmation, but no change to the naming convention is driven by the persistence decision — the convention remains load-bearing for lazy adoption, which §2.12 retains as the reconciliation backstop.
 
 ### 3.9 Behavior when `memory_run_maintenance` is invoked during an active conversation ✅ RESOLVED
 
@@ -442,7 +496,7 @@ New codes can be added in v1.x as new error situations are identified. The set a
 
 ### 3.11 Bridge lifecycle and orphaned branches ✅ RESOLVED
 
-**Background.** The bridge is an MCP server spawned by Claude Desktop over stdio. When Claude Desktop closes, the stdio pipe closes, the bridge process sees EOF and terminates. Per §3.4, the handle→state map is in-memory only and dies with the bridge.
+**Background.** The bridge is an MCP server spawned by Claude Desktop over stdio. When Claude Desktop closes, the stdio pipe closes, the bridge process sees EOF and terminates. The in-memory state would die with the bridge — which is precisely why §2.12 introduces state persistence. The discussion below traces the reasoning chronologically: it first works out a recovery scheme assuming no persistence (lazy adoption), then records how the §2.12 persistence decision changed lazy adoption's role from primary mechanism to backstop.
 
 **Initial concern.** Without recovery, branches from a previous session would become "orphaned" — branch files would remain on disk, but no live handle would own them, so new conversations could not see them. Content would still be safe but invisible to any conversation until `memory_run_maintenance` ran.
 
@@ -470,16 +524,22 @@ This means:
 |---|---|
 | A. Auto-merge on bridge startup | Rejected. Startup blocking on sub-agent merges is bad UX; merge bugs could prevent app launch. |
 | B. Expose "needs maintenance" flag to LLM | Rejected. Violates §2.2 (branches invisible to LLM). |
-| C. Do nothing beyond manual `memory_run_maintenance` | **Chosen, in combination with lazy adoption.** Simplest; consistent with §3.1's manual-trigger philosophy. The lazy-adoption recovery mechanism handles the common case automatically; manual maintenance handles the rest. |
-| D. Report pending count from `memory_start_conversation` | Rejected. The pending count would mostly reflect debris from abandoned conversations the user doesn't care about, making the signal noisy. Lazy adoption already handles the cases the user *does* care about. |
+| C. Do nothing beyond manual `memory_run_maintenance` | **Chosen, in combination with lazy adoption.** Simplest; consistent with §3.1's manual-trigger philosophy. |
+| D. Report pending count from `memory_start_conversation` | Rejected. The pending count would mostly reflect debris from abandoned conversations the user doesn't care about, making the signal noisy. |
 
-**Implementation notes:**
+**Superseded by §2.12 (state persistence).** The analysis above was written when bridge state was in-memory-only, making lazy adoption the *primary* recovery mechanism. Fran subsequently decided to persist bridge state across restarts (§2.12). That changes the role of lazy adoption:
 
-- The directory scan in lazy adoption is per-call but cheap (single directory listing with a glob pattern). It runs only on unknown-handle paths, which is the slow path anyway.
-- Optimization deferred to v1.x if it proves necessary: the bridge could perform a single full scan on startup, building a `handle → [branch files]` cache, then consult the cache on unknown-handle calls. For v1, scan-on-demand is fine.
+- **Primary recovery is now the persisted state file.** On startup the bridge loads `.bridge-state.json`, recovering the full handle table, branch map, *and* read baselines. The read-baseline recovery is the key gain — lazy adoption alone could never recover baselines, so before persistence, every restart degraded race detection and the `changed_since_last_read` flag. With persistence, a restart is transparent.
+- **Lazy adoption is now the reconciliation backstop**, not the primary mechanism. It runs at startup after loading the state file, to pick up any branch files on disk that the state file doesn't know about (created after the last checkpoint, or present when the state file is missing/corrupt). It also still runs on the unknown-handle path (§2.7) to handle a handle that's valid on disk but absent from the loaded state.
+
+The net effect: the common close-reopen case is now fully transparent (no degradation at all), and the system degrades to the previous lazy-adoption-only behavior (branch map recovered, baselines lost) only when the state file is missing or corrupt. The design is strictly better than before and never worse.
+
+**Implementation notes (lazy adoption, in its backstop role):**
+
+- The directory scan in lazy adoption is cheap (single directory listing with a glob pattern). It runs at startup (once, after loading the state file) and on the unknown-handle path.
 - Branch filename pattern matching must be tolerant of timestamp variation — the handle is the lookup key, not the timestamp.
 
-**Note on the partial-persistence reality:** §3.4 specifies that handles aren't persisted across bridge restarts. That remains true in a strict sense — handle *identity*, *issuance*, and *read baselines* are not persisted; only the handle → block-branch relationship is recoverable from disk because branch filenames carry the handle. This is a happy accident of §3.8's filename convention rather than an intentional persistence design. Worth noting because future work that changes the branch naming convention must preserve this property or accept that lazy adoption stops working.
+**Note on what persistence does and doesn't store:** §2.12 persists handle identity, the branch map, and read baselines. The branch *files* themselves remain the source of truth for branch content; the state file only records the mapping and metadata. Because branch filenames also embed the handle (§3.8), the branch→handle association is independently recoverable from disk even if the state file is lost — which is exactly what makes lazy adoption a viable backstop. Future work that changes the branch naming convention must preserve this property or accept that the backstop stops working (the primary persisted-state path would still function).
 
 ---
 
@@ -504,7 +564,9 @@ Largest single change. The chapter needs substantial rewriting:
 - Atomic block write logic specified (§2.9 of this plan; single-file write with frontmatter, no cross-file coordination).
 - Derived-view index implementation specified (§2.8 of this plan; bridge walks blocks directory, reads frontmatter, assembles index on demand with caching).
 - Merge mutex specified (§2.6 of this plan).
-- New tool `memory_run_maintenance` specified (§2.5, §3.1 of this plan): bridge enumerates pending branches, dispatches sub-agents for semantic merges, holds the merge mutex, returns when all merges complete.
+- New tool `memory_run_maintenance` specified (§2.5, §3.1 of this plan): bridge enumerates pending branches, dispatches sub-agents for semantic merges, holds the merge mutex, returns when all merges complete. Also performs the §3.7 handle-cleanup sweep at the end of the pass.
+- State persistence specified (§2.12 of this plan): `.bridge-state.json` in the memory root holding live handles, the branch map, and read baselines; atomic write on clean shutdown plus debounced checkpoints; load-and-reconcile at startup with lazy adoption (§3.11) as the backstop.
+- Handle lifetime and cleanup specified (§3.7 of this plan): eviction of zero-branch, long-inactive handles during the maintenance sweep; configurable retention window.
 
 ### 4.3 Chapter 4 (Memory System Layer 2)
 
@@ -550,8 +612,12 @@ Moderate change. New test cases needed for:
 - Derived-view index correctness (assembles correctly from block frontmatter; per-handle views show correct branch/base mix).
 - Single-file atomic block write (crash simulation between temp-write and rename).
 - Frontmatter handling (preserved across writes when summary not supplied; updated when supplied; gracefully defaulted if missing on read).
-- Graceful re-init on unknown handle.
-- Maintenance flow: branch creation, merge, base file replacement.
+- Unknown/malformed handle handling: `INVALID_HANDLE` and `MALFORMED_HANDLE` returned correctly; LLM-side recovery via `memory_start_conversation`.
+- State persistence (§2.12): write-on-shutdown and checkpoint produce a valid `.bridge-state.json`; load-and-reconcile at startup restores handles, branch map, and read baselines; restart is transparent to a resuming conversation (handle still recognized, baselines intact).
+- Persistence corruption fallback: a missing or corrupt state file causes a clean fall-back to lazy adoption (branch map recovered from filenames, baselines reset) with no crash.
+- Lazy-adoption backstop (§3.11): branch files on disk not present in the loaded state are picked up at startup.
+- Handle cleanup (§3.7): zero-branch, long-inactive handles are evicted during the maintenance sweep; handles with live branches are never evicted.
+- Maintenance flow: branch creation, merge, base file replacement, post-merge handle cleanup.
 
 ### 4.8 Chapter 9 (Future Enhancements)
 
@@ -670,3 +736,18 @@ Decision: Option C (do nothing beyond manual `memory_run_maintenance`) is the ri
 Knock-on changes: §2.7 substantially rewritten to specify the lazy-adoption procedure; §3.3 failure-modes table updated to reflect that bridge-restart-with-branches no longer produces an error; §3.4 closing follow-up note resolved against §3.11.
 
 Subtle point worth preserving for future work: §3.4 says handles aren't persisted, but lazy adoption is a *partial* form of persistence — the handle→branch relationship is recoverable from disk thanks to §3.8's filename convention. Any future change to branch naming must preserve this property or accept that lazy adoption stops working. Noted at the end of §3.11.
+### 2026-05-27 — §2.12 added: bridge state is persisted across restarts (supersedes the in-memory-only decision)
+
+After seeing the close-reopen implications spelled out in §3.11, Fran decided the bridge should persist its state across restarts rather than relying on lazy adoption alone. This reverses the "in-memory only" persistence decision recorded in the 2026-05-25 §3.4 working note above.
+
+Rationale: the bridge terminates on every Claude Desktop close, so in-memory-only state is discarded routinely, not rarely. Lazy adoption (§3.11) could recover the handle→branch map from disk but never the read baselines, so every restart degraded race detection and the changed_since_last_read flag. Persistence recovers all three pieces of state (live handles, branch map, read baselines), making restarts transparent.
+
+Design (new §2.12): a single JSON file `.bridge-state.json` in the memory root, written atomically (temp + rename) on clean shutdown and on debounced checkpoints during operation, loaded and reconciled at startup. Reconciliation drops persisted branch entries whose files are gone and runs lazy adoption as a backstop to pick up branch files not represented in the loaded state. If the state file is missing or corrupt, the bridge falls back to pure lazy adoption — so it is never worse off than the pre-persistence design.
+
+Role change for lazy adoption (§3.11): demoted from primary recovery mechanism to reconciliation backstop. The §3.11 analysis is preserved as the chronological record, with a "superseded by §2.12" note explaining the new role.
+
+§3.7 resolved as part of this change: with persistence, handles live across restarts, so a cleanup policy is now needed to bound the state file. Decision — a handle is evictable when it owns zero branches AND has been inactive past a configurable retention window (default 30 days). Cleanup is folded into memory_run_maintenance (no separate timer). Evicting a zero-branch handle loses no data. Write-cadence detail also settled here: clean-shutdown write + debounced checkpoints, whole-file rewrite via temp+rename (incremental persistence deferred to v1.x).
+
+Knock-on changes: §2.7 rewritten again to put persisted-state recovery first and lazy adoption as the backstop; §3.4 persistence bullet reversed to point at §2.12; §3.11 options table and notes updated; §3.11 background reframed to present the reasoning chronologically. §3.2's within-session logic is unchanged, but its cross-restart behavior now benefits (baselines survive), as noted in §2.12.
+
+Note on superseded earlier notes: the 2026-05-25 §3.4 note (says "in-memory only") and the 2026-05-25 §3.11 notes (Option D recommendation, then "lazy adoption is primary") are left intact as a historical record. The authoritative current state is: persistence primary (§2.12), lazy adoption backstop (§3.11), Option C chosen for the surfacing question.
