@@ -386,7 +386,7 @@ With persistence (§2.12), handles now live across bridge restarts, so the quest
 
 A handle is eligible for eviction when **both** of the following hold:
 1. It owns no branches (all its branches have been merged away by `memory_run_maintenance`, or it never created any). A handle with live branches must never be evicted, because evicting it would orphan its branch files and lose the read-your-own-writes guarantee for that conversation.
-2. It has been inactive for longer than a retention window (proposed default: 30 days since its last memory tool call). Read baselines for a handle that hasn't been used in a month are very unlikely to ever be consulted again, because the conversation that owned the handle is almost certainly finished.
+2. It has been inactive for longer than a retention window (default: 60 days since its last memory tool call). Read baselines for a handle that hasn't been used in two months are very unlikely to ever be consulted again, because the conversation that owned the handle is almost certainly finished.
 
 **When cleanup runs:**
 
@@ -402,7 +402,7 @@ The bridge also opportunistically drops a handle's read baselines for blocks tha
 - Checkpoint during operation after a state-changing operation, debounced so that a burst of writes doesn't cause a burst of disk I/O (proposed: coalesce changes and flush at most once every few seconds, plus an immediate flush after branch creation since that is the most important state to not lose).
 - Whole-file rewrite each time (via temp + atomic rename). Incremental/append-based persistence is a v1.x optimization; for the expected state size (a few hundred handles at most, each small) a whole-file JSON rewrite is well under a millisecond and not worth optimizing.
 
-**Retention window is configurable.** The 30-day default is a starting point. A user who runs many concurrent conversations might want it shorter; a user who returns to old conversations might want it longer. Exposed as a bridge configuration value, not hard-coded.
+**Retention window is configurable.** The 60-day default is a starting point. A user who runs many concurrent conversations might want it shorter; a user who returns to old conversations might want it longer. Exposed as a bridge configuration value, not hard-coded.
 
 **Deferred to v1.x:**
 - A hard cap on handle count (evict least-recently-used beyond the cap) as a backstop if the retention window alone proves insufficient. Not expected to be needed for single-user workloads.
@@ -751,3 +751,13 @@ Role change for lazy adoption (§3.11): demoted from primary recovery mechanism 
 Knock-on changes: §2.7 rewritten again to put persisted-state recovery first and lazy adoption as the backstop; §3.4 persistence bullet reversed to point at §2.12; §3.11 options table and notes updated; §3.11 background reframed to present the reasoning chronologically. §3.2's within-session logic is unchanged, but its cross-restart behavior now benefits (baselines survive), as noted in §2.12.
 
 Note on superseded earlier notes: the 2026-05-25 §3.4 note (says "in-memory only") and the 2026-05-25 §3.11 notes (Option D recommendation, then "lazy adoption is primary") are left intact as a historical record. The authoritative current state is: persistence primary (§2.12), lazy adoption backstop (§3.11), Option C chosen for the surfacing question.
+
+### 2026-06-04 — Retention default changed to 60 days; PR #44 (Chapter 3 §3.2 config) closed without merging
+
+Two housekeeping items:
+
+**Retention window default: 30 → 60 days.** Fran changed the handle retention window default from 30 to 60 days. The manual edit initially updated only one occurrence (the eviction-recovery example), leaving the authoritative statement in §3.7 item 2 and the "Retention window is configurable" note still saying 30. Reconciled both to 60 so §3.7 is internally consistent. The historical 2026-05-29 working note above still says "default 30 days" — left intact as a dated record of the original decision; the authoritative current value is 60 days.
+
+**PR #44 closed without merging.** During this round, a surgical update to Chapter 3 §3.2 Configuration was made (session→handle terminology, `retention_days: 60`, a new `persistence:` block, and validation pseudo-code for the new params) and opened as PR #44. We then recognized this was premature — the original design documents should not be modified while the update plan is still being finalized. PR #44 was closed without merging and the local change reverted. Chapter 3 §3.2 on `main` therefore remains in its original session-era state and still needs migration as part of the full Chapter 3 rewrite (work-ordering step 2 in §5).
+
+For the eventual Chapter 3 rewrite, the §3.2 config content devised in the closed PR #44 is a good starting point and can be reused: a `handle:` block (`id_length: 8`, `retention_days: 60`), a `persistence:` block (`state_file` path, `checkpoint_interval_seconds: 5`, immediate checkpoint on branch creation), removal of the old `max_sessions` cap (deferred to v1.x per §3.7), and the corresponding additions to the config-loading validation pseudo-code. The PR #44 branch (`docs/chapter3-config-handle-terminology`) preserves the exact text if it hasn't been deleted.
