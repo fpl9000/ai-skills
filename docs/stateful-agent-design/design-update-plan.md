@@ -394,7 +394,7 @@ Cleanup is folded into `memory_run_maintenance` (the existing manual-trigger flo
 
 The bridge also opportunistically drops a handle's read baselines for blocks that no longer exist (e.g., a block the baseline references was deleted), since those baselines can never be meaningfully compared again. This is cheap bookkeeping done during the same sweep.
 
-**What eviction does:** removes the handle's entry from the in-memory map and from the next persisted write of `.bridge-state.json`. If an evicted handle is later presented again (e.g., a very old conversation the user returns to after 30+ days), it is treated as unknown: the bridge attempts lazy adoption (finds no branches, since eviction required zero branches), then returns `INVALID_HANDLE`, and the LLM recovers via `memory_start_conversation`. No data is lost because an evicted handle had no branches by definition.
+**What eviction does:** removes the handle's entry from the in-memory map and from the next persisted write of `.bridge-state.json`. If an evicted handle is later presented again (e.g., a very old conversation the user returns to after 60+ days), it is treated as unknown: the bridge attempts lazy adoption (finds no branches, since eviction required zero branches), then returns `INVALID_HANDLE`, and the LLM recovers via `memory_start_conversation`. No data is lost because an evicted handle had no branches by definition.
 
 **Write cadence for `.bridge-state.json` (resolving the detail deferred from §2.12):**
 
