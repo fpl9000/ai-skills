@@ -107,10 +107,27 @@ run_command:
 memory:
   directory: "C:\\franl\\.claude-agent-memory"
 
-# Session tracking
-session:
-  id_length: 8                    # Length of generated session IDs (e.g., "ses-7ka2")
-  max_sessions: 20                # Cap on tracked sessions (oldest evicted when exceeded)
+# Handle tracking and lifetime
+# A handle is the opaque per-conversation identifier the bridge mints in
+# memory_start_conversation and that the LLM passes to every memory tool.
+handle:
+  id_length: 8                    # Length of generated handles, lowercase alphanumeric (e.g., "h7k3xy90")
+  retention_days: 60              # Handles that own no branches and have been inactive this long are
+                                  # evicted during memory_run_maintenance. A handle that owns any
+                                  # branch is never evicted, regardless of age (eviction would orphan
+                                  # its branch and break read-your-own-writes for that conversation).
+
+# Bridge state persistence
+# The bridge persists live handles, the per-handle branch map, and per-handle
+# read baselines so this state survives Claude Desktop restarts (the bridge
+# terminates whenever Claude Desktop closes). Written atomically on clean
+# shutdown and on debounced checkpoints during operation; loaded and reconciled
+# against the filesystem at startup.
+persistence:
+  state_file: "C:\\franl\\.claude-agent-memory\\.bridge-state.json"
+  checkpoint_interval_seconds: 5  # Debounce window for checkpoint writes during operation.
+                                  # A branch creation also forces an immediate checkpoint, since
+                                  # that is the most important state to not lose on a hard crash.
 
 # Branching (concurrent read-modify-write race resolution)
 branching:
@@ -137,6 +154,10 @@ func LoadConfig(path string) Config:
     // Validate:
     //   - async.sync_window_seconds < 30
     //   - memory.directory exists (or create it)
+    //   - handle.id_length >= 8 (shorter handles raise collision risk)
+    //   - handle.retention_days > 0
+    //   - persistence.state_file parent directory exists (or create it)
+    //   - persistence.checkpoint_interval_seconds > 0
     //   - logging.file parent directory exists
     //   - claude_cli.path is executable
     //   - run_command.shell is executable
