@@ -119,13 +119,13 @@ In March 2026, Anthropic launched **Dispatch** as a research preview — a Cowor
 
 **Current limitations preventing adoption:**
 
-| Limitation | Impact |
-|-----------|--------|
-| **Mac-only.** Dispatch requires the Claude Mac app; our system runs on Windows 11. | Blocking. No Windows support means Dispatch cannot be used at all. |
-| **Cowork, not Claude Desktop.** Dispatch drives a Cowork session (sandboxed folder, Agent SDK). Our bridge is an MCP server that speaks stdio to Claude Desktop — a different runtime. | Blocking. Dispatch has no access to bridge tools (`safe_read_file`, `spawn_agent`, `run_command`, etc.). |
-| **No MCP bridge access.** Cowork sessions do not currently expose user-configured MCP servers. | Blocking. Even on Mac, Dispatch wouldn't reach the bridge's memory mutex, session tracking, or sub-agent system. |
-| **Research preview maturity.** Early testing reports ~50% success rate, slow performance, inability to interact with most apps. | Non-blocking but concerning. Expected to improve. |
-| **No programmatic API.** Dispatch is a human-facing UI, not an API. Cannot be driven by automation, webhooks, or other agents. | Non-blocking for the primary use case (human on phone), but limits future integration. |
+| Limitation                                                                                                                                                                             | Impact                                                                                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Mac-only.** Dispatch requires the Claude Mac app; our system runs on Windows 11.                                                                                                     | Blocking. No Windows support means Dispatch cannot be used at all.                                               |
+| **Cowork, not Claude Desktop.** Dispatch drives a Cowork session (sandboxed folder, Agent SDK). Our bridge is an MCP server that speaks stdio to Claude Desktop — a different runtime. | Blocking. Dispatch has no access to bridge tools (`safe_read_file`, `spawn_agent`, `run_command`, etc.).         |
+| **No MCP bridge access.** Cowork sessions do not currently expose user-configured MCP servers.                                                                                         | Blocking. Even on Mac, Dispatch wouldn't reach the bridge's memory mutex, session tracking, or sub-agent system. |
+| **Research preview maturity.** Early testing reports ~50% success rate, slow performance, inability to interact with most apps.                                                        | Non-blocking but concerning. Expected to improve.                                                                |
+| **No programmatic API.** Dispatch is a human-facing UI, not an API. Cannot be driven by automation, webhooks, or other agents.                                                         | Non-blocking for the primary use case (human on phone), but limits future integration.                           |
 
 **Action items:**
 
