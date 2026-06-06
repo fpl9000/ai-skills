@@ -229,9 +229,9 @@ A few finer points (write cadence specifics, whether to persist incrementally vs
 
 ---
 
-## 3. Open Questions Still to Resolve
+## 3. Open Questions (All Resolved)
 
-These need answers before the rewrite. Listed roughly in order of consequence.
+All eleven items below have been resolved. They are retained with their full reasoning (and ✅ RESOLVED markers) as the decision record for the rewrite. Listed roughly in the order they were originally raised.
 
 ### 3.1 Wake-up phase mechanism ✅ RESOLVED
 
@@ -349,7 +349,9 @@ This eliminates handle-collision risk (the bridge controls handle generation ent
 
 **Open follow-up resolved in §3.11 and superseded by §2.12:** Closing Claude Desktop terminates the bridge. The originally-planned recovery was the lazy-adoption mechanism in §3.11. With the §2.12 persistence decision, persistence is now the primary recovery mechanism and lazy adoption is the reconciliation backstop.
 
-### 3.5 `summary` parameter contract
+### 3.5 `summary` parameter contract ✅ RESOLVED
+
+Confirmed as drafted; no changes requested.
 
 For `memory_write_block(handle, name, content, summary?)`:
 
@@ -357,13 +359,13 @@ For `memory_write_block(handle, name, content, summary?)`:
 - **For existing blocks:** `summary` is optional. If absent, the existing summary in the block's frontmatter is preserved unchanged. If present (including empty string), it replaces the existing frontmatter summary.
 - **Length:** capped at, say, 200 characters. Truncated with a warning if exceeded.
 
-### 3.6 Schema for `memory_get_index()`
+### 3.6 Schema for `memory_get_index()` ✅ RESOLVED
 
-Proposed:
+Confirmed as drafted, with the handle example updated to the 8-character form per §3.4.
 
 ```json
 {
-  "handle": "abc1",
+  "handle": "abc1def2",
   "index": {
     "schema_version": 1,
     "blocks": [
@@ -408,19 +410,31 @@ The bridge also opportunistically drops a handle's read baselines for blocks tha
 - A hard cap on handle count (evict least-recently-used beyond the cap) as a backstop if the retention window alone proves insufficient. Not expected to be needed for single-user workloads.
 - Incremental persistence (append-only change log + periodic compaction) if whole-file rewrites ever become a bottleneck.
 
-### 3.8 Where do branches store on disk?
+### 3.8 Where do branches store on disk? ✅ RESOLVED
 
-Proposed naming convention: `<basename>.branch-<handle>-<ISO8601compact>.<ext>`. Example: `core.branch-h7k3xy90-20260520T1423.md`.
+Naming convention: `<basename>.branch-<handle>-<ISO8601compact-UTC>.<ext>`. Example: `core.branch-h7k3xy90-20260520T142300Z.md`.
 
 This embeds the handle in the filename, which:
 
 - Lets the bridge reconstruct the handle→branch map from disk via lazy adoption (§3.11), serving as the reconciliation backstop to the persisted state file (§2.12).
-- Makes branches visible and attributable by inspection (the handle in the name identifies the owning conversation's session).
+- Makes branches visible and attributable by inspection (the handle in the name identifies the owning conversation).
 - Replaces the random hex suffix from the old design with the handle itself, which is more meaningful.
 
 The on-disk layout remains flat: branches sit alongside their base files in the same directory. The SKILL never references this layout; only the bridge does.
 
-**Status:** Still open pending Fran's confirmation, but no change to the naming convention is driven by the persistence decision — the convention remains load-bearing for lazy adoption, which §2.12 retains as the reconciliation backstop.
+**The embedded timestamp — what it means and how it behaves:**
+
+- **It is the branch's creation time** — the moment the bridge wrote the branch file in response to the first branching write for that (handle, block) pair (per §2.3, a write against a stale baseline when no branch yet exists for that pair).
+- **It is frozen at creation and never updated.** Per §2.4 (no branches of branches), all subsequent writes by the same handle go to the same branch file, updating its *contents* but not its *filename*. The embedded timestamp therefore reflects "when this conversation first diverged from the base," not "when the branch was last modified." Last-modified time is available from the filesystem's own mtime if needed. Creation-time-in-the-name plus mtime-for-recency is a deliberate split: it means the bridge never has to rename a branch file (renaming on every write would add complexity and could race with lazy adoption mid-rename).
+- **It is purely informational / for human debugging.** The bridge never parses or compares it. Lazy adoption matches branches by handle (globbing `*.branch-<handle>-*.<ext>`); uniqueness is already guaranteed by the (handle, block) pair plus the block basename. The timestamp is not a lookup key or a uniqueness key — just a human-readable annotation of when the fork happened.
+
+**Timestamp format — compact UTC with seconds and a `Z` suffix:**
+
+- **Compact (basic) ISO 8601**, not extended: no hyphens between date parts, no colons between time parts, but the literal `T` separator retained. Two reasons: colons are illegal in Windows filenames (`:` is the drive-letter separator), and the extended form's internal hyphens would collide visually and programmatically with the hyphens this filename uses to separate its own fields (`branch` - `<handle>` - `<timestamp>`).
+- **UTC with a trailing `Z`**, e.g., `20260520T142300Z`. `Z` is filename-safe (just a letter) and marks the time as UTC, removing daylight-saving and timezone ambiguity. Chosen over local time for unambiguity; the small loss of at-a-glance local readability is acceptable since the timestamp is a debug annotation, not a primary interface.
+- **Seconds included** (`...142300Z`, not `...1423Z`). Cheap, improves debug precision, and removes any same-minute ambiguity even though uniqueness doesn't strictly require it.
+
+Decoding the example `20260520T142300Z`: year `2026`, month `05`, day `20`, `T` separator, hour `14`, minute `23`, second `00`, `Z` = UTC — i.e., 2026-05-20 14:23:00 UTC.
 
 ### 3.9 Behavior when `memory_run_maintenance` is invoked during an active conversation ✅ RESOLVED
 
@@ -500,7 +514,7 @@ New codes can be added in v1.x as new error situations are identified. The set a
 
 **Initial concern.** Without recovery, branches from a previous session would become "orphaned" — branch files would remain on disk, but no live handle would own them, so new conversations could not see them. Content would still be safe but invisible to any conversation until `memory_run_maintenance` ran.
 
-**The recovery mechanism (Fran's observation).** Branch filenames already embed the handle (per §3.8: `B.branch-<handle>-<ISO8601compact>.<ext>`). The filesystem is therefore a partial backing store for the handle→branch portion of the bridge's state. When a conversation resumes after Claude Desktop reopens, its LLM context typically still contains the handle from the prior bridge instance (because the handle was echoed in every memory tool response per §2.1, making it robust to compaction). When that conversation makes any memory tool call, the bridge can rebuild the relevant map entries by scanning the directory for branch files whose embedded handle matches.
+**The recovery mechanism (Fran's observation).** Branch filenames already embed the handle (per §3.8: `B.branch-<handle>-<ISO8601compact-UTC>.<ext>`). The filesystem is therefore a partial backing store for the handle→branch portion of the bridge's state. When a conversation resumes after Claude Desktop reopens, its LLM context typically still contains the handle from the prior bridge instance (because the handle was echoed in every memory tool response per §2.1, making it robust to compaction). When that conversation makes any memory tool call, the bridge can rebuild the relevant map entries by scanning the directory for branch files whose embedded handle matches.
 
 **The decision: lazy adoption.** On any memory tool call with a handle the bridge doesn't recognize, before returning `INVALID_HANDLE`, the bridge scans the blocks directory for branch files matching the pattern `*.branch-<handle>-*.<ext>`. For each match found, the bridge reconstructs the corresponding map entry `(handle, block_name) → branch_file_path` and treats the handle as live. Only if no branch files match does the bridge proceed to return `INVALID_HANDLE`.
 
@@ -637,7 +651,7 @@ Unaffected.
 
 Suggested order for the rewrite conversation:
 
-1. **Resolve all §3 open questions** (this plan) — landed in a follow-up version of this plan before the rewrite starts.
+1. **Resolve all §3 open questions** (this plan) — ✅ complete; all eleven resolved.
 2. **Update Chapter 3** (Bridge Server) — most consequential changes; many downstream chapters reference it.
 3. **Update Chapter 4** (Memory System) — file-format and branch-naming changes.
 4. **Update Chapter 5** (SKILL) — simplification pass.
@@ -761,3 +775,15 @@ Two housekeeping items:
 **PR #44 closed without merging.** During this round, a surgical update to Chapter 3 §3.2 Configuration was made (session→handle terminology, `retention_days: 60`, a new `persistence:` block, and validation pseudo-code for the new params) and opened as PR #44. We then recognized this was premature — the original design documents should not be modified while the update plan is still being finalized. PR #44 was closed without merging and the local change reverted. Chapter 3 §3.2 on `main` therefore remains in its original session-era state and still needs migration as part of the full Chapter 3 rewrite (work-ordering step 2 in §5).
 
 For the eventual Chapter 3 rewrite, the §3.2 config content devised in the closed PR #44 is a good starting point and can be reused: a `handle:` block (`id_length: 8`, `retention_days: 60`), a `persistence:` block (`state_file` path, `checkpoint_interval_seconds: 5`, immediate checkpoint on branch creation), removal of the old `max_sessions` cap (deferred to v1.x per §3.7), and the corresponding additions to the config-loading validation pseudo-code. The PR #44 branch (`docs/chapter3-config-handle-terminology`) preserves the exact text if it hasn't been deleted.
+
+### 2026-06-05 — §3.5, §3.6, §3.8 resolved; all §3 open questions now closed
+
+The final three open questions are resolved, completing §3:
+
+- **§3.5 (`summary` parameter contract):** confirmed as drafted; no changes.
+- **§3.6 (`memory_get_index()` schema):** confirmed as drafted, with the handle example updated from the old 4-char form to the 8-char form (`abc1def2`) per §3.4.
+- **§3.8 (branch storage on disk):** naming convention confirmed as `<basename>.branch-<handle>-<ISO8601compact-UTC>.<ext>` (e.g., `core.branch-h7k3xy90-20260520T142300Z.md`). The embedded timestamp is fully specified: it is the branch's **creation time**, **frozen at creation** (never renamed on later writes — last-modified comes from filesystem mtime), and **purely informational** (the bridge never parses or compares it; lazy adoption matches by handle). Format is compact (basic) ISO 8601 in UTC with seconds and a trailing `Z` — compact because colons are illegal in Windows filenames and extended-form hyphens would collide with the filename's field separators; UTC-with-Z for timezone unambiguity; seconds for debug precision.
+
+With this, all eleven §3 items (3.1–3.11) are resolved. §5 work-ordering step 1 is complete. The plan is ready for the design-document rewrite, which will be executed in a fresh conversation working from this plan plus the existing chapter files, following the §5 ordering (Chapter 3 first, then Chapter 4, Chapter 5, the main design doc, remaining chapters, and a final cross-reference pass).
+
+Note on the §3.6 `updated_at` JSON value (`2026-05-20T14:23:00Z`): this is intentionally the *extended* ISO 8601 form, not the compact form used for branch filenames. Colons are legal in JSON string values, so the more readable extended form is fine there; the compact form is only required for filenames (§3.8). The two formats coexisting is deliberate, not an inconsistency.
