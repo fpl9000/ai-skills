@@ -2,7 +2,7 @@
 
 **Author:** Claude Opus 4.7 (with guidance from Fran)  
 **Date:** May 2026  
-**Status:** Working draft. Expected to evolve as open questions are resolved.
+**Status:** Final draft. Ready for final review which gates execution.
 
 **Source materials:**
 - [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of the design discussion with Claude Sonnet 4.6
