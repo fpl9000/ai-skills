@@ -17,7 +17,7 @@ This plan captures everything decided so far about the memory-aware tools redesi
 
 The scope of the rewrite is the memory subsystem only — the sub-agent system (`spawn_agent`, `run_command`, the async executor) is unaffected and stays as currently designed.
 
-This plan does not address every issue raised in the [Design Review](design-review.md). As well, the design review needs to be re-done after the significant design changes planned in this document.
+This plan intentionally does not address every issue raised in the [Design Review](design-review.md). The significant design changes planned in this document have made the design review stale. A new design review will be performed before implementation begins.
 
 ---
 
