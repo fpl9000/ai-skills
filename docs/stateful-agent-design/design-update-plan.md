@@ -5,11 +5,10 @@
 **Status:** Final draft. Ready for final review which gates execution.
 
 **Source materials:**
-- [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of the design discussion with Claude Sonnet 4.6
-- [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — review of that discussion
-- [design-review.md](./design-review.md) — critical design review by Claude Opus
-- [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the current design
-
+- [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the current design to be updated according to this plan
+- [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of the memory-aware tools discussion with Claude Sonnet
+- [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — analysis of the memory-aware tools discussion
+- [design-review.md](./design-review.md) — critical design review by Claude Opus, now stale due to significant changes described in this plan
 ---
 
 ## 1. Purpose and Scope
@@ -17,6 +16,8 @@
 This plan captures everything decided so far about the memory-aware tools redesign, identifies what still needs to be resolved, and proposes an ordering for the design-document rewrite work. It is **not** the rewrite itself. The intent is to settle the remaining open questions here, then execute the rewrite in a fresh conversation working from this plan and the existing chapter files.
 
 The scope of the rewrite is the memory subsystem only — the sub-agent system (`spawn_agent`, `run_command`, the async executor) is unaffected and stays as currently designed.
+
+This plan does not address every issue raised in the [Design Review](design-review.md). As well, the design review needs to be re-done after the significant design changes planned in this document.
 
 ---
 
