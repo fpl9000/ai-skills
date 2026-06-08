@@ -1,9 +1,9 @@
 # Analysis of the Memory-aware Tools Discussion
 
-**Reviewer:** Claude Opus 4.7
-**Date:** May 2026
-**Subject:** `memory-aware-tools-idea.md` (transcript of design discussion with Claude Sonnet 4.6)
-**Purpose:** Surface flaws, inconsistencies, and omissions before the Stateful Agent Design document is updated to incorporate the proposed redesign.
+**Reviewer:** Claude Opus 4.7  
+**Date:** May 2026  
+**Subject:** File [memory-aware-tools-idea.md](memory-aware-tools-idea.md) (transcript of design discussion with Claude Sonnet 4.6)  
+**Purpose:** Surface flaws, inconsistencies, and omissions before the [Stateful Agent Design](stateful-agent-design.md) document is updated to incorporate the proposed redesign.
 
 ---
 
