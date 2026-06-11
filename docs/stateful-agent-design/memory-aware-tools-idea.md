@@ -1,8 +1,8 @@
 # Memory-aware Tools Discussion w/ Claude
 
-This is a transcript of my discussion with Claude about [its review](https://github.com/fpl9000/ai-skills/blob/400b158b67515e7ffd333c88918364d4651f14b6/docs/stateful-agent-design/design-review.md) of the *Stateful Agent Design* document (see [stateful-agent-design](https://github.com/fpl9000/ai-skills/blob/main/docs/stateful-agent-design/stateful-agent-design.md)) where we talk about a major design flaw and how to best solve it. My prompts appear in Markdown quotes. Claude's response follows each of my prompts.
+This is a transcript of my discussion with Claude about [its review](design-review.md) of the *Stateful Agent Design* document (see [stateful-agent-design](stateful-agent-design.md)) where we talk about a major design flaw and how to best solve it. My prompts appear in Markdown quotes. Claude's response follows each of my prompts.
 
-It begins with my prompt pointing out the design flaw.
+In the below conversation, my prompts are in markdown quoted text blocks. It begins with my prompt pointing out the design flaw.
 
 ---
 
