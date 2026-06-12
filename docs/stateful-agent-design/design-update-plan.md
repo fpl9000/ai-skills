@@ -2,18 +2,29 @@
 
 **Author:** Claude Opus 4.7 (with guidance from Fran)  
 **Date:** May 2026  
-**Status:** Final draft. Ready for final review which gates execution.
+**Status:** Final version. Ready for updating the original design.
+
+**History:**
+
+The below source materials are essential to understanding this update plan. These files exist in the same directory as this document. It's best to read them in the order they were created, as described here:
+
+1. Claude and Fran initially wrote `stateful-agent-design.md` (and its associated chapter files, `stateful-agent-design-chapter*.md`) with the intention of doing a brief review then instructing Claude Code implement it.
+2. Fran asked Claude Opus 4.7 to do a critical review of the design. Opus wrote this detailed review: `design-review.md`.
+3. Fran and Claude began discussing the review, and Fran realized that the root of many design issues was the lack of memory-aware tools and the burden placed on the LLM to track session IDs and detect race conditions. The critical part of this discussion was captured in `memory-aware-tools-idea.md`.
+4. Fran and Claude then discussed the memory-aware tools idea, capturing their design decisions in `memory-aware-tools-analysis.md`.
+5. Lastly, Fran asked Claude to document the planned changes to the original design, resulting in `design-update-plan.md` — this document.
 
 **Source materials:**
-- [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the current design to be updated according to this plan
-- [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of the memory-aware tools discussion with Claude Sonnet
-- [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — analysis of the memory-aware tools discussion
-- [design-review.md](./design-review.md) — critical design review by Claude Opus, now stale due to significant changes described in this plan
+1. [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the original design to be updated according to this plan
+2. [design-review.md](./design-review.md) — critical design review by Claude Opus, now stale due to significant changes described in this plan
+3. [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of my memory-aware tools discussion with Claude Sonnet
+4. [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — analysis of the memory-aware tools discussion, which led to creating this update plan
+
 ---
 
 ## 1. Purpose and Scope
 
-This plan captures everything decided so far about the memory-aware tools redesign, identifies what still needs to be resolved, and proposes an ordering for the design-document rewrite work. It is **not** the rewrite itself. The intent is to settle the remaining open questions here, then execute the rewrite in a fresh conversation working from this plan and the existing chapter files.
+This plan captures everything decided so far about the redesign of the memory access tools in the [Stateful Agent Design](stateful-agent-design.md), identifies what still needs to be resolved, and proposes an ordering for the design-document rewrite work. The intent is to settle the remaining open questions here, then execute the rewrite in a fresh conversation working from this plan and the existing design files.
 
 The scope of the rewrite is the memory subsystem only — the sub-agent system (`spawn_agent`, `run_command`, the async executor) is unaffected and stays as currently designed.
 
@@ -42,29 +53,29 @@ memory_write_core(handle, content)
 memory_get_index(handle)
     → { handle, index: { blocks: [{ name, summary, updated_at }, ...] } }
 
-memory_get_block(handle, name)
+memory_get_block(handle, block_name)
     → { handle, content: "...", changed_since_last_read: bool }
 
-memory_write_block(handle, name, content, summary?)
+memory_write_block(handle, block_name, content, summary?)
     → { handle, ok: true }
 
-memory_append_block(handle, name, content)
+memory_append_block(handle, block_name, content)
     → { handle, ok: true }
 
 memory_run_maintenance(handle)
     → { handle, ok: true, merged_blocks: N, errors?: [...] }
 ```
 
-Notes:
+**Notes:**
 
-- The handle is returned in **every** tool response, not just from `memory_start_conversation`. This refreshes the handle in the LLM's context on every memory tool call, dramatically reducing the chance that compaction can lose it.
+- The handle is returned in **every** tool response, not just from the initial call to `memory_start_conversation`, which allocates the handle. This refreshes the handle in the LLM's context on every memory tool call, dramatically reducing the chance that compaction can lose it.
 - There is no separate index-update tool. The `summary` parameter to `memory_write_block` is stored in the block file's YAML frontmatter (see §2.8). The bridge writes the body and frontmatter together as one file, so no cross-file coordination is needed.
 - `memory_get_index()` returns a structured object assembled by the bridge from the blocks directory. It is a derived view, not a stored file (see §2.8).
 - `memory_run_maintenance()` is invoked manually by the LLM when the user asks for memory maintenance. It dispatches sub-agents to semantically merge branched memory blocks (see §2.5, §3.1).
 
 ### 2.2 Branches are invisible to the LLM
 
-The LLM never sees branch filenames, never participates in race detection, and is never told a branch exists. From its perspective, every read returns *the* current state of a block and every write succeeds.
+The LLM never sees branch filenames, never participates in race detection, and is never told a branch exists. From its perspective, every read returns *the* current state of a block and every write succeeds, even if the bridge chooses to read/write from a branch file instead of the base file.
 
 ### 2.3 Per-handle branch model
 
@@ -652,7 +663,7 @@ Unaffected.
 
 Suggested order for the rewrite conversation:
 
-1. **Resolve all §3 open questions** (this plan) — ✅ complete; all eleven resolved.
+1. **Resolve all §3 open questions** (this plan) — ✅ complete.
 2. **Update Chapter 3** (Bridge Server) — most consequential changes; many downstream chapters reference it.
 3. **Update Chapter 4** (Memory System) — file-format and branch-naming changes.
 4. **Update Chapter 5** (SKILL) — simplification pass.
@@ -665,9 +676,9 @@ Each step lands as its own PR for review. This keeps any individual PR small eno
 
 ---
 
-## 6. Working Notes (Iterative)
+## 6. Working Notes
 
-A scratchpad for decisions, course-corrections, or additional clarifications added as the plan evolves.
+A scratchpad for decisions, course-corrections, or additional clarifications added as this plan evolves.
 
 ### 2026-05-23 — §2.8 revised: index becomes a derived view
 
