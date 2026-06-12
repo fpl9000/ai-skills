@@ -189,9 +189,9 @@ Crash recovery handled by a startup sweeper:
 
 This is materially simpler than the original §2.9, which had to coordinate two file writes. The simpler invariant is easier to verify and easier to recover from.
 
-### 2.10 Episodic logs handled separately (provisional)
+### 2.10 Episodic logs handled separately
 
-The original design treats episodic logs (`episodic-YYYY-MM.md`) as a distinct file category from blocks, with monthly rotation. The discussion's tool table implicitly collapsed them under `memory_append_block`. The plan keeps them separate by default:
+The original design treats episodic logs (`episodic-YYYY-MM.md`) as a distinct file category from blocks, with monthly rotation. The discussion's tool table implicitly collapsed them under `memory_append_block`. This plan keeps them separate by default:
 
 ```
 memory_append_episodic(handle, content)
