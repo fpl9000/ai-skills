@@ -2,23 +2,17 @@
 
 **Author:** Claude Opus 4.7 (with guidance from Fran)  
 **Date:** May 2026  
-**Status:** Final version. Ready for updating the original design.
+**Status:** Final version. Ready to update the original design.
 
-**History:**
+**Source Materials:**
 
-The below source materials are essential to understanding this update plan. These files exist in the same directory as this document. It's best to read them in the order they were created, as described here:
+The below links to source materials are essential to understanding this update plan. These links point to files in the same directory as this document. It's best to read them in the order they were created, as described here:
 
-1. Claude and Fran initially wrote `stateful-agent-design.md` (and its associated chapter files, `stateful-agent-design-chapter*.md`). **IMPORTANT:** Claude should not read every chapter file as it will waste valuable context window space. Claude should only read the chapters referenced by this update plan.
-2. Fran asked Claude Opus 4.7 to do a critical review of the design. Opus wrote this detailed review: `design-review.md`.
-3. Fran and Claude began discussing the review. Fran realized that many design issues shared a common root cause: the lack of memory-aware tools. The important part of this discussion was captured in `memory-aware-tools-idea.md`.
-4. Fran and Claude then discussed the memory-aware tools idea, capturing their design decisions in `memory-aware-tools-analysis.md`.
-5. Lastly, Fran asked Claude to document the planned changes to the original design, resulting in `design-update-plan.md` — this document.
-
-**Source materials:**
-1. [stateful-agent-design.md](./stateful-agent-design.md) and chapter files — the original design to be updated according to this plan
-2. [design-review.md](./design-review.md) — critical design review by Claude Opus, now stale due to significant changes described in this plan
-3. [memory-aware-tools-idea.md](../../docs/stateful-agent-design/memory-aware-tools-idea.md) — transcript of my memory-aware tools discussion with Claude Sonnet
-4. [memory-aware-tools-analysis.md](./memory-aware-tools-analysis.md) — analysis of the memory-aware tools discussion, which led to creating this update plan
+1. Claude and Fran initially wrote the original design: [`stateful-agent-design.md`](./stateful-agent-design.md) (and its associated chapter files, `stateful-agent-design-chapter*.md`). **IMPORTANT:** Claude should only read the chapters referenced by this update plan, as reading all of them would waste valuable context window space.
+2. Next, Fran asked Claude Opus 4.7 to do a critical review of the design. Opus wrote this detailed review: [`design-review.md`](./design-review.md).
+3. Fran and Claude began discussing the review. Fran realized that many design issues shared a common root cause: the lack of memory-aware tools. The important part of this discussion was captured in [`memory-aware-tools-idea.md`](memory-aware-tools-idea.md).
+4. Fran and Claude then discussed the memory-aware tools idea, capturing their design decisions in [`memory-aware-tools-analysis.md`](memory-aware-tools-analysis.md).
+5. Lastly, Fran asked Claude to document the planned changes to the original design, resulting in `design-update-plan.md`, which is this document.
 
 ---
 
