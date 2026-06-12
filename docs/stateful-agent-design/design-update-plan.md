@@ -6,7 +6,7 @@
 
 **Source Materials:**
 
-The below links to source materials are essential to understanding this update plan. These links point to files in the same directory as this document. It's best to read them in the order they were created, as described here:
+The source materials linked below are essential to understanding this update plan. These links point to files in the same directory as this document. Read them in the order they were created, as described here:
 
 1. Claude and Fran initially wrote the original design: [`stateful-agent-design.md`](./stateful-agent-design.md) (and its associated chapter files, `stateful-agent-design-chapter*.md`). **IMPORTANT:** Claude should only read the chapters referenced by this update plan, as reading all of them would waste valuable context window space.
 2. Next, Fran asked Claude Opus 4.7 to do a critical review of the design. Opus wrote this detailed review: [`design-review.md`](./design-review.md).
