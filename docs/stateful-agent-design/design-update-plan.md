@@ -10,7 +10,7 @@ The below source materials are essential to understanding this update plan. Thes
 
 1. Claude and Fran initially wrote `stateful-agent-design.md` (and its associated chapter files, `stateful-agent-design-chapter*.md`). **IMPORTANT:** Claude should not read every chapter file as it will waste valuable context window space. Claude should only read the chapters referenced by this update plan.
 2. Fran asked Claude Opus 4.7 to do a critical review of the design. Opus wrote this detailed review: `design-review.md`.
-3. Fran and Claude began discussing the review, and Fran realized that the root of many design issues was the lack of memory-aware tools and the burden placed on the LLM to track session IDs and detect race conditions. The critical part of this discussion was captured in `memory-aware-tools-idea.md`.
+3. Fran and Claude began discussing the review. Fran realized that many design issues shared a common root cause. The important part of this discussion was captured in `memory-aware-tools-idea.md`.
 4. Fran and Claude then discussed the memory-aware tools idea, capturing their design decisions in `memory-aware-tools-analysis.md`.
 5. Lastly, Fran asked Claude to document the planned changes to the original design, resulting in `design-update-plan.md` — this document.
 
