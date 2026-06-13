@@ -1,7 +1,7 @@
 # Stateful Agent System: Detailed Design
 
-**Version:** 1.0 (Draft)<br/>
-**Date:** February - March 2026<br/>
+**Version:** 2.0 (Draft)<br/>
+**Date:** February - June 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
@@ -161,3 +161,5 @@ Recommended `CLAUDE.md` content:
 | CLAUDE.md | Auto-loaded | None (automatic) | Loaded by Claude Code startup, cannot be suppressed. Keep credentials out. |
 
 **Why no write access?** Allowing sub-agents to write to Layer 2 would break the single-writer model and reintroduce concurrent write problems. The primary agent is the sole writer. Sub-agents return findings in their text response; the primary agent decides what to persist.
+
+**Maintenance merge sub-agents.** During `memory_run_maintenance` (see [Chapter 3, Section 3.13](stateful-agent-design-chapter3.md#313-tool-memory_run_maintenance)), the bridge spawns sub-agents to perform semantic merges of branched blocks. These are *bridge-internal* invocations: the merge sub-agent receives the base and branch content as input and returns the merged text in its response, like any other sub-agent. The sub-agent never writes to the memory directory — the **bridge itself** writes the merged result to the base block (under the write mutex, via atomic temp-file + rename). The single-writer model is therefore preserved: from the filesystem's perspective, the bridge process remains the only writer of memory files.
