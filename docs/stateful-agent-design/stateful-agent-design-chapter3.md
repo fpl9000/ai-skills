@@ -1,11 +1,12 @@
 # Stateful Agent System: Detailed Design
 
-**Version:** 1.0 (Draft)<br/>
-**Date:** February - March 2026<br/>
+**Version:** 2.0 (Draft)<br/>
+**Date:** February - June 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
 - [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
+- [Design Update Plan](design-update-plan.md) — the decision record for the memory-aware tools redesign incorporated into this version.
 
 ## Contents
 
@@ -16,22 +17,33 @@
   - [3.4 Tool: spawn_agent](#34-tool-spawn_agent)
   - [3.5 Tool: check_agent](#35-tool-check_agent)
   - [3.6 Tool: run_command](#36-tool-run_command)
-  - [3.7 Tool: memory_session_start](#37-tool-memory_session_start)
-  - [3.8 Tool: safe_read_file](#38-tool-safe_read_file)
-  - [3.9 Tool: safe_write_file](#39-tool-safe_write_file)
-  - [3.10 Tool: safe_append_file](#310-tool-safe_append_file)
-  - [3.11 Write Mutex and Session Tracking](#311-write-mutex-and-session-tracking)
-  - [3.12 Branching](#312-branching)
-  - [3.13 Async Executor](#313-async-executor)
-  - [3.14 Job Lifecycle Manager](#314-job-lifecycle-manager)
-  - [3.15 Logging](#315-logging)
-  - [3.16 Error Handling](#316-error-handling)
-  - [3.17 Graceful Shutdown](#317-graceful-shutdown)
+  - [3.7 Memory-Aware Tools: Overview and Abstraction](#37-memory-aware-tools-overview-and-abstraction)
+  - [3.8 Tool: memory_start_conversation](#38-tool-memory_start_conversation)
+  - [3.9 Tools: memory_get_core and memory_write_core](#39-tools-memory_get_core-and-memory_write_core)
+  - [3.10 Tool: memory_get_index](#310-tool-memory_get_index)
+  - [3.11 Tools: memory_get_block, memory_write_block, memory_append_block](#311-tools-memory_get_block-memory_write_block-memory_append_block)
+  - [3.12 Tool: memory_append_episodic](#312-tool-memory_append_episodic)
+  - [3.13 Tool: memory_run_maintenance](#313-tool-memory_run_maintenance)
+  - [3.14 Handle Management](#314-handle-management)
+  - [3.15 Per-Handle Branching and Race Detection](#315-per-handle-branching-and-race-detection)
+  - [3.16 Block File Format and Atomic Writes](#316-block-file-format-and-atomic-writes)
+  - [3.17 Merge Process and Merge Mutex](#317-merge-process-and-merge-mutex)
+  - [3.18 Bridge State Persistence and Recovery](#318-bridge-state-persistence-and-recovery)
+  - [3.19 Error Response Convention](#319-error-response-convention)
+  - [3.20 Async Executor](#320-async-executor)
+  - [3.21 Job Lifecycle Manager](#321-job-lifecycle-manager)
+  - [3.22 Logging](#322-logging)
+  - [3.23 Error Handling](#323-error-handling)
+  - [3.24 Graceful Shutdown](#324-graceful-shutdown)
 
 ## 3. MCP Bridge Server
 
 The MCP bridge server is a Go binary that runs locally, providing Bash access, sub-agent spawning,
-and memory access to be used by the Claude Desktop App via the MCP protocol.
+and memory access to be used by the Claude Desktop App via the MCP protocol. Memory access is
+provided through **memory-aware tools** that operate on memory concepts (core, blocks, the index)
+rather than on files — the bridge owns the entire file layout and the LLM never sees a file path,
+a branch, or any other storage detail. See [Section 3.7](#37-memory-aware-tools-overview-and-abstraction)
+for the abstraction model.
 
 ### 3.1 Go Module Structure
 
@@ -39,7 +51,8 @@ and memory access to be used by the Claude Desktop App via the MCP protocol.
 mcp-bridge/
 ├── go.mod                    # Module: github.com/fpl9000/mcp-bridge
 ├── go.sum
-├── main.go                   # Entry point: loads config, registers tools, starts stdio server
+├── main.go                   # Entry point: loads config, loads persisted state, registers tools,
+│                             #   starts stdio server, persists state on shutdown
 ├── config.go                 # Configuration loading and validation
 ├── tools.go                  # Tool handler registration
 ├── async.go                  # Shared async executor: sync window, async handoff, output truncation
@@ -47,12 +60,17 @@ mcp-bridge/
 ├── spawn.go                  # spawn_agent tool handler: builds claude -p command, delegates to async executor
 ├── check.go                  # check_agent tool handler
 ├── run_command.go            # run_command tool handler: builds shell command, delegates to async executor
-├── session.go                # memory_session_start tool handler + session tracker
-├── safe_read.go              # safe_read_file tool handler (session-tracked read with branch awareness)
-├── safe_write.go             # safe_write_file tool handler (mutex-protected atomic write with branching)
-├── safe_append.go            # safe_append_file tool handler (mutex-protected append with branching)
-├── branching.go              # Branch detection, naming, and merge-readiness checks
-├── writemutex.go             # Write mutex shared by safe_read_file, safe_write_file, and safe_append_file
+├── handles.go                # Handle minting, handle map, read baselines, retention and eviction
+├── memory_core.go            # memory_get_core / memory_write_core tool handlers
+├── memory_index.go           # memory_get_index tool handler: derived-view index assembly + cache
+├── memory_block.go           # memory_get_block / memory_write_block / memory_append_block tool handlers
+├── memory_episodic.go        # memory_append_episodic tool handler (month rotation)
+├── maintenance.go            # memory_run_maintenance: merge orchestration + handle cleanup sweep
+├── branching.go              # Per-handle branch creation, naming, and the lazy-adoption disk scan
+├── frontmatter.go            # YAML frontmatter parsing/composition for block files
+├── persistence.go            # .bridge-state.json: load, reconcile, checkpoint, shutdown write
+├── memmutex.go               # Memory mutex shared by all memory tools; merge mutex semantics
+├── errors.go                 # Error response convention: stable codes + natural-language messages
 ├── jobs.go                   # Job lifecycle manager (background goroutine)
 ├── logging.go                # Structured logging to file
 └── bridge-config.yaml        # Default configuration (embedded or external)
@@ -60,6 +78,7 @@ mcp-bridge/
 
 **Dependencies:**
 - `github.com/mark3labs/mcp-go` — MCP SDK for Go (see [Chapter 12, Appendix: mark3labs/mcp-go SDK Reference](stateful-agent-design-chapter12.md#12-appendix-mark3labsmcp-go-sdk-reference) for details).
+- A YAML frontmatter parser — either `gopkg.in/yaml.v3` (frontmatter blocks are plain YAML) or hand-rolled parsing of the `---`-delimited header. The frontmatter schema is two fields (see [Section 3.16](#316-block-file-format-and-atomic-writes)), so the hand-rolled option is viable if the dependency is unwanted.
 - Go standard library — everything else (os/exec, sync, time, encoding/json, log, filepath).
 
 No CGO. No external C libraries. Pure Go for single-binary compilation.
@@ -103,18 +122,36 @@ run_command:
   default_timeout_seconds: 120    # Max command runtime (kills after this)
   default_max_output_bytes: 51200 # Truncate output beyond 50 KB (~12,500 tokens)
 
-# Memory directory (used by memory tools for path validation)
+# Memory directory (the memory root; the bridge owns everything under it)
 memory:
   directory: "C:\\franl\\.claude-agent-memory"
+  summary_max_length: 200         # Cap on block summary length (chars); longer
+                                  #   summaries are truncated with a warning
 
-# Session tracking
-session:
-  id_length: 8                    # Length of generated session IDs (e.g., "ses-7ka2")
-  max_sessions: 20                # Cap on tracked sessions (oldest evicted when exceeded)
+# Handle management (see Section 3.14)
+handle:
+  id_length: 8                    # Length of generated handles (8 lowercase alphanumerics)
+  retention_days: 60              # Zero-branch handles inactive longer than this are
+                                  #   evicted during the maintenance sweep
 
-# Branching (concurrent read-modify-write race resolution)
+# Bridge state persistence (see Section 3.18)
+persistence:
+  state_file: ".bridge-state.json"        # Relative to memory.directory
+  checkpoint_interval_seconds: 5          # Debounce window for checkpoint writes; state
+                                          #   changes are coalesced and flushed at most
+                                          #   once per interval. Branch creation always
+                                          #   triggers an immediate checkpoint.
+
+# Branching (concurrent read-modify-write race resolution; see Section 3.15)
 branching:
-  enabled: true                   # Set to false to revert to last-writer-wins behavior
+  enabled: true                   # Debugging escape hatch: false reverts to
+                                  #   last-writer-wins behavior (no branches created)
+
+# Maintenance (see Section 3.13)
+maintenance:
+  max_blocks_per_call: 10         # Cap on blocks merged per memory_run_maintenance
+                                  #   call, to stay under the MCP tool-call timeout.
+                                  #   More pending work is signaled via more_pending.
 
 # Logging
 logging:
@@ -128,6 +165,11 @@ claude_cli:
   path: "claude"                  # Or full path: "C:\\path\\to\\claude.exe"
 ```
 
+Note the absence of the old `session:` block: the `max_sessions` cap from the session-era design
+is gone (handle growth is bounded by the retention-based eviction policy in [Section 3.14](#314-handle-management),
+not by a hard cap — a hard cap is deferred to v1.x as a backstop), and the session ID length is
+replaced by `handle.id_length`.
+
 **Pseudo-code for configuration loading:**
 
 ```
@@ -137,6 +179,11 @@ func LoadConfig(path string) Config:
     // Validate:
     //   - async.sync_window_seconds < 30
     //   - memory.directory exists (or create it)
+    //   - memory.summary_max_length > 0
+    //   - handle.id_length >= 8
+    //   - handle.retention_days > 0
+    //   - persistence.checkpoint_interval_seconds >= 1
+    //   - maintenance.max_blocks_per_call >= 1
     //   - logging.file parent directory exists
     //   - claude_cli.path is executable
     //   - run_command.shell is executable
@@ -145,19 +192,29 @@ func LoadConfig(path string) Config:
 
 ### 3.3 Tool Summary
 
-| Tool | MCP Name | Purpose |
-|------|----------|---------|
-| `memory_session_start` | `memory_session_start` | Register a new memory session and receive a unique session ID. Call once per conversation before any memory reads or writes. |
-| `safe_read_file` | `safe_read_file` | Session-tracked read of a memory file. Records the file's ModTime for race detection. Returns branch content (annotated) if branches exist. |
-| `safe_write_file` | `safe_write_file` | Mutex-protected atomic write (full file replacement) for memory files. Detects concurrent read-modify-write races via session tracking; creates a branch file instead of overwriting if a race is detected. |
-| `safe_append_file` | `safe_append_file` | Mutex-protected append for memory files. Detects races and branches like `safe_write_file`. Primary use: episodic log entries. |
-| `spawn_agent` | `spawn_agent` | Launch a sub-agent (`claude -p`) with a task. Returns result (sync) or job_id (async). |
-| `check_agent` | `check_agent` | Poll a running async job by job_id. Returns status and result. Used for both `spawn_agent` and `run_command` async jobs. |
-| `run_command` | `run_command` | Execute a shell command on the local machine. No LLM involved — direct subprocess execution. Uses the same hybrid sync/async model as `spawn_agent`. Far cheaper than spawning a sub-agent for simple commands. |
+The bridge registers twelve tools: three for sub-agents and local commands, and nine memory-aware tools.
+
+| Tool | Purpose |
+|------|---------|
+| `spawn_agent` | Launch a sub-agent (`claude -p`) with a task. Returns result (sync) or job_id (async). |
+| `check_agent` | Poll a running async job by job_id. Returns status and result. Used for both `spawn_agent` and `run_command` async jobs. |
+| `run_command` | Execute a shell command on the local machine. No LLM involved — direct subprocess execution. Uses the same hybrid sync/async model as `spawn_agent`. Far cheaper than spawning a sub-agent for simple commands. |
+| `memory_start_conversation` | Allocate a fresh handle for this conversation. Call once per conversation before any other memory tool, and again to recover from any handle error. |
+| `memory_get_core` | Return the core memory content. Sets this handle's read baseline for core and reports `changed_since_last_read`. |
+| `memory_write_core` | Replace the core memory content. Race-detected; may transparently route to a per-handle branch. |
+| `memory_get_index` | Return the derived index: a structured list of `{ name, summary, updated_at }` for every block visible to this handle. Assembled on demand from block frontmatter — not a stored file. |
+| `memory_get_block` | Return a block's body content (frontmatter stripped). Sets the read baseline and reports `changed_since_last_read`. |
+| `memory_write_block` | Replace a block's body content, optionally updating its summary. Race-detected; may transparently route to a per-handle branch. Creates the block if it doesn't exist (summary required for creation). |
+| `memory_append_block` | Append text to a block. Serialized, never creates a branch (routes to an existing per-handle branch if one exists). |
+| `memory_append_episodic` | Append an entry to the current month's episodic log. The bridge handles month rotation internally. |
+| `memory_run_maintenance` | Merge pending memory branches back into canonical state via sub-agents, then sweep and evict stale handles. Invoked when the user asks for memory maintenance. |
+
+Every memory tool takes `handle` as its first, required parameter and echoes the handle back in
+every response (see [Section 3.7](#37-memory-aware-tools-overview-and-abstraction)).
 
 ### 3.4 Tool: spawn_agent
 
-This is the most complex tool in the bridge. It launches a Claude Code CLI sub-agent with a task. The subprocess lifecycle (sync window, async handoff, output truncation) is managed by the shared async executor (see [Section 3.13](#313-async-executor)).
+This is the most complex tool in the bridge. It launches a Claude Code CLI sub-agent with a task. The subprocess lifecycle (sync window, async handoff, output truncation) is managed by the shared async executor (see [Section 3.20](#320-async-executor)).
 
 **MCP tool definition (registered with mcp-go):**
 
@@ -330,7 +387,7 @@ func HandleCheckAgent(params CheckAgentParams) CheckAgentResult:
 
 ### 3.6 Tool: run_command
 
-This tool executes a shell command on the local machine and returns its output. No LLM is involved — this is direct subprocess execution, making it dramatically cheaper than `spawn_agent` for simple operations like `curl`, `git status`, `grep`, `find`, `cat`, `ls`, directory listings, and short scripts. It uses the same hybrid sync/async model as `spawn_agent` via the shared async executor (see [Section 3.13](#313-async-executor)), so long-running commands (e.g., a recursive `grep` of a large codebase) are handled correctly without hitting the MCP timeout.
+This tool executes a shell command on the local machine and returns its output. No LLM is involved — this is direct subprocess execution, making it dramatically cheaper than `spawn_agent` for simple operations like `curl`, `git status`, `grep`, `find`, `cat`, `ls`, directory listings, and short scripts. It uses the same hybrid sync/async model as `spawn_agent` via the shared async executor (see [Section 3.20](#320-async-executor)), so long-running commands (e.g., a recursive `grep` of a large codebase) are handled correctly without hitting the MCP timeout.
 
 **When to use `run_command` vs. `spawn_agent`:**
 - Use `run_command` when the task can be expressed as a single shell command or short pipeline and requires no LLM reasoning. Examples: `git status`, `curl https://api.example.com/data`, `grep -r 'TODO' src/`, `wc -l *.go`, `find . -name '*.md' -mtime -7`.
@@ -442,530 +499,1000 @@ func HandleRunCommand(params RunCommandParams) AsyncResult:
 
 Middle truncation is preferred over tail truncation because command output often has useful context at both the beginning (headers, initial progress) and the end (summary, final errors).
 
-### 3.7 Tool: memory_session_start
+### 3.7 Memory-Aware Tools: Overview and Abstraction
 
-This tool initializes a memory session and returns a unique session ID. The skill instructs Claude to call it once at the start of every conversation, before any memory reads or writes. The session ID is passed as a parameter to all subsequent memory tool calls (`safe_read_file`, `safe_write_file`, `safe_append_file`), enabling the bridge to track which files each conversation has read and detect stale-read races.
+The bridge's memory tools operate on **memory concepts, not files**. The LLM's mental model of
+the memory system consists of exactly five concepts:
 
-**Why the bridge generates the ID (not Claude):** If Claude composed its own session identifier (e.g., a descriptive phrase), it would need to reproduce it verbatim on every subsequent tool call — and LLMs are unreliable at exact string consistency across many calls. A bridge-generated short opaque ID (e.g., `ses-7ka2`) is trivially reproducible: Claude just parrots back a fixed string. Uniqueness is guaranteed by the bridge, which controls generation and checks for collisions.
+| Concept | What the LLM knows about it |
+|---------|------------------------------|
+| **Handle** | An opaque 8-character token identifying this conversation to the bridge. Obtained from `memory_start_conversation`, passed to every memory tool, never inspected or invented. |
+| **Core** | A single always-loaded prose document ("who am I and what are we working on"). Read with `memory_get_core`, replaced with `memory_write_core`. |
+| **Blocks** | Named content documents (`project-foo`, `decisions`, `episodic-2026-06`, ...). Read, written, and appended to by name. |
+| **Summaries** | A one-line description attached to each block, supplied via the `summary` parameter of `memory_write_block`. |
+| **The index** | A structured roll-up of all blocks (`name`, `summary`, `updated_at`) returned by `memory_get_index`. The LLM calls a tool to get it; it does not read a file. |
+
+Everything else is bridge-internal and **invisible to the LLM**: file paths, the on-disk layout,
+YAML frontmatter, branches, the per-handle branch map, read baselines, the memory mutex, the merge
+mutex, and the state file. From the LLM's perspective, every read returns *the* current state of a
+target and every write succeeds — even when the bridge has transparently routed the operation
+through a per-handle branch file (see [Section 3.15](#315-per-handle-branching-and-race-detection)).
+
+This is the central shift from the v1 design: **correctness no longer depends on LLM compliance.**
+The v1 design exposed file paths and branch content to the LLM and relied on skill instructions to
+keep the index in sync, use the right tools, and interpret branch annotations. The memory-aware
+design moves all of that into the bridge, where it is enforced by code. The skill (Chapter 5)
+shrinks accordingly: it now teaches *when* to read and write memory, not *how* the storage works.
+
+**The handle is echoed in every response.** Every memory tool response includes the `handle`
+field, not just the initial `memory_start_conversation` response. This refreshes the handle in the
+LLM's context on every memory tool call, dramatically reducing the chance that context compaction
+loses it. A conversation that has made any recent memory call will have its handle present in the
+surviving context.
+
+**Abstraction discipline.** Tool responses — including error responses — must never leak
+implementation details. An error message that mentions a branch filename, the merge mutex, or
+frontmatter teaches the LLM about machinery it must not reason about. The error response
+convention in [Section 3.19](#319-error-response-convention) enforces this.
+
+### 3.8 Tool: memory_start_conversation
+
+This tool allocates a fresh handle for the calling conversation. The skill instructs Claude to call
+it once at the start of any conversation that will use memory, before any other memory tool, and to
+call it again as the uniform recovery step whenever any memory tool returns a handle error.
+
+**Why the bridge mints the handle (not the LLM):** If Claude composed its own identifier, it would
+need to reproduce it verbatim on every subsequent tool call — and LLMs are unreliable at exact
+string consistency across many calls. A bridge-minted short opaque handle is trivially
+reproducible: Claude just parrots back a fixed string, and that string reappears in every memory
+tool response to keep it fresh in context. Uniqueness is guaranteed by the bridge, which controls
+generation and checks for collisions. An LLM-supplied handle the bridge does not recognize is
+rejected with an error (see [Section 3.14](#314-handle-management)) — it is never honored or
+silently substituted.
 
 **MCP tool definition:**
 
 ```
-Name:        "memory_session_start"
-Description: "Register a new memory session and receive a unique session ID.
-             Call this once at the start of every conversation, before any
-             memory reads or writes. Pass the returned session_id to all
-             subsequent safe_read_file, safe_write_file, and safe_append_file
-             calls. If your context is compacted and you lose the session ID,
-             call this again to get a new one."
+Name:        "memory_start_conversation"
+Description: "Start a memory conversation and receive a handle. Call this once
+             at the start of any conversation that will use memory, before any
+             other memory tool. Pass the returned handle to every subsequent
+             memory tool call. If any memory tool returns a handle error, call
+             this again to obtain a fresh handle and retry the operation."
 
 Input Schema:
   (no required parameters)
 
 Output Schema:
-  session_id:       string   — Short unique identifier (e.g., "ses-7ka2")
-  started_at:       string   — ISO 8601 timestamp
-  branches_exist:   boolean  — True if any branched memory files currently exist
-                               (signals that a merge may be needed)
+  handle:  string   — Opaque 8-character handle (e.g., "h7k3xy90")
 ```
 
 **Handler pseudo-code:**
 
 ```
-func HandleMemorySessionStart(params MemorySessionStartParams) MemorySessionStartResult:
+func HandleMemoryStartConversation() MemoryStartConversationResult:
 
-    // 1. Generate a unique session ID.
-    //    Format: "ses-" + 4 hex chars from crypto/rand (e.g., "ses-7ka2").
-    //    Check for collisions against the session tracker (vanishingly unlikely
-    //    with 65,536 possible values and typically <5 active sessions, but
-    //    defense in depth costs nothing).
-    sessionID = generateSessionID(config.Session.IDLength)
-    while sessionTracker.Exists(sessionID):
-        sessionID = generateSessionID(config.Session.IDLength)
+    // 1. Mint a candidate handle: 8 characters from the alphabet [a-z0-9],
+    //    generated by the bridge's PRNG (see Section 3.14 for the policy).
+    handle = mintHandle(config.Handle.IDLength)
 
-    // 2. Register the session in the tracker.
-    //    If the tracker is at capacity (config.Session.MaxSessions), evict the
-    //    oldest session. This prevents unbounded memory growth from leaked sessions
-    //    (conversations that called memory_session_start but never ended cleanly).
-    sessionTracker.Register(sessionID)
+    // 2. Collision check against the in-memory handle map. A collision is
+    //    vanishingly unlikely (~2.8e12 possibilities) but cheap to verify,
+    //    making in-flight collision impossible by construction.
+    while handleMap.Exists(handle):
+        handle = mintHandle(config.Handle.IDLength)
 
-    // 3. Check for existing branch files in the memory directory.
-    //    This gives Claude a heads-up that a merge may be needed, which it can
-    //    mention to the user or schedule via a sub-agent.
-    branchesExist = branching.AnyBranchesExist(config.Memory.Directory)
+    // 3. Register the handle: empty branch map, empty read baselines,
+    //    last-activity = now.
+    handleMap.Register(handle)
 
-    return {
-        session_id: sessionID,
-        started_at: time.Now().Format(ISO8601),
-        branches_exist: branchesExist
-    }
+    // 4. Schedule a persistence checkpoint (debounced; see Section 3.18) so
+    //    the new handle survives a bridge restart.
+    persistence.MarkDirty()
+
+    return { handle: handle }
 ```
 
-### 3.8 Tool: safe_read_file
+Note what this response deliberately does **not** include: a `branches_exist` flag, a pending-merge
+count, or any other branch surfacing. Branches are invisible to the LLM
+(see [Section 3.15](#315-per-handle-branching-and-race-detection)), and pending-merge debris from
+abandoned conversations is reaped by `memory_run_maintenance` on the user's schedule — there is
+nothing the LLM needs to be told at conversation start.
 
-This tool reads a memory file and records its modification time in the session tracker. This is how the bridge knows what version of a file each conversation has seen, enabling race detection on subsequent writes. If branched versions of the file exist, their content is included in the response, annotated to distinguish them from the base file.
+### 3.9 Tools: memory_get_core and memory_write_core
 
-**Why not use the Filesystem extension's `read_file`?** Because the bridge needs to track reads in order to detect stale-read races. If Claude reads `core.md` via `Filesystem:read_file`, the bridge never sees the read and cannot determine whether a subsequent `safe_write_file` call is operating on stale data. By routing all memory reads through the bridge, the bridge has complete lifecycle visibility: it knows what each conversation has read and when, and can compare against the file's current state at write time.
+Core memory is a single always-loaded prose document — the Layer 2 equivalent of "who am I and
+what are we working on" (see [Chapter 4, Section 4.3](stateful-agent-design-chapter4.md#43-file-format-coremd)).
+These two tools read and replace it. The bridge maps "core" to its on-disk location
+(`<memory.directory>\core.md`); the LLM never sees that path.
+
+**MCP tool definitions:**
+
+```
+Name:        "memory_get_core"
+Description: "Return the core memory content. Call at the start of every
+             conversation, after memory_start_conversation. If
+             changed_since_last_read is true, the content has changed since
+             you last read it — treat earlier conclusions drawn from the
+             previous version as potentially stale."
+
+Input Schema:
+  handle:  string, required  — Handle from memory_start_conversation
+
+Output Schema:
+  handle:                   string  — Echoed back
+  content:                  string  — The core document
+  changed_since_last_read:  boolean — True only if this handle previously read
+                                      core and the content has since changed
+                                      without this handle writing it
+```
+
+```
+Name:        "memory_write_core"
+Description: "Replace the core memory content. Provide the COMPLETE document —
+             this is a full replacement, not an edit. Keep core under ~1,000
+             tokens; move detailed content into blocks."
+
+Input Schema:
+  handle:   string, required  — Handle from memory_start_conversation
+  content:  string, required  — Complete replacement content
+
+Output Schema:
+  handle:  string   — Echoed back
+  ok:      boolean  — True on success
+```
+
+**Read handler pseudo-code (shared by `memory_get_core` and `memory_get_block`):**
+
+```
+func HandleMemoryGet(handle string, target Target) MemoryGetResult:
+
+    // 1. Validate the handle (Section 3.14 recovery procedure: known map entry,
+    //    else lazy adoption from disk, else error).
+    if err = handles.Validate(handle); err != nil:
+        return errorResponse(err)            // INVALID_HANDLE / MALFORMED_HANDLE
+
+    // 2. Acquire the memory mutex. Reads serialize alongside writes so the
+    //    signature we record is consistent with the content we return.
+    memMutex.Lock()
+    defer memMutex.Unlock()
+
+    // 3. Choose which file to read: this handle's branch of the target if one
+    //    exists in the branch map, else the canonical (base) file.
+    path = branchMap.PathFor(handle, target) or basePathFor(target)
+
+    // 4. Read the file. For blocks, strip the YAML frontmatter and return only
+    //    the body (Section 3.16). Core has no frontmatter.
+    content = readAndStripFrontmatter(path)
+
+    // 5. Compute the changed_since_last_read flag: true iff this handle has a
+    //    recorded baseline signature for this target AND the current content's
+    //    signature differs from it. The flag is false on first reads, on
+    //    unchanged re-reads, and whenever the read came from this handle's own
+    //    branch (the branch tracks this handle's own writes by construction).
+    sig = signature(path)                    // ModTime + size (hash is a v1.x option)
+    changed = baselines.Has(handle, target) && baselines.Get(handle, target) != sig
+
+    // 6. Record the new baseline and update the handle's last-activity time.
+    baselines.Set(handle, target, sig)
+    handleMap.Touch(handle)
+    persistence.MarkDirty()
+
+    return { handle: handle, content: content, changed_since_last_read: changed }
+```
+
+**Write handler:** `memory_write_core` follows the shared write path described in
+[Section 3.15](#315-per-handle-branching-and-race-detection): if this handle already owns a branch
+of core, the write goes to that branch; otherwise the base signature is compared against this
+handle's read baseline, and the write goes to the base (signatures match) or to a newly created
+branch (signatures differ). The write itself is atomic per [Section 3.16](#316-block-file-format-and-atomic-writes).
+In every case the tool returns `{ handle, ok: true }` — the LLM is never told which file received
+the write.
+
+**The `changed_since_last_read` flag** is the v1 mitigation for the cross-conversation visibility
+of writes. v1 ships with branch-on-race-only semantics (not snapshot isolation), so when another
+conversation legitimately writes core or a block (no race), this conversation's next read returns
+the new content. The flag tells the LLM "your prior view is stale" without revealing *what*
+changed or *who* changed it — preserving per-conversation isolation (conversation X cannot
+introspect conversation Y's activity) while letting X know to re-derive anything that depended on
+the earlier content. The stricter snapshot-isolation alternative (branching on every
+write-while-others-have-outstanding-reads) was considered and deferred to v1.x: it would make
+almost every write to a hot target branch, exploding the merge load, to prevent a surprise that is
+hypothetical until observed in practice. (Decision record: update plan §3.2.)
+
+`memory_get_index` does not carry a `changed_since_last_read` flag in v1 — per-block changes are
+already signaled by the per-block read flag. It can be added later if it proves useful.
+
+### 3.10 Tool: memory_get_index
+
+The index is a **derived view, not a stored file**. There is no `index.md` on disk. Each block's
+`summary` and `updated_at` live in YAML frontmatter inside the block file itself
+(see [Section 3.16](#316-block-file-format-and-atomic-writes)), and `memory_get_index` assembles
+the index on demand by walking the blocks directory.
+
+**Why derived:** A stored index file would have to be updated on every block write, and under the
+per-handle branch model that creates a leakage problem: conversation Y's summary updates would
+land in a canonical index file and become visible to conversation X, even while Y's block content
+was correctly isolated in a branch. (The original stored-index design had exactly this flaw —
+decision record: update plan §2.8.) Deriving the index from the same files the per-block reads use
+makes the leak impossible by construction: handle H's index view is assembled from H's branches
+plus the bases of blocks H hasn't branched — exactly what H's per-block reads return. The index
+and the blocks are guaranteed consistent because they come from the same files.
 
 **MCP tool definition:**
 
 ```
-Name:        "safe_read_file"
-Description: "Read a memory file with session tracking for race detection.
-             Records the file's modification time so that subsequent writes
-             can detect if the file was modified by another conversation.
-             If branched versions of the file exist, their content is included
-             in the response, annotated to distinguish base from branch content.
-             Restricted to the memory directory."
+Name:        "memory_get_index"
+Description: "Return the index of memory blocks: each block's name, one-line
+             summary, and last-updated time. Use it to decide which blocks are
+             relevant to the current conversation, then load them with
+             memory_get_block."
 
 Input Schema:
-  path:        string, required  — Absolute path to the file (must be within memory directory)
-  session_id:  string, required  — Session ID from memory_session_start
+  handle:  string, required  — Handle from memory_start_conversation
 
 Output Schema:
-  content:          string        — The base file's content
-  branches:         []Branch      — Array of branch info (empty if no branches exist)
-    branch.filename:  string      — Branch filename (e.g., "core.branch-20260313T1423-a1b2.md")
-    branch.created:   string      — Branch creation time (extracted from filename, ISO 8601)
-    branch.content:   string      — Full content of the branch file
-  has_branches:     boolean       — Convenience flag: true if branches array is non-empty
-  path:             string        — The absolute path that was read
-  mod_time:         string        — File modification time (ISO 8601) — for informational purposes
+  handle:  string  — Echoed back
+  index:   object  — See schema below
 ```
 
-**Handler pseudo-code:**
+**Index schema:**
 
-```
-func HandleSafeReadFile(params SafeReadFileParams) SafeReadFileResult:
-
-    // 1. Validate that the path is within the memory directory.
-    absPath = filepath.Abs(params.Path)
-    if !strings.HasPrefix(absPath, config.Memory.Directory):
-        return error("safe_read_file is restricted to the memory directory: " +
-                      config.Memory.Directory)
-
-    // 2. Validate the session ID.
-    if !sessionTracker.Exists(params.SessionID):
-        return error("Unknown session_id: " + params.SessionID +
-                      ". Call memory_session_start first.")
-
-    // 3. Acquire the write mutex. This serializes reads alongside writes,
-    //    ensuring that the ModTime we record is consistent with the file
-    //    content we return. Without this, a concurrent write could modify
-    //    the file between our Stat() and Read() calls, causing us to record
-    //    a stale ModTime for fresh content (or vice versa).
-    writeMutex.Lock()
-    defer writeMutex.Unlock()
-
-    // 4. Stat the file to get its current ModTime.
-    stat, err = os.Stat(absPath)
-    if err:
-        if os.IsNotExist(err):
-            return error("File does not exist: " + absPath)
-        return error("Failed to stat file: " + err)
-
-    // 5. Read the base file content.
-    content, err = os.ReadFile(absPath)
-    if err:
-        return error("Failed to read file: " + err)
-
-    // 6. Record this file's ModTime in the session tracker.
-    //    This is the baseline that safe_write_file will compare against
-    //    to detect races.
-    sessionTracker.RecordRead(params.SessionID, absPath, stat.ModTime())
-
-    // 7. Check for branch files.
-    //    Branch files match the pattern: <stem>.branch-<timestamp>-<random>.<ext>
-    //    For example, if absPath is "core.md", branches match "core.branch-*.md"
-    branches = branching.FindBranches(absPath)
-
-    branchResults = []
-    for _, branchPath in branches:
-        branchContent, err = os.ReadFile(branchPath)
-        if err:
-            log.Warn("Failed to read branch file %s: %v", branchPath, err)
-            continue
-        branchResults = append(branchResults, Branch{
-            Filename: filepath.Base(branchPath),
-            Created:  branching.ExtractTimestamp(branchPath),
-            Content:  string(branchContent),
-        })
-
-    return {
-        content: string(content),
-        branches: branchResults,
-        has_branches: len(branchResults) > 0,
-        path: absPath,
-        mod_time: stat.ModTime().Format(ISO8601),
-    }
+```json
+{
+  "handle": "abc1def2",
+  "index": {
+    "schema_version": 1,
+    "blocks": [
+      { "name": "project-foo", "summary": "...", "updated_at": "2026-05-20T14:23:00Z" },
+      ...
+    ]
+  }
+}
 ```
 
-**Branch annotation:** When branches exist, the tool returns the base file content in the `content` field and each branch as a separate entry in the `branches` array. The skill instructions tell Claude how to interpret this: the base file represents the "main line" of memory, and each branch represents changes from a concurrent conversation that haven't been merged yet. Claude should consider all versions when answering questions, and can flag to the user that a merge is pending.
+Notes on the schema:
 
-### 3.9 Tool: safe_write_file
+- **Ordering:** stable sort by `name`. Insertion order would be subtle to maintain across bridge
+  restarts, and `updated_at` order would change on every write, which is disruptive for the LLM's
+  mental model of the index.
+- **Timestamp format:** `updated_at` uses *extended* ISO 8601 (`2026-05-20T14:23:00Z`). This
+  intentionally differs from the *compact* form used in branch filenames
+  ([Section 3.15](#315-per-handle-branching-and-race-detection)): colons are legal in JSON string
+  values, so the more readable extended form is used there; the compact form is only required
+  where Windows filename rules forbid colons. The two formats coexisting is deliberate.
+- **Pagination:** none in v1. If the index grows past ~500 entries, revisit.
 
-This tool performs a mutex-protected, atomic full-file write. It is the primary tool for updating memory files (`core.md`, `index.md`, content blocks). It replaces the use of `Filesystem:write_file` and `Filesystem:edit_file` for all memory operations.
+**Assembly pseudo-code:**
 
-**Why not use the Filesystem extension's `write_file`?** Four reasons: (a) the Filesystem extension has no mutex — two concurrent conversations writing to the same memory file can interleave, with the second write silently clobbering the first; (b) `safe_write_file` is scoped to the memory directory, providing the "unambiguous tool names" benefit from proposal Open Question #22 — Claude can't accidentally use it to write to the cloud VM or to non-memory locations; (c) atomic write via temp-file-then-rename prevents partial writes from corrupting files if the process is interrupted; (d) the bridge tracks per-session file versions via the session tracker, and `safe_write_file` uses this to detect concurrent read-modify-write races — if a race is detected, the write is redirected to a branch file instead of overwriting the other conversation's changes.
+```
+func HandleMemoryGetIndex(handle string) MemoryGetIndexResult:
 
-**Why full-file replacement instead of surgical edits?** Full replacement is simpler and more reliable than `Filesystem:edit_file`'s find-and-replace pattern, which can fail if the search string doesn't match exactly (due to whitespace differences, prior modifications by another conversation, etc.). Claude already has the file content in context (it loaded the file to decide what to change), so providing the complete updated content is straightforward. For typical memory files (500–2,000 tokens), the output token cost of a full write is modest.
+    // 1. Validate the handle; acquire the memory mutex; touch last-activity.
+
+    // 2. Enumerate block files in the blocks directory (base files only —
+    //    branch files are matched to their handles separately).
+
+    // 3. For each block name B, choose which file to read: this handle's
+    //    branch of B if one exists in the branch map, else the base file.
+
+    // 4. Extract summary and updated_at from the chosen file's frontmatter.
+    //    Files with missing/damaged frontmatter get defaults (Section 3.16).
+
+    // 5. Sort entries by name and return the assembled index.
+```
+
+**Caching:** `memory_get_index` is O(n_blocks) in the worst case. The bridge maintains an
+in-memory cache of assembled index views: one per handle, invalidated when that handle writes a
+block or when the blocks directory's most recent mtime changes. Steady-state cost is a cached
+lookup; the walk runs only when the cache is stale.
+
+**Debugging:** A human can inspect block metadata by opening any block file — the frontmatter is
+at the top. If a human-readable index snapshot is ever wanted, a `memory_dump_index(handle, path)`
+tool that writes the current derived view to a user-named file *outside* the memory directory can
+be added later; it is not part of v1.
+
+### 3.11 Tools: memory_get_block, memory_write_block, memory_append_block
+
+Blocks are the named content documents of Layer 2 memory (`project-foo`, `decisions`,
+`episodic-2026-06`, ...). The LLM addresses them by **name only** — the bridge maps a block name
+to its on-disk file (`<memory.directory>\blocks\<name>.md`) and manages the YAML frontmatter
+transparently. Block names may contain letters, digits, hyphens, and underscores; anything else is
+rejected with `INVALID_BLOCK_NAME`. Naming conventions (which prefixes mean what) are documented
+in [Chapter 4, Section 4.8](stateful-agent-design-chapter4.md#48-block-naming-conventions).
+
+**MCP tool definitions:**
+
+```
+Name:        "memory_get_block"
+Description: "Return a memory block's content by name. Block names come from
+             memory_get_index. If changed_since_last_read is true, the content
+             has changed since you last read it — treat earlier conclusions
+             drawn from the previous version as potentially stale."
+
+Input Schema:
+  handle:      string, required  — Handle from memory_start_conversation
+  block_name:  string, required  — Block name (e.g., "project-foo")
+
+Output Schema:
+  handle:                   string
+  content:                  string  — The block body (metadata managed by the bridge)
+  changed_since_last_read:  boolean
+```
+
+```
+Name:        "memory_write_block"
+Description: "Replace a memory block's content, or create a new block. Provide
+             the COMPLETE content — this is a full replacement, not an edit.
+             The optional summary is a one-line description shown in the index;
+             it is REQUIRED when creating a new block, and preserved unchanged
+             if omitted when updating an existing one."
+
+Input Schema:
+  handle:      string, required  — Handle from memory_start_conversation
+  block_name:  string, required  — Block name
+  content:     string, required  — Complete replacement body
+  summary:     string, optional  — One-line description for the index
+
+Output Schema:
+  handle:  string
+  ok:      boolean
+```
+
+```
+Name:        "memory_append_block"
+Description: "Append text to a memory block. The text is appended exactly as
+             provided — include leading newlines if needed for formatting.
+             Creates the block if it doesn't exist (a summary will be needed:
+             prefer memory_write_block for first creation)."
+
+Input Schema:
+  handle:      string, required  — Handle from memory_start_conversation
+  block_name:  string, required  — Block name
+  content:     string, required  — Text to append
+
+Output Schema:
+  handle:  string
+  ok:      boolean
+```
+
+**The `summary` parameter contract** (decision record: update plan §3.5):
+
+- **For new blocks** (no block file with that name visible to this handle): `summary` is
+  **required**. The bridge rejects the call with `SUMMARY_REQUIRED` if it is absent. A block must
+  enter the index with a meaningful description.
+- **For existing blocks:** `summary` is optional. If absent, the existing summary in the block's
+  frontmatter is preserved unchanged. If present (including the empty string), it replaces the
+  existing summary.
+- **Length:** capped at `memory.summary_max_length` (default 200 characters). Longer summaries are
+  truncated and the response includes a warning; alternatively the bridge may reject with
+  `SUMMARY_TOO_LONG` if truncation would be misleading.
+
+There is **no separate index-update tool** and no index-update instruction in the skill. The
+summary travels with the block content in a single `memory_write_block` call, and the bridge
+writes frontmatter and body together as one file ([Section 3.16](#316-block-file-format-and-atomic-writes)),
+so the index can never drift out of sync with the blocks — a whole category of v1 compliance
+failures is eliminated structurally.
+
+**Read behavior:** `memory_get_block` follows the shared read path in
+[Section 3.9](#39-tools-memory_get_core-and-memory_write_core): branch-or-base file selection,
+frontmatter stripped, baseline recorded, `changed_since_last_read` computed. Reading a block that
+does not exist (no base file and no branch for this handle) returns `BLOCK_NOT_FOUND`.
+
+**Write behavior:** `memory_write_block` follows the shared race-detected write path in
+[Section 3.15](#315-per-handle-branching-and-race-detection). Writing a block that does not exist
+creates the base file (a true first creation has no race to detect — but see Section 3.15 for the
+simultaneous-first-write case, which does branch).
+
+**Append semantics — serialized, never branched** (decision record: update plan §2.11): appends
+are serialized by the memory mutex and **never create a branch**. The semantic justification:
+appends are commutative when the order isn't load-bearing, and for episodic logs (the primary
+append use case) chronological ordering is already approximate. Race detection on appends would
+produce branches that need semantic merging for no real benefit; serializing avoids the problem
+entirely. Two routing details preserve consistency:
+
+- If this handle already owns a branch of the target block (from a prior racing *write*), the
+  append goes to **that branch** — otherwise the handle's next read (which routes through its
+  branch) would not show the appended text, violating read-your-own-writes.
+- Otherwise the append goes to the base file, regardless of baselines. The handle's read baseline
+  for the block is updated to the post-append signature so the append doesn't trigger a spurious
+  race on this handle's next full write.
+
+### 3.12 Tool: memory_append_episodic
+
+Episodic logs are a distinct file category from ordinary blocks: monthly files
+(`episodic-YYYY-MM.md`) holding dated entries for significant conversations
+(see [Chapter 4, Section 4.6](stateful-agent-design-chapter4.md#46-file-format-episodic-logs)).
+This tool appends an entry to the **current month's** log; the bridge selects the target file
+from the system clock and creates a new month's file automatically at each rollover. The LLM
+never computes a filename or even a block name to append an episodic entry — this matches the
+"bridge owns the file layout" principle.
 
 **MCP tool definition:**
 
 ```
-Name:        "safe_write_file"
-Description: "Atomically write content to a memory file. Acquires a write mutex
-             shared with safe_read_file and safe_append_file. Uses temp-file-then-
-             rename for atomicity. Restricted to the memory directory. Provide the
-             COMPLETE file content — this is a full replacement, not an edit.
-             If the file was modified by another conversation since this session
-             last read it, the write is redirected to a branch file to preserve
-             both versions."
+Name:        "memory_append_episodic"
+Description: "Append an entry to the episodic log (the chronological record of
+             significant conversations). The bridge files the entry under the
+             current month automatically. Format the entry as:
+             '## YYYY-MM-DD — Brief Title' followed by a 2-5 sentence summary."
 
 Input Schema:
-  path:        string, required  — Absolute path to the file (must be within memory directory)
-  content:     string, required  — Complete file content to write
-  session_id:  string, required  — Session ID from memory_session_start
+  handle:   string, required  — Handle from memory_start_conversation
+  content:  string, required  — The entry text to append
 
 Output Schema:
-  success:         boolean
-  bytes_written:   integer
-  path:            string    — The path that was actually written (may be a branch file)
-  branch_created:  boolean   — True if a race was detected and a branch file was created
-  branch_path:     string    — Path of the branch file (null if no branch created)
+  handle:  string
+  ok:      boolean
 ```
 
-**Handler pseudo-code:**
+**Behavior details:**
 
-```
-func HandleSafeWriteFile(params SafeWriteFileParams) SafeWriteFileResult:
+- Month rotation is internal: the bridge computes `episodic-YYYY-MM` from the current local date.
+  On the first append of a new month, the bridge creates the file with bridge-generated
+  frontmatter (`summary: "Conversation log for <Month YYYY>"`, `updated_at` set to now) and a
+  `# <Month YYYY>` heading, then appends the entry.
+- Episodic files live in the blocks directory and carry frontmatter like any other block, so they
+  **appear in the derived index** and are readable via `memory_get_block` (using the name shown in
+  the index, e.g., `episodic-2026-06`). `memory_append_episodic` is a convenience over
+  `memory_append_block` that removes the burden of computing the current month's name; it shares
+  the same append semantics (serialized, never branched, branch-routed if one exists) from
+  [Section 3.11](#311-tools-memory_get_block-memory_write_block-memory_append_block). Each append
+  also refreshes the file's `updated_at` frontmatter so the index reflects the last entry time.
 
-    // 1. Validate that the path is within the memory directory.
-    //    Resolve symlinks and ".." before checking to prevent path traversal.
-    absPath = filepath.Abs(params.Path)
-    if !strings.HasPrefix(absPath, config.Memory.Directory):
-        return error("safe_write_file is restricted to the memory directory: " +
-                      config.Memory.Directory)
+### 3.13 Tool: memory_run_maintenance
 
-    // 2. Validate the session ID.
-    if !sessionTracker.Exists(params.SessionID):
-        return error("Unknown session_id: " + params.SessionID +
-                      ". Call memory_session_start first.")
-
-    // 3. Ensure parent directory exists (handles new block creation).
-    os.MkdirAll(filepath.Dir(absPath), 0755)
-
-    // 4. Acquire the write mutex. This serializes all memory I/O
-    //    (safe_read_file, safe_write_file, and safe_append_file) across
-    //    all concurrent conversations in this Desktop App instance.
-    writeMutex.Lock()
-    defer writeMutex.Unlock()
-
-    // 5. Race detection: compare the file's current ModTime against this
-    //    session's last-seen ModTime for this file.
-    targetPath = absPath
-    branchCreated = false
-    branchPath = ""
-
-    if config.Branching.Enabled && fileExists(absPath):
-        currentModTime = os.Stat(absPath).ModTime()
-        lastSeenModTime = sessionTracker.GetLastRead(params.SessionID, absPath)
-
-        if lastSeenModTime == nil || currentModTime.After(*lastSeenModTime):
-            // Race detected: the file was modified by another conversation
-            // since this session last read it. Write to a branch file instead
-            // of overwriting the other conversation's changes.
-            targetPath = branching.GenerateBranchPath(absPath)
-            branchCreated = true
-            branchPath = targetPath
-            log.Info("Race detected for %s (session %s): branching to %s",
-                      absPath, params.SessionID, targetPath)
-
-    // 6. Write to a temp file in the same directory (same filesystem,
-    //    so rename is atomic). Use the target directory, not os.TempDir(),
-    //    to guarantee same-filesystem rename.
-    tmpFile = os.CreateTemp(filepath.Dir(targetPath), ".safe-write-*.tmp")
-    _, err = tmpFile.Write([]byte(params.Content))
-    tmpFile.Close()
-    if err:
-        os.Remove(tmpFile.Name())  // Clean up on write failure
-        return error("Failed to write temp file: " + err)
-
-    // 7. Atomic rename: replaces the target file in one operation.
-    //    On Windows, os.Rename cannot overwrite an existing file.
-    //    The safest cross-platform approach is: remove target if it
-    //    exists, then rename.
-    if fileExists(targetPath):
-        os.Remove(targetPath)
-    err = os.Rename(tmpFile.Name(), targetPath)
-    if err:
-        return error("Failed to rename temp file to target: " + err)
-
-    // 8. Update the session tracker with the new ModTime.
-    //    This ensures that if this same session writes again, it won't
-    //    falsely detect a race against its own previous write.
-    newModTime = os.Stat(targetPath).ModTime()
-    sessionTracker.RecordRead(params.SessionID, absPath, newModTime)
-
-    return {
-        success: true,
-        bytes_written: len(params.Content),
-        path: targetPath,
-        branch_created: branchCreated,
-        branch_path: branchPath
-    }
-```
-
-**Windows rename caveat:** On Windows, `os.Rename` cannot atomically overwrite an existing file on all filesystems. The pseudo-code above uses a remove-then-rename sequence, which introduces a tiny window where the file doesn't exist. For our use case (low-frequency memory writes, mutex-serialized), this is acceptable. If true atomicity is needed later, the Windows `ReplaceFile` API can be called via `syscall`.
-
-### 3.10 Tool: safe_append_file
-
-This tool performs a mutex-protected append to a memory file. Its primary use case is adding entries to episodic log files (`episodic-YYYY-MM.md`), where each conversation appends a timestamped entry and a full rewrite is unnecessary.
+Maintenance is the manually triggered process that folds pending memory branches back into
+canonical state and reaps stale handle records. v1 has **no automatic merge scheduling**: merges
+happen when, and only when, the user asks for them (in any phrasing — "run memory maintenance,"
+"merge memory," "consolidate your memory," etc.), which causes the LLM to call this tool. The
+manual approach is correct (merges happen when asked) and operable (the user controls timing); it
+sidesteps the unattended-execution problem entirely. Automated triggers (Task Scheduler +
+`claude -p`, AutoHotkey, lazy merge at conversation start) are deferred to v1.x. (Decision record:
+update plan §3.1, §3.9.)
 
 **MCP tool definition:**
 
 ```
-Name:        "safe_append_file"
-Description: "Append text to a memory file. Acquires the same write mutex as
-             safe_read_file and safe_write_file to prevent concurrent write
-             conflicts. Creates the file if it doesn't exist. The text is
-             appended exactly as provided — include leading newlines if needed
-             for formatting. If the file was modified by another conversation
-             since this session last read it, the append is redirected to a
-             branch file to preserve both versions."
+Name:        "memory_run_maintenance"
+Description: "Run memory maintenance: consolidates memory that has accumulated
+             from concurrent conversations back into a single canonical state.
+             Call when the user asks for memory maintenance, merging, or
+             consolidation. The call may take a noticeable amount of time, and
+             memory operations from other concurrent conversations will briefly
+             block while it runs. If more_pending is true in the response, call
+             again to continue."
 
 Input Schema:
-  path:        string, required  — Absolute path to the file (must be within memory directory)
-  text:        string, required  — Text to append
-  session_id:  string, required  — Session ID from memory_session_start
+  handle:  string, required  — Handle from memory_start_conversation
 
 Output Schema:
-  success:         boolean
-  bytes_written:   integer
-  branch_created:  boolean   — True if a race was detected and a branch file was created
-  branch_path:     string    — Path of the branch file (null if no branch created)
+  handle:          string
+  ok:              boolean
+  merged_blocks:   integer   — Number of blocks whose branches were merged this call
+  more_pending:    boolean   — True if the per-call cap was reached and pending
+                               merges remain; call again to continue
+  errors:          string[]  — Optional; natural-language descriptions of any
+                               per-block merge failures (the affected branches
+                               are left on disk for the next maintenance run)
 ```
 
-**Handler pseudo-code:**
+**Handler behavior:**
 
-```
-func HandleSafeAppendFile(params SafeAppendFileParams) SafeAppendFileResult:
+1. Validate the handle and acquire no long-lived locks yet.
+2. **Enumerate pending work:** scan the memory directory for *all* branch files on disk —
+   regardless of whether their owning handles are live. Branches from abandoned conversations are
+   merged exactly like branches from active ones; from the merge's perspective, branched content
+   is branched content. Group branch files by their base block.
+3. **Apply the per-call cap:** process at most `maintenance.max_blocks_per_call` blocks (default
+   10) in this invocation. This keeps the synchronous call comfortably under the MCP tool-call
+   timeout even when many branches have accumulated (each block's semantic merge costs a sub-agent
+   invocation, ~30s). If blocks remain after the cap, return `more_pending: true` and let the LLM
+   call again. (Alternatives considered and rejected for v1: routing maintenance through the async
+   job infrastructure of [Section 3.20](#320-async-executor) — adds polling complexity; fully
+   synchronous with no cap — risks timeouts on large batches. Decision record: update plan §3.1.)
+4. **For each selected block,** run the merge process of
+   [Section 3.17](#317-merge-process-and-merge-mutex): acquire the merge mutex, semantically merge
+   the base and all its branches via an LLM sub-agent, atomically replace the base, delete the
+   branch files, clear all branch-map entries for the block, release the mutex. A per-block
+   failure (sub-agent error, malformed output) leaves that block's base and branches untouched,
+   records an entry in `errors`, and continues with the next block.
+5. **Handle cleanup sweep** ([Section 3.14](#314-handle-management)): after the merge pass, evict
+   every handle that owns zero branches and has been inactive past the retention window. Also drop
+   read baselines that reference blocks which no longer exist.
+6. Write a persistence checkpoint and return.
 
-    // 1. Validate that the path is within the memory directory.
-    absPath = filepath.Abs(params.Path)
-    if !strings.HasPrefix(absPath, config.Memory.Directory):
-        return error("safe_append_file is restricted to the memory directory: " +
-                      config.Memory.Directory)
+**Behavior with no pending branches:** returns `{ ok: true, merged_blocks: 0, more_pending: false }`
+immediately (the cleanup sweep still runs — it is cheap).
 
-    // 2. Validate the session ID.
-    if !sessionTracker.Exists(params.SessionID):
-        return error("Unknown session_id: " + params.SessionID +
-                      ". Call memory_session_start first.")
+**Partial / targeted maintenance** (merging a single named block) is not supported in v1; the call
+always processes everything pending, up to the cap. A `block_name` parameter is a v1.x option if it
+proves useful.
 
-    // 3. Ensure parent directory exists.
-    os.MkdirAll(filepath.Dir(absPath), 0755)
+**Concurrency:** if the user triggers maintenance while other conversations are active, those
+conversations' memory tool calls block on the merge mutex for the duration of each block's merge.
+This is acceptable for v1 — the user chooses when to run maintenance and can pick an idle moment.
+The skill mentions the brief blocking so the LLM can set expectations
+([Chapter 5](stateful-agent-design-chapter5.md)). If blocking on the mutex would exceed an
+acceptable wait, the bridge returns `MAINTENANCE_IN_PROGRESS` to the blocked caller rather than
+hanging the tool call indefinitely; the message instructs the LLM to retry shortly.
 
-    // 4. Acquire the SAME write mutex as safe_read_file and safe_write_file.
-    writeMutex.Lock()
-    defer writeMutex.Unlock()
+### 3.14 Handle Management
 
-    // 5. Race detection (same logic as safe_write_file).
-    targetPath = absPath
-    branchCreated = false
-    branchPath = ""
+The handle is the bridge's identifier for a conversation. It replaces the v1 session ID, and the
+per-handle state replaces the v1 session tracker.
 
-    if config.Branching.Enabled && fileExists(absPath):
-        currentModTime = os.Stat(absPath).ModTime()
-        lastSeenModTime = sessionTracker.GetLastRead(params.SessionID, absPath)
+**Format.** Handles are **8 lowercase alphanumeric characters** (alphabet `[a-z0-9]`, ~2.8 × 10¹²
+possibilities), e.g., `h7k3xy90`. The length costs a few tokens per response (the handle is echoed
+in every memory tool response) and makes collisions astronomically unlikely even across bridge
+restarts and long-lived conversations.
 
-        if lastSeenModTime == nil || currentModTime.After(*lastSeenModTime):
-            // Race detected. For append operations, the branch file is created
-            // by copying the current base file content, then appending to the copy.
-            // This preserves the full context in the branch.
-            targetPath = branching.GenerateBranchPath(absPath)
-            branchCreated = true
-            branchPath = targetPath
+**Generation.** The bridge mints handles; the LLM never invents one. v1 uses a standard PRNG
+(`math/rand`, seeded at bridge startup) plus the collision check in
+[Section 3.8](#38-tool-memory_start_conversation). The probability of meaningful collisions with
+PRNG output at this handle length is negligible for the expected workload, and an unprivileged LLM
+has no way to predict or attack handle values through the MCP interface. **Future improvement:**
+upgrade to a CSPRNG (`crypto/rand`) if the threat model grows to include adversarial scenarios —
+e.g., if memory ever becomes accessible to untrusted parties. Noted here so it isn't forgotten.
 
-            // Copy current base file to the branch path before appending.
-            baseContent, _ = os.ReadFile(absPath)
-            os.WriteFile(targetPath, baseContent, 0644)
-
-            log.Info("Race detected for %s (session %s): branching to %s",
-                      absPath, params.SessionID, targetPath)
-
-    // 6. Open file for append (create if needed), write, close.
-    f = os.OpenFile(targetPath, O_WRONLY|O_APPEND|O_CREATE, 0644)
-    n, err = f.Write([]byte(params.Text))
-    f.Close()
-
-    if err:
-        return error("Failed to append: " + err)
-
-    // 7. Update session tracker with new ModTime.
-    newModTime = os.Stat(targetPath).ModTime()
-    sessionTracker.RecordRead(params.SessionID, absPath, newModTime)
-
-    return {
-        success: true,
-        bytes_written: n,
-        branch_created: branchCreated,
-        branch_path: branchPath
-    }
-```
-
-### 3.11 Write Mutex and Session Tracking
-
-The write mutex serializes all memory file I/O. It is a single `sync.Mutex` shared by `safe_read_file`, `safe_write_file`, and `safe_append_file`.
-
-**Why a single mutex works:** All conversations in the same Claude Desktop App instance share the same bridge process (same Go binary, same stdio pipe). Go's `sync.Mutex` provides in-process mutual exclusion — no file-locking APIs needed, no OS-specific behavior to worry about. When one conversation's tool call acquires the mutex, any other conversation's concurrent tool call blocks until the first releases it.
-
-**Why reads also acquire the mutex:** `safe_read_file` must acquire the mutex to ensure that the `ModTime` it records is consistent with the file content it returns. Without this, a concurrent write could modify the file between the `Stat()` and `Read()` calls, causing the session tracker to record a stale `ModTime` for fresh content — which would defeat race detection.
-
-**Why a single mutex (not per-file mutexes):** A per-file mutex would allow concurrent operations on different files, but the added complexity isn't justified. Memory I/O is infrequent (a few operations per session, each taking sub-millisecond I/O time) and the mutex hold time is negligible. A single mutex keeps the implementation trivial and eliminates any possibility of deadlock from lock ordering.
-
-**What the mutex protects against and what it does not:** The mutex prevents torn writes (no interleaving of concurrent file operations) and ensures consistent `Stat()`-then-`Read()` / `Stat()`-then-`Write()` sequences. It does *not* prevent semantic divergence from concurrent read-modify-write sequences — that is handled by the session tracker and branching system (see [Section 3.12](#312-branching)).
-
-**Session tracker:** The session tracker is an in-memory map that records, for each session, the `ModTime` of each file at the time it was last read or written by that session. This is the mechanism that enables race detection in `safe_write_file` and `safe_append_file`.
-
-**Session tracker data structure (session.go):**
+**Per-handle state.** For each live handle the bridge tracks:
 
 ```go
-package main
-
-import (
-    "sync"
-    "time"
-)
-
-// SessionTracker records per-session file version information for
-// concurrent read-modify-write race detection.
-type SessionTracker struct {
-    mu       sync.Mutex
-    sessions map[string]*SessionInfo  // session_id → session info
-    config   SessionConfig
+type HandleState struct {
+    Branches      map[string]string     // block name → branch file path (Section 3.15)
+    Baselines     map[string]Signature  // block name → signature of content last
+                                        //   returned to this handle (ModTime + size)
+    LastActivity  time.Time             // updated on every memory tool call
 }
 
-type SessionInfo struct {
-    StartedAt  time.Time
-    FileReads  map[string]time.Time   // abs_path → last-seen ModTime
+type HandleMap struct {
+    mu      sync.Mutex
+    handles map[string]*HandleState     // handle → state
 }
-
-// Register creates a new session. If at capacity, evicts the oldest session.
-func (st *SessionTracker) Register(sessionID string) { ... }
-
-// RecordRead stores the ModTime for a file in a session's tracking map.
-// Called by safe_read_file (after reading) and safe_write_file/safe_append_file
-// (after writing, to update the baseline for subsequent writes).
-func (st *SessionTracker) RecordRead(sessionID, absPath string, modTime time.Time) { ... }
-
-// GetLastRead returns the last-seen ModTime for a file in a session, or nil
-// if the session has never read this file.
-func (st *SessionTracker) GetLastRead(sessionID, absPath string) *time.Time { ... }
-
-// Exists checks whether a session ID is registered.
-func (st *SessionTracker) Exists(sessionID string) bool { ... }
 ```
 
-The session tracker uses its own `sync.Mutex` (separate from the write mutex) to protect concurrent access to the session map. This is safe because the session tracker is only accessed while the write mutex is held — but having its own mutex makes the session tracker independently testable and safe for future use patterns.
+This state is persisted across bridge restarts in `.bridge-state.json`
+([Section 3.18](#318-bridge-state-persistence-and-recovery)), so a handle issued in one Claude
+Desktop session is still valid — with its full branch map and read baselines — after the app is
+closed and reopened.
 
-**Implementation (writemutex.go):**
+**Handle is a required parameter with no graceful re-init.** Every memory tool declares `handle`
+as required in its MCP schema, so an omitted handle is rejected by schema validation before the
+call reaches the bridge. The bridge itself rejects malformed and unrecognized handles with errors;
+it never silently registers an unknown handle. The error-and-recover model keeps the bridge simple
+and the semantics predictable: the SKILL teaches one uniform recovery for *any* handle problem —
+**call `memory_start_conversation` to obtain a fresh handle and retry**. (Decision record: update
+plan §3.3.)
 
-```go
-package main
+**The unknown-handle procedure.** With persistence in place, a handle from a prior Claude Desktop
+session is normally already in the map after the startup load — the path below is the exception,
+not the rule:
 
-import "sync"
+1. If the handle is malformed (wrong length or character set), return `MALFORMED_HANDLE`
+   immediately — no adoption attempt.
+2. If the handle is well-formed but not in the in-memory map, scan the memory directory for branch
+   files matching `*.branch-<handle>-*.<ext>` (**lazy adoption**, the reconciliation backstop —
+   see [Section 3.18](#318-bridge-state-persistence-and-recovery)).
+3. If any branch files match, reconstruct the corresponding `(handle, block) → branch path`
+   entries, treat the handle as live, and proceed with the original tool call. Read baselines
+   cannot be reconstructed from disk, so the handle's first read of each target sets a fresh
+   baseline with `changed_since_last_read: false` (same as a brand-new handle).
+4. If no branch files match, return `INVALID_HANDLE`.
 
-// writeMutex serializes all memory file I/O across all concurrent
-// conversations. safe_read_file, safe_write_file, and safe_append_file
-// all acquire this mutex before performing any filesystem operations.
-var writeMutex sync.Mutex
+**Failure modes and recovery:**
+
+| Scenario | What happens |
+|---|---|
+| Handle omitted from tool call | MCP schema validation rejects; LLM calls `memory_start_conversation`, retries |
+| Handle malformed | Bridge returns `MALFORMED_HANDLE`; LLM recovers the same way |
+| Bridge restarted between calls (normal case) | Handle recovered from the persisted state with full branch map and read baselines; no error, no degradation |
+| Bridge restarted, state file missing/corrupt, conversation had created branches | Lazy adoption recovers the branch map (baselines lost); call proceeds; degraded but functional |
+| Bridge restarted, state file missing/corrupt, conversation never branched | Bridge returns `INVALID_HANDLE`; LLM recovers via `memory_start_conversation`; no data lost (base writes are visible to anyone reading the base) |
+| Compaction wipes recent responses but an older response with the handle survives | No error; the handle is still valid |
+| Compaction wipes every memory tool response including the original `memory_start_conversation` | LLM has no handle; calls `memory_start_conversation` on its next memory operation and continues with a fresh one |
+| LLM fabricates a handle | Not in the map; lazy-adoption scan finds nothing; `INVALID_HANDLE`; LLM recovers the same way |
+| Handle evicted by the cleanup policy, then presented again much later | Treated as unknown; lazy adoption finds no branches (eviction requires zero branches); `INVALID_HANDLE`; LLM recovers the same way; no data lost |
+
+**Handle lifetime and cleanup** (decision record: update plan §3.7). With persistence, handles
+live across restarts, so the persisted state file must be bounded. A handle is eligible for
+eviction when **both** hold:
+
+1. **It owns no branches** — all merged away by maintenance, or it never created any. A handle
+   with live branches must never be evicted: that would orphan its branch files and break
+   read-your-own-writes for its conversation.
+2. **It has been inactive longer than the retention window** — `handle.retention_days`, default
+   60 days since its last memory tool call. Baselines for a handle idle that long are very
+   unlikely to ever be consulted again.
+
+Cleanup runs as the final sweep of every `memory_run_maintenance` call
+([Section 3.13](#313-tool-memory_run_maintenance)) — no separate timer, no background thread, the
+same user-controlled cadence as merging. Eviction removes the handle's entry from the in-memory
+map and from the next persisted write; it loses no data because an evictable handle had no
+branches by definition. The retention window is configurable: a user running many concurrent
+conversations might want it shorter; one who returns to old conversations, longer. Deferred to
+v1.x: a hard LRU cap on handle count as a backstop, and incremental (append-log) persistence if
+whole-file rewrites ever become a bottleneck.
+
+### 3.15 Per-Handle Branching and Race Detection
+
+Branching is the mechanism that resolves the concurrent read-modify-write race condition without
+ever involving the LLM. When a write from one conversation would overwrite changes another
+conversation made since the writer last read the target, the bridge transparently redirects the
+write to a per-handle **branch file**. The base file is left unmodified; the writer's conversation
+continues to see (and build on) its own writes; the other conversation's data is preserved; and a
+later maintenance run semantically merges everything back together.
+
+**Branches are invisible to the LLM.** The LLM never sees branch filenames, never participates in
+race detection, and is never told a branch exists. From its perspective, every read returns *the*
+current state of a target and every write succeeds. There is no `branch_created` flag in any
+response, no branch content in any read, and no branch vocabulary in any error message. This is
+the load-bearing abstraction of the redesign: the v1 design returned branch content to the LLM
+(annotated) and relied on skill instructions to interpret it; the memory-aware design handles the
+entire branch lifecycle in code.
+
+**The per-handle branch map.** The bridge maintains, per handle, the map
+`block name → branch file path` (part of `HandleState`, [Section 3.14](#314-handle-management)).
+An entry `(H, B)` means handle H has diverged from the base of B and owns a private branch of it.
+
+**Read routing** for `memory_get_*` from handle H on target B:
+
+- If the branch map has an entry for `(H, B)`: return the contents of that branch file.
+- Otherwise: return the contents of the canonical (base) file.
+
+**Write routing** for `memory_write_*` from handle H on target B:
+
+- If the branch map has an entry for `(H, B)`: write to that branch file. No race detection is
+  needed — H already owns this branch, and nobody else writes to it.
+- Otherwise, compare the base file's current signature (ModTime + size) against H's read baseline
+  for B:
+  - **Signatures match (no race):** write to the base file.
+  - **Signatures differ (race):** create a new branch file
+    (`B.branch-<H>-<timestamp>.<ext>`), record it in the branch map at `(H, B)`, trigger an
+    immediate persistence checkpoint (branch-map entries are the most important state not to
+    lose), and write to the branch.
+  - **H has no baseline for B and the base exists:** treated as a race — another conversation
+    created or modified the file since H could have seen it. This covers the simultaneous
+    first-write scenario where two conversations independently create the same new block: the
+    second writer branches rather than silently overwriting the first.
+  - **The base does not exist:** true first-ever creation; no race is possible; create the base.
+
+This is the mechanism by which **read-your-own-writes** is preserved: once H's write to B lands in
+a branch, all subsequent reads and writes from H on B route through that branch. Other
+conversations continue to see the base.
+
+**No branches of branches.** Once a branch exists for `(H, B)`, all future operations from H on B
+reuse it. A branch is never itself branched. The storage model stays flat: at any moment, a block
+has zero or more *peer* branches, each owned by exactly one handle.
+
+**Appends never create branches** — see
+[Section 3.11](#311-tools-memory_get_block-memory_write_block-memory_append_block) for the
+serialized-append semantics and the branch-routing rule for handles that already own a branch.
+
+**When branching does NOT occur:** if `branching.enabled` is `false` in the config (a debugging
+escape hatch), all writes use last-writer-wins semantics and no branches are created. If the
+signatures match, no race has occurred and the write proceeds to the base normally.
+
+**Branch file naming convention** (decision record: update plan §3.8):
+
 ```
-
-All three memory tool handlers call `writeMutex.Lock()` / `defer writeMutex.Unlock()` at the start of their I/O operations.
-
-### 3.12 Branching
-
-Branching is the mechanism that resolves the concurrent read-modify-write race condition. When `safe_write_file` or `safe_append_file` detects that a memory file has been modified by another conversation since the current session last read it, the write is redirected to a "branch" file instead of overwriting the other conversation's changes. This preserves data from all concurrent conversations at the cost of deferred merge complexity.
-
-**When branching occurs:** A branch is created when ALL of the following conditions are true: (a) `config.Branching.Enabled` is `true`; (b) the target file already exists on disk; (c) the session tracker has a recorded `ModTime` for this file in the current session (meaning `safe_read_file` was previously called); (d) the file's current `ModTime` is newer than the session's recorded `ModTime` (meaning another conversation wrote to the file after this session last read it).
-
-**When branching does NOT occur:** If the target file does not exist at write time (true first-ever creation by anyone), no baseline exists and no race is possible — the write proceeds normally. If branching is disabled in config, all writes use last-writer-wins semantics (the v1 behavior). If the `ModTime` matches the session's last-seen value, no race has occurred and the write proceeds normally.
-
-**When the file exists but this session has never read it**, that is treated as a race: another conversation created or modified the file since this session began, and this session's write is redirected to a branch. This covers the "simultaneous first write" scenario where two conversations independently decide to create the same new block file — the second writer always branches rather than silently overwriting the first.
-
-**Branch file naming convention:**
-
-```
-<original-stem>.branch-<ISO8601-compact>-<random-suffix>.<ext>
+<basename>.branch-<handle>-<ISO8601compact-UTC>.<ext>
 ```
 
 Examples:
-- `core.md` → `core.branch-20260313T142305-a1b2.md`
-- `blocks/project-mcp-bridge.md` → `blocks/project-mcp-bridge.branch-20260313T142305-x7k9.md`
-- `blocks/episodic-2026-03.md` → `blocks/episodic-2026-03.branch-20260313T142305-f3e1.md`
+- `core.md` → `core.branch-h7k3xy90-20260520T142300Z.md`
+- `blocks\project-mcp-bridge.md` → `blocks\project-mcp-bridge.branch-ab12cd34-20260601T091500Z.md`
 
-The naming convention is designed to be:
-- **Parseable** — simple pattern matching (`*.branch-*.*`) identifies all branches; regex `^(.+)\.branch-(\d{8}T\d{6})-([0-9a-f]{4})\.(.+)$` extracts all components.
-- **Sortable** — ISO 8601 compact timestamps sort chronologically by filename.
-- **Self-documenting** — the creation timestamp is embedded in the filename, surviving bridge restarts with no external metadata.
-- **Windows-safe** — no colons or special characters in the timestamp (uses `T` separator, no `:` or `-` within the time portion).
-- **Collision-resistant** — the 4-hex-char random suffix (from `crypto/rand`) provides 65,536 possibilities per second, which is far more than needed given that branches are created under a mutex (at most one per mutex acquisition).
+The convention is designed to be:
 
-**Branch detection (branching.go):**
+- **Handle-embedding** — the owning handle appears in the filename, which (a) makes the
+  filesystem a partial backing store for the branch map, enabling the lazy-adoption recovery
+  backstop ([Section 3.18](#318-bridge-state-persistence-and-recovery)), and (b) makes branches
+  attributable by inspection: a human can see which conversation owns each branch. The handle
+  replaces the random hex suffix of the v1 convention with something meaningful. **Any future
+  change to this convention must preserve handle-recoverability from the filename, or accept that
+  lazy adoption stops working** (the persisted-state path would still function).
+- **Parseable** — `*.branch-<handle>-*.<ext>` globbing identifies a handle's branches; the handle
+  is the lookup key.
+- **Windows-safe** — see the timestamp format below.
+
+**The embedded timestamp — what it means and how it behaves:**
+
+- **It is the branch's creation time** — the moment the bridge created the branch in response to
+  the first racing write for that `(handle, block)` pair.
+- **It is frozen at creation and never updated.** All subsequent writes by the same handle update
+  the branch's *contents*, not its *filename* (no branches of branches). The embedded timestamp
+  therefore means "when this conversation first diverged from the base," not "when the branch was
+  last modified" — last-modified comes from the filesystem's own mtime. This split is deliberate:
+  the bridge never has to rename a branch file (renaming on every write would add complexity and
+  could race with a lazy-adoption scan mid-rename).
+- **It is purely informational, for human debugging.** The bridge never parses or compares it;
+  lazy adoption matches by handle, and uniqueness is already guaranteed by the
+  `(handle, block)` pair. It is an annotation, not a key.
+
+**Timestamp format — compact UTC with seconds and a `Z` suffix** (e.g., `20260520T142300Z`,
+meaning 2026-05-20 14:23:00 UTC):
+
+- **Compact (basic) ISO 8601**, not extended: no hyphens between date parts, no colons between
+  time parts, literal `T` separator retained. Colons are illegal in Windows filenames, and the
+  extended form's internal hyphens would collide — visually and programmatically — with the
+  hyphens this filename uses as its own field separators (`branch` - `<handle>` - `<timestamp>`).
+- **UTC with a trailing `Z`**: filename-safe (just a letter) and removes daylight-saving and
+  timezone ambiguity. The small loss of at-a-glance local readability is acceptable for a debug
+  annotation.
+- **Seconds included**: cheap, improves debug precision, removes same-minute ambiguity.
+
+**On-disk layout:** branches sit alongside their base files in the same directory (memory root
+for core, blocks directory for blocks). The layout is bridge-internal; the skill never references
+it.
+
+**Expected frequency:** branching only occurs when two conversations are active simultaneously
+*and* both modify the same target after overlapping reads. The typical usage pattern — one active
+conversation at a time — produces zero branches.
+
+### 3.16 Block File Format and Atomic Writes
+
+**Block file format on disk.** Every block file carries YAML frontmatter holding the block's
+index metadata, followed by the markdown body:
+
+```yaml
+---
+summary: "Discussion of the X feature design"
+updated_at: 2026-05-20T14:23:00Z
+---
+# Markdown body of the block goes here
+...
+```
+
+The bridge manages the frontmatter transparently: `memory_get_block` strips it and returns only
+the body; `memory_write_block` composes frontmatter (new or preserved `summary`, `updated_at` set
+to now) plus the provided body and writes them as one file. The LLM never sees frontmatter. A
+human can — the metadata is inspectable at the top of any block file in a text editor.
+
+Core (`core.md`) is the exception: it has **no frontmatter**. It is always loaded in full and
+does not appear in the index, so it needs no machine-readable metadata.
+
+**Schema evolution:** YAML frontmatter is naturally extensible. Adding fields (e.g., `importance`
+per [Chapter 9, Section 9.7](stateful-agent-design-chapter9.md#97-importance-scoring-on-blocks-and-episodic-entries))
+is backwards-compatible. Removing or renaming fields requires a migration sweep at bridge startup.
+
+**Atomic write procedure.** With the index folded into block files, the v1 problem of atomically
+coordinating a block write with an index write reduces to an atomic *single-file* write — solvable
+with the standard temp-and-rename approach:
+
+1. Determine the target file: base or branch for this handle, per
+   [Section 3.15](#315-per-handle-branching-and-race-detection).
+2. Compose the file content: frontmatter (`updated_at` = now; `summary` = the provided value, or
+   the previous summary preserved) plus the body. (For core: just the body.)
+3. Write the composed content to a temp file alongside the target (e.g., `<name>.md.tmp.<random>`),
+   in the same directory to guarantee a same-filesystem rename.
+4. `fsync` the temp file.
+5. Atomically rename temp → target.
+
+There is no second file to keep in sync: frontmatter and body are written together, so they can
+never diverge. This is materially simpler than the v1 design, which had to coordinate a block
+write with an `index.md` write; the simpler invariant is easier to verify and to recover.
+
+**Windows rename caveat:** `os.Rename` cannot atomically overwrite an existing file on all Windows
+filesystems. The v1-proven approach applies: remove the target if it exists, then rename — an
+acceptably tiny non-existence window given mutex-serialized, low-frequency writes. If true
+atomicity is needed later, the Windows `ReplaceFile` API can be called via `syscall`.
+
+**Crash recovery (startup sweeper):**
+
+- Orphan temp files (`*.tmp.*`) older than a few seconds are deleted at bridge startup.
+- Branch files on disk that the loaded persisted state doesn't know about are picked up by the
+  startup lazy-adoption pass ([Section 3.18](#318-bridge-state-persistence-and-recovery)); branch
+  files whose handles are gone entirely simply wait for the next `memory_run_maintenance`, which
+  enumerates all branches on disk regardless of handle liveness. Data is preserved either way.
+- Block files missing required frontmatter (e.g., hand-edited by the user without preserving it)
+  get default frontmatter inserted on the next read or scheduled write — the bridge neither
+  silently loses the data nor refuses to read it. The default summary is derived mechanically
+  (e.g., the first heading or first line, truncated).
+
+### 3.17 Merge Process and Merge Mutex
+
+The merge is the maintenance-time action that folds a block's peer branches back into a single
+canonical base. It runs only inside `memory_run_maintenance`
+([Section 3.13](#313-tool-memory_run_maintenance)). For each block with pending branches:
+
+1. **Select** all peer branches of base block B, along with B itself.
+2. **Acquire the merge mutex**, blocking all other memory I/O for the duration of this block's
+   merge (see below).
+3. **Merge semantically via an LLM sub-agent.** The bridge invokes a sub-agent (a separate
+   `claude -p` process, reusing the spawn machinery internally) with the base content and all
+   branch contents, instructed to produce a single unified document. This is a *semantic* merge,
+   not a textual three-way merge: memory files are prose markdown, and a line-based merge would
+   produce incoherent results when two conversations independently rewrote the same paragraph.
+   The merger identifies what is unique to each version, what is shared, and what conflicts; for
+   conflicts (e.g., two different status updates for the same project), the chronologically
+   latest version is authoritative, but earlier information is preserved when it contains facts
+   absent from the later version. Branch creation timestamps (from filenames) and file mtimes
+   establish chronology. Simple merges (e.g., different episodic additions) can use a cheaper
+   model (Sonnet or Haiku); complex merges of `core.md` may warrant Opus.
+4. **Regenerate frontmatter.** The merged file's `summary` is typically derived by the sub-agent
+   from the merged body; `updated_at` is set to the merge time. (Core has no frontmatter.)
+5. **Atomically replace** the base file with the merged result
+   ([Section 3.16](#316-block-file-format-and-atomic-writes)).
+6. **Delete** all branch files for B.
+7. **Clear** all branch-map entries `(*, B)` so future reads from every handle see the merged
+   base. Handles whose branches were merged away simply route back to the base; their read
+   baselines are refreshed on their next read.
+8. **Release the mutex.**
+
+The merge work runs in sub-agents — separate LLM invocations dispatched by the bridge — not in the
+calling conversation's reasoning context, so the calling LLM never reasons about merge content. But
+the `memory_run_maintenance` call itself is **synchronous**: it returns only after the selected
+blocks' merges complete (bounded by the per-call cap of [Section 3.13](#313-tool-memory_run_maintenance)).
+
+Note that this preserves the **single-writer model**: the merge sub-agent produces merged
+*content*, but the bridge itself performs the file replacement. Sub-agents still never write to
+memory (see [Chapter 6, Section 6.6](stateful-agent-design-chapter6.md#66-sub-agent-memory-access-rules)).
+
+**The merge mutex.** While a block's merge is in progress, the bridge holds a lock that blocks
+all `memory_*` tool calls touching that block — preventing new branches from being created
+mid-merge and preventing reads from observing partial merge state. For v1 simplicity, the lock is
+the existing process-wide memory mutex held for the duration of each block's merge; a
+finer-grained per-block lock is a future optimization. Because merges run only when the user
+invokes maintenance — typically at a moment chosen for the purpose — the practical impact of
+process-wide locking is small. A blocked caller that would wait unacceptably long receives
+`MAINTENANCE_IN_PROGRESS` ([Section 3.19](#319-error-response-convention)) rather than hanging.
+
+**The memory mutex (ordinary operation).** Outside of merges, all memory tool handlers serialize
+on a single process-wide `sync.Mutex` (`memmutex.go`), exactly as in v1: reads acquire it so the
+signature recorded for a read is consistent with the content returned; writes acquire it so
+signature-compare-then-write sequences are atomic with respect to other conversations. A single
+mutex (rather than per-file locks) keeps the implementation trivial and deadlock-free; memory I/O
+is infrequent and sub-millisecond, so the serialization cost is negligible.
+
+### 3.18 Bridge State Persistence and Recovery
+
+The bridge persists its in-memory state to disk and reloads it at startup. Motivation: the bridge
+is spawned by Claude Desktop over stdio and **terminates on every Claude Desktop close**
+([Section 3.24](#324-graceful-shutdown)) — so in-memory-only state would be discarded routinely,
+not rarely. Without persistence, every close-reopen cycle would degrade race detection and the
+`changed_since_last_read` flag (read baselines are not recoverable from disk). With persistence, a
+restart is transparent. (Decision record: update plan §2.12, which superseded an earlier
+in-memory-only decision.)
+
+**What is persisted** — the three pieces of per-conversation state the bridge tracks, plus the
+bookkeeping needed by the eviction policy:
+
+1. The set of live handles, each with its last-activity time
+   ([Section 3.14](#314-handle-management)).
+2. The per-handle branch map (`handle → block name → branch file path`).
+3. The per-handle read baselines (`handle → block name → content signature`).
+
+The branch *files* themselves remain the source of truth for branch content; the state file
+records only the mapping and metadata. Because branch filenames also embed the handle
+([Section 3.15](#315-per-handle-branching-and-race-detection)), the branch→handle association is
+independently recoverable from disk even if the state file is lost — which is exactly what makes
+lazy adoption a viable backstop.
+
+**Storage location and format.** A single JSON file in the memory root, named
+`.bridge-state.json` (leading dot so it sorts away from memory content and is visually distinct
+from blocks). It is bridge-private: neither the LLM nor the SKILL ever references it, and it is
+not memory content.
+
+**Write strategy:**
+
+- **On clean shutdown**, when the bridge detects EOF on stdin (the normal Claude Desktop close
+  path — [Section 3.24](#324-graceful-shutdown)). This is the common case and captures the most
+  recent state.
+- **Debounced checkpoints during operation:** state-changing operations mark the state dirty;
+  changes are coalesced and flushed at most once per `persistence.checkpoint_interval_seconds`
+  (default 5), so a burst of writes doesn't cause a burst of disk I/O. **Branch creation triggers
+  an immediate checkpoint** — the branch-map entry is the most important state not to lose, since
+  losing it (plus the state file) is what creates recovery work.
+- **Whole-file rewrite each time**, via the same temp-file-plus-atomic-rename pattern as block
+  writes ([Section 3.16](#316-block-file-format-and-atomic-writes)), so a crash mid-write cannot
+  corrupt the file. For the expected state size (at most a few hundred handles, each small) a
+  whole-file JSON rewrite is well under a millisecond; incremental/append-based persistence is a
+  v1.x optimization.
+
+**Load and reconcile at startup:**
+
+1. Load `.bridge-state.json` if present.
+2. **Reconcile against the filesystem:** for each persisted branch-map entry, verify the
+   referenced branch file still exists; drop entries whose files are gone (e.g., merged away by a
+   maintenance run from a different bridge instance — rare in a single-bridge deployment).
+3. **Run lazy adoption as a backstop:** scan the memory directory for branch files *not*
+   represented in the loaded state and rebuild map entries for them from the handle embedded in
+   each filename. This covers a stale state file (branch created after the last checkpoint), a
+   missing one, and a corrupt one.
+
+**Persistence is the primary recovery mechanism; lazy adoption is the reconciliation backstop.**
+Lazy adoption runs in two places: the startup pass above, and the unknown-handle path of
+[Section 3.14](#314-handle-management) (a well-formed handle absent from the loaded state). What
+lazy adoption can recover is the branch map — the handle→branch association is in the filenames.
+What it cannot recover is read baselines, which exist only in the state file; after
+adoption-without-state, the affected handle's first read of each target sets a fresh baseline
+(`changed_since_last_read: false`, matching a fresh handle), and its first write may miss one race
+(one cross-conversation overwrite per restart per affected block — bounded and small; the stricter
+alternative of always branching the first post-recovery write would produce spurious branches
+every restart, costing more than it gains). The system therefore recovers full state in the normal
+case and degrades gracefully — never below the pre-persistence design — when the state file is
+unavailable.
+
+**Corruption handling.** If `.bridge-state.json` is present but unparseable, the bridge logs the
+problem to its server-side log, discards the corrupt file, and falls back to pure lazy adoption.
+The bridge is never worse off than a lazy-adoption-only design, even in the corruption case.
+
+**Eviction interplay:** the cleanup sweep of [Section 3.14](#314-handle-management) removes
+evicted handles from the in-memory map; they disappear from the state file at its next write.
+
+### 3.19 Error Response Convention
+
+Traditional programming APIs tended toward terse, machine-only error codes (`ENOENT`) because the
+consumer was other code that couldn't usefully act on free-form text. LLMs collapse that gap — the
+error *message* itself is the recovery instruction. The bridge's memory tools therefore return
+errors with both a stable machine-readable code and a natural-language message. (Decision record:
+update plan §3.10.)
+
+**Schema:**
 
 ```
-// FindBranches returns all branch files for a given base file path.
-// For example, FindBranches("C:\franl\.claude-agent-memory\core.md")
-// returns all files matching "core.branch-*.md" in the same directory.
-func FindBranches(basePath string) []string:
-    dir = filepath.Dir(basePath)
-    stem = filenameStem(basePath)   // "core" from "core.md"
-    ext = filepath.Ext(basePath)    // ".md"
-    pattern = filepath.Join(dir, stem + ".branch-*" + ext)
-    matches, _ = filepath.Glob(pattern)
-    sort.Strings(matches)  // Chronological order (ISO timestamps sort correctly)
-    return matches
-
-// GenerateBranchPath creates a new branch filename for the given base path.
-func GenerateBranchPath(basePath string) string:
-    dir = filepath.Dir(basePath)
-    stem = filenameStem(basePath)
-    ext = filepath.Ext(basePath)
-    timestamp = time.Now().Format("20060102T150405")  // Go's reference time format
-    random = randomHex(4)  // 4 hex chars from crypto/rand
-    return filepath.Join(dir, stem + ".branch-" + timestamp + "-" + random + ext)
-
-// ExtractTimestamp parses the creation timestamp from a branch filename.
-func ExtractTimestamp(branchPath string) string:
-    // Parse "core.branch-20260313T142305-a1b2.md" → "2026-03-13T14:23:05"
-    // Returns ISO 8601 format for the tool response.
-
-// AnyBranchesExist checks if any branch files exist in the memory directory tree.
-func AnyBranchesExist(memoryDir string) bool:
-    // Walk the memory directory looking for any file matching *.branch-*.*
+{
+  "handle": "abc1def2",     // echoed back if a handle was supplied and is recognized;
+                            //   omitted or null if the error was a handle problem
+  "ok": false,
+  "error": {
+    "code": "INVALID_HANDLE",         // stable identifier; never changes between bridge versions
+    "message": "Handle 'xy77abcd' is not recognized. Call memory_start_conversation to obtain a fresh handle and retry.",
+    "context": { "supplied_handle": "xy77abcd" }   // optional; included only when useful for diagnosis
+  }
+}
 ```
 
-**`index.md` behavior with branches:** File names in `index.md` always reference the canonical (non-branched) names (e.g., `core.md`, `project-mcp-bridge.md`). The `Updated` date stamp in `index.md` reflects the most recent write to the file or any of its branches — whichever is later. This ensures that the index accurately represents "when was this topic last touched" regardless of branching.
+**Why both `code` and `message`:**
 
-**Merge process:** Branched files are reconciled via a **semantic merge** — not a textual three-way merge. The merger (typically a sub-agent spawned during off-hours) reads both the base file and each branch, understands the meaning and intent of the changes in each version, and produces a single unified file that preserves the important information from all versions. This is fundamentally different from `git merge`, which operates on text lines; our memory files are prose markdown where the semantic content matters more than the exact wording.
+- The `message` gives the LLM a natural-language explanation it can act on directly, without the
+  SKILL having to enumerate every error code and recovery procedure.
+- The `code` stays stable across message rewordings. Tests, future tooling, and automated handling
+  can rely on `INVALID_HANDLE` even if the message text is later improved, and the code is
+  grep-able in server logs without false matches.
 
-The merge process:
+**Abstraction discipline (critical):** error messages must respect the layers established by the
+design. The LLM operates on *handles*, *core*, *blocks*, *summaries*, and *the index*. Branches,
+mutexes, frontmatter, file paths, the branch map, and every other implementation detail are
+bridge-internal and must not appear in error messages.
 
-1. **Detection:** A sub-agent (or the primary agent, prompted by `branches_exist: true` from `memory_session_start`) identifies files with branches by scanning for `*.branch-*.*` in the memory directory.
+Good error messages:
+- ✅ `"Block 'foo' does not exist for this handle"` — speaks at the block abstraction.
+- ✅ `"Handle 'xy77abcd' is not recognized. Call memory_start_conversation."` — gives the recovery path.
+- ✅ `"Summary is required when creating a new block"` — explains the contract.
+- ✅ `"Block name 'foo bar' contains invalid characters; use letters, digits, hyphens, and underscores"` — actionable correction.
 
-2. **Reading:** The merger reads the base file and all its branches. The branch creation timestamps (from filenames) establish chronological order.
+Bad error messages (leak the design):
+- ❌ `"Branch 'foo.branch-h7k3xy90-...' already exists"`
+- ❌ `"Cannot acquire merge mutex; try again"`
+- ❌ `"Frontmatter parse failed at line 3"`
+- ❌ `"Failed to atomic-rename temp file"`
 
-3. **Semantic merge:** The merger analyzes each version's content, identifies what information is unique to each version, what information is shared, and what information conflicts. For conflicts (e.g., two different status updates for the same project), the merger uses the chronologically latest version as authoritative, but preserves earlier information if it contains facts not present in the later version.
+For internal errors the LLM cannot recover from (disk failure, invariant violation, sub-agent
+merge failure), the message stays generic — *"An internal bridge error occurred; the operation was
+not completed. Please report this to the user."* — and the technical detail goes to the
+server-side log file ([Section 3.22](#322-logging)) for the user to inspect when debugging.
 
-4. **Writing:** The merged result is written to the base file path via `safe_write_file`. The branch files are then deleted.
+**Initial error code set** (a starting point, not exhaustive; new codes are added as new error
+situations are identified):
 
-5. **Cost:** Merges cost tokens (the sub-agent must read and reason about the content). Simple merges (e.g., two conversations added different entries to an episodic log) can be handled by a cheaper model (Sonnet or Haiku). Complex merges (e.g., two conversations made conflicting updates to `core.md`) may require Opus.
+| Code | Meaning |
+|---|---|
+| `INVALID_HANDLE` | Handle present and well-formed but not recognized by the bridge (after the lazy-adoption check) |
+| `MALFORMED_HANDLE` | Handle present but the format is wrong (length, character set) |
+| `BLOCK_NOT_FOUND` | Read or operation targets a block that doesn't exist for this handle |
+| `INVALID_BLOCK_NAME` | Block name contains disallowed characters or violates naming rules |
+| `SUMMARY_REQUIRED` | `memory_write_block` called for a new block without a `summary` argument |
+| `SUMMARY_TOO_LONG` | `summary` exceeds the configured length cap |
+| `MAINTENANCE_IN_PROGRESS` | The bridge is currently consolidating memory; the operation should be retried shortly (returned instead of blocking on the merge mutex past an acceptable wait) |
+| `INTERNAL_ERROR` | Catch-all; the message stays generic; details go to the server log |
 
-**Merge scheduling:** Merges can be triggered in several ways: (a) manually by the user asking "please merge any branched memory files"; (b) at session start when `memory_session_start` returns `branches_exist: true` and the primary agent decides to merge before proceeding; (c) during off-hours via a scheduled wake-up (see [Chapter 9, Future Enhancements](stateful-agent-design-chapter9.md)). In all cases, the merge is performed by a sub-agent with `allow_memory_read: true` and access to the bridge's write tools.
+**Schema-validation errors:** if MCP itself rejects a call (e.g., the required `handle` parameter
+omitted), the error shape is whatever MCP returns and is not under the bridge's control. The SKILL
+teaches one recovery for any handle-related rejection — schema-level or bridge-issued: call
+`memory_start_conversation`, retry.
 
-**Expected frequency:** Branching is expected to be rare. It only occurs when two conversations are active simultaneously *and* both modify the same memory file. The typical usage pattern — one active conversation at a time — produces zero branches.
-
-### 3.13 Async Executor
+### 3.20 Async Executor
 
 The async executor is the shared component that implements the hybrid sync/async execution model. Both `spawn_agent` and `run_command` delegate to it for subprocess lifecycle management. Extracting this into a shared component avoids duplicating the sync-window / async-handoff logic across tool handlers.
 
@@ -1066,7 +1593,7 @@ func (ae *AsyncExecutor) Run(cmd *exec.Cmd, timeoutSeconds int,
 
 **Timeout enforcement:** When a process exceeds its `timeoutSeconds` deadline, it is killed by one of two mechanisms: (a) `check_agent` detects the deadline has passed and kills the process when polled, or (b) the job lifecycle manager's cleanup goroutine kills expired processes during its periodic sweep. This dual-path ensures processes are killed even if the primary agent never polls.
 
-### 3.14 Job Lifecycle Manager
+### 3.21 Job Lifecycle Manager
 
 The job manager is a background goroutine that tracks active async jobs (from both `spawn_agent` and `run_command`) and cleans up expired ones.
 
@@ -1123,7 +1650,7 @@ func (jm *JobManager) CleanupLoop():
 
 **Job ID generation:** Use a short, human-readable ID composed of a prefix and random suffix, e.g., `job-a1b2c3`. The prefix makes log entries easy to grep. Use `crypto/rand` for the random component.
 
-### 3.15 Logging
+### 3.22 Logging
 
 All bridge operations are logged to a file for auditability and debugging. Logging does **not** go to stdout/stderr (those are reserved for MCP stdio transport).
 
@@ -1131,7 +1658,7 @@ All bridge operations are logged to a file for auditability and debugging. Loggi
 
 | Event | Level | Fields |
 |-------|-------|--------|
-| Bridge started | info | config path, version |
+| Bridge started | info | config path, version, state file loaded (yes/no), handles recovered, branches adopted at startup |
 | Tool call received | info | tool name, abbreviated params |
 | spawn_agent: subprocess launched | info | job_id (if async), model, working_dir |
 | spawn_agent: sync completion | info | elapsed time, output size |
@@ -1141,43 +1668,56 @@ All bridge operations are logged to a file for auditability and debugging. Loggi
 | run_command: async handoff | info | job_id, command (first 200 chars), elapsed time at handoff |
 | check_agent: status poll | debug | job_id, source, status, elapsed |
 | check_agent: result collected | info | job_id, source, status, elapsed, output size |
-| memory_session_start: new session | info | session_id |
-| safe_read_file: read | info | path, session_id, has_branches, bytes read |
-| safe_write_file: write | info | path, session_id, bytes written, branch_created |
-| safe_write_file: race detected | warn | path, session_id, branch_path |
-| safe_append_file: append | info | path, session_id, bytes written, branch_created |
-| safe_append_file: race detected | warn | path, session_id, branch_path |
+| memory_start_conversation: handle minted | info | handle |
+| memory_get_core / memory_get_block: read | info | handle, target, branch-or-base, bytes returned, changed_since_last_read |
+| memory_write_core / memory_write_block: write | info | handle, target, branch-or-base, bytes written |
+| Race detected → branch created | warn | handle, target, branch filename |
+| memory_append_block / memory_append_episodic: append | info | handle, target, bytes appended |
+| memory_get_index: assembled | debug | handle, block count, cache hit/miss |
+| Lazy adoption: branches adopted | info | handle, branch filenames adopted |
+| memory_run_maintenance: pass complete | info | handle, blocks merged, branches deleted, handles evicted, more_pending |
+| Merge sub-agent dispatched / completed / failed | info / info / error | block, branch count, elapsed, error details on failure |
+| State checkpoint written | debug | bytes, handles persisted |
+| State file corrupt at startup | error | parse error details; fallback to lazy adoption |
 | Job expired | warn | job_id, reason |
 | Sub-agent killed (timeout) | warn | job_id, elapsed |
-| Error (any) | error | tool name, error details |
-| Bridge shutdown | info | active jobs killed |
+| Error (any) | error | tool name, error code, error details |
+| Bridge shutdown | info | active jobs killed, final state checkpoint written |
+
+Note that branch filenames, frontmatter problems, and other implementation details **do** appear
+in the log — the abstraction discipline of [Section 3.19](#319-error-response-convention) applies
+to tool responses, not to the server-side log, which exists precisely so the user can see the
+machinery when debugging.
 
 **Format:** Structured JSON lines (one JSON object per log line). This is easy to parse, grep, and pipe into log aggregation tools.
 
 ```json
-{"ts":"2026-02-21T14:30:00Z","level":"info","msg":"spawn_agent: subprocess launched","job_id":"job-a1b2c3","model":"sonnet","working_dir":"C:\\franl\\git\\mcp-bridge"}
+{"ts":"2026-06-12T14:30:00Z","level":"warn","msg":"race detected: branch created","handle":"h7k3xy90","target":"project-foo","branch":"project-foo.branch-h7k3xy90-20260612T143000Z.md"}
 ```
 
-### 3.16 Error Handling
+### 3.23 Error Handling
 
-The bridge should never crash from a tool call. All errors are caught and returned as MCP tool errors.
+The bridge should never crash from a tool call. All errors are caught and returned as MCP tool errors — memory tool errors follow the convention in [Section 3.19](#319-error-response-convention).
 
 **Error categories:**
 
 | Category | Example | Behavior |
 |----------|---------|----------|
 | Configuration error | Missing config file, invalid YAML | Bridge fails to start with clear error message |
-| Tool input validation | Missing required param, invalid path | Return MCP tool error immediately |
+| Tool input validation | Missing required param | MCP schema validation rejects before the bridge sees the call |
 | Subprocess launch failure | `claude` not found, shell not found, permission denied | Return MCP tool error with details |
 | Subprocess timeout | Sub-agent or command exceeds `timeout_seconds` | Kill process, return `timed_out` status via `check_agent` |
 | Subprocess crash | `claude -p` or shell command exits with non-zero | Return output + exit code via `result` field |
 | Shell not found | Configured `run_command.shell` path doesn't exist | Return MCP tool error; verify Cygwin installation |
-| File I/O error | Permission denied, disk full | Return MCP tool error with OS error details |
+| Handle malformed | Wrong length or character set | `MALFORMED_HANDLE` per Section 3.19 |
+| Handle unknown | Not in map; lazy adoption found nothing | `INVALID_HANDLE` per Section 3.19 |
+| Block not found / bad name | Read of missing block; invalid characters in name | `BLOCK_NOT_FOUND` / `INVALID_BLOCK_NAME` |
+| Summary contract violation | New block without summary; over-length summary | `SUMMARY_REQUIRED` / `SUMMARY_TOO_LONG` |
+| Maintenance contention | Memory call would block too long on the merge mutex | `MAINTENANCE_IN_PROGRESS`; LLM retries shortly |
 | Concurrent agent cap reached | 5 sub-agents already running | Return MCP tool error suggesting the user wait or check existing jobs |
-| Unknown session ID | `session_id` not in tracker | Return MCP tool error: "Call memory_session_start first" |
-| Branch creation failure | Disk full or permissions error during branch write | Return MCP tool error with OS error details; base file is not modified |
+| File I/O error, merge sub-agent failure, invariant violation | Permission denied, disk full, malformed merge output | `INTERNAL_ERROR` with a generic message; details to the server log; for merge failures, the affected base and branches are left untouched |
 
-### 3.17 Graceful Shutdown
+### 3.24 Graceful Shutdown
 
 The bridge runs as a subprocess of Claude Desktop, communicating over stdio (stdin/stdout). When Claude Desktop *exits* (not merely when a conversation is closed — the bridge persists for the full desktop session), it closes the stdin pipe. **Stdin EOF is the authoritative shutdown signal** for the bridge — it is the only shutdown mechanism that works reliably on Windows and is consistent with the MCP stdio transport model.
 
@@ -1187,15 +1727,17 @@ Note: UNIX signals are not used for shutdown. On Windows, SIGTERM does not exist
 
 1. The `mcp-go` SDK's stdio read loop detects EOF on stdin and exits naturally.
 2. The bridge detects the loop exit and begins shutdown.
-3. Kill all running subprocesses — both sub-agents (from `spawn_agent`) and shell commands (from `run_command`) — by calling `Process.Kill()` on each active job. On Windows, this calls `TerminateProcess` immediately; there is no SIGTERM grace period.
-4. Log the shutdown and number of jobs terminated.
-5. Exit cleanly.
+3. **Write the final state checkpoint** to `.bridge-state.json` (atomic temp + rename, per [Section 3.18](#318-bridge-state-persistence-and-recovery)). This is the primary persistence write — it captures the live handles, branch map, and read baselines so the next bridge instance recovers transparently.
+4. Kill all running subprocesses — both sub-agents (from `spawn_agent`) and shell commands (from `run_command`) — by calling `Process.Kill()` on each active job. On Windows, this calls `TerminateProcess` immediately; there is no SIGTERM grace period. (A merge sub-agent killed mid-merge leaves its block's base and branches untouched — merges only replace the base as the final atomic step — so the merge simply reruns at the next maintenance call.)
+5. Log the shutdown, the state write, and the number of jobs terminated.
+6. Exit cleanly.
 
 **Pseudo-code:**
 
 ```
 func main():
-    // ... setup ...
+    // ... setup: load config, load + reconcile persisted state (Section 3.18),
+    //     run startup sweeper (Section 3.16), register tools ...
 
     // Start the MCP stdio server. This blocks until stdin is closed (EOF),
     // which happens when Claude Desktop exits or kills the bridge process.
@@ -1203,6 +1745,7 @@ func main():
     server.Run()  // returns when stdin closes
 
     // Stdin EOF received — begin graceful shutdown
+    persistence.WriteFinalCheckpoint()  // atomic write of .bridge-state.json
     log.Info("Stdin EOF detected, killing %d active jobs", jobManager.ActiveCount())
     jobManager.KillAll()  // calls Process.Kill() on all running subprocesses
     os.Exit(0)
