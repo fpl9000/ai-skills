@@ -1,9 +1,9 @@
 # Stateful Agent System: Detailed Design
 
-**Version:** 1.0 (Draft)  
-**Date:** February - March 2026  
+**Version:** 2.0 (Draft)  
+**Date:** February - June 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
-**Companion document:** [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
+**Companion documents:** [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals. [Design Update Plan](design-update-plan.md) — the plan that produced this version 2.0 rewrite (memory-aware tools, handle model, invisible branching).
 
 ## Contents
 
@@ -35,19 +35,20 @@
 
 The stateful agent system consists of three components that together give Claude persistent memory, local machine access, and task delegation capabilities:
 
-1. **MCP Bridge Server** — A Go binary that runs locally, providing Bash access, sub-agent spawning, and mutex-protected memory file writes to be used by the Claude Desktop App via the MCP protocol over stdio.
+1. **MCP Bridge Server** — A Go binary that runs locally, providing memory-aware tools (read/write access to Layer 2 memory through a structured tool interface), Bash access, and sub-agent spawning, to be used by the Claude Desktop App via the MCP protocol over stdio. The bridge owns all memory storage details — file layout, concurrency control, branching, and indexing are handled internally and are invisible to the LLM.
 
-2. **Memory System (Layer 2)** — A directory of markdown files on the local filesystem that stores deep project context, episodic recall, decision history, and technical notes. This supplements Anthropic's built-in memory (Layer 1), which is limited to ~500–2,000 tokens.
+2. **Memory System (Layer 2)** — A directory of markdown files on the local filesystem that stores deep project context, episodic recall, decision history, and technical notes. This supplements Anthropic's built-in memory (Layer 1), which is limited to ~500–2,000 tokens. The LLM never touches these files directly; it accesses them by name through the bridge's memory-aware tools.
 
-3. **Memory Skill** — A Claude Desktop skill (.zip file) containing instructions that teach Claude how to manage the Layer 2 memory lifecycle: when to read files, when to write updates, how to structure content, and when to create new blocks.
+3. **Memory Skill** — A Claude Desktop skill (.zip file) containing instructions that teach Claude how to manage the Layer 2 memory lifecycle: when to read blocks, when to write updates, how to structure content, and when to create new blocks. The skill teaches *when and what*; the bridge enforces *how*.
 
 ### 1.2 Component Inventory
 
 | Component | Type | Location | Purpose |
 |-----------|------|----------|---------|
-| MCP Bridge Server<br/>(aka "the bridge") | Go binary | `C:\franl\.claude-agent-memory\bin\mcp-bridge.exe` | Bash access, sub-agent spawning, mutex-protected memory reads/writes. Source code located in `C:\franl\git\mcp-bridge\` |
-| Anthropic Filesystem Extension | MCP server | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) |
-| Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage |
+| MCP Bridge Server<br/>(aka "the bridge") | Go binary | `C:\franl\.claude-agent-memory\bin\mcp-bridge.exe` | Memory-aware tools, sub-agent spawning, local command execution. Source code located in `C:\franl\git\mcp-bridge\` |
+| Anthropic Filesystem Extension | MCP server | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) for **non-memory** files only |
+| Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage (managed exclusively by the bridge) |
+| Bridge state file | JSON file | `C:\franl\.claude-agent-memory\.bridge-state.json` | Persisted bridge state: live handles, branch map, read baselines. Survives bridge restarts. |
 | Memory skill | .zip file | Uploaded via Claude Desktop Settings | Instructions for memory lifecycle |
 | CLAUDE.md | Markdown file | `C:\Users\flitt\.claude\CLAUDE.md` | Sub-agent environment context |
 | Bridge config | YAML file | `C:\franl\.claude-agent-memory\bridge-config.yaml` | Bridge runtime settings |
@@ -56,17 +57,17 @@ The stateful agent system consists of three components that together give Claude
 
 These principles are inherited from the proposal and govern all design decisions:
 
-1. **Transparency.** All memory is stored in human-readable, human-editable markdown files. No opaque databases, no binary formats. The user can open any file in a text editor, review it, correct it, or delete it.
+1. **Transparency.** All memory is stored in human-readable, human-editable markdown files. No opaque databases, no binary formats. The user can open any file in a text editor, review it, correct it, or delete it. (Transparency is for the *user* — the LLM sees blocks by name through tools, not files by path.)
 
-2. **Simplicity.** Start with the simplest approach that works. Add complexity (search indexes, memory-aware tools, parallel sub-agents) only when the simple approach proves insufficient in practice. Future enhancements are described in [Chapter 9](stateful-agent-design-chapter9.md).
+2. **Simplicity.** Start with the simplest approach that works. Add complexity (search indexes, parallel sub-agents) only when the simple approach proves insufficient in practice. Future enhancements are described in [Chapter 9](stateful-agent-design-chapter9.md).
 
 3. **Single binary.** The MCP bridge compiles to a single static Go binary with no runtime dependencies. Installation is copying the `.exe` file.
 
-4. **Bridge-mediated memory access with session tracking.** The bridge provides sub-agent lifecycle management tools (`spawn_agent`, `check_agent`), a direct local command execution tool (`run_command`), a session initialization tool (`memory_session_start`), a session-tracked memory reader (`safe_read_file`), and mutex-protected memory file writers (`safe_write_file`, `safe_append_file`). The `run_command` tool executes shell commands on the local machine and returns stdout/stderr directly. All memory file operations (read and write) go through the bridge, which tracks per-session file versions to detect concurrent read-modify-write races. Non-memory filesystem operations (list, search, and non-memory reads/writes) are handled by the Filesystem extension.
+4. **Memory-aware tools with a handle protocol.** The bridge provides a family of memory-aware tools (`memory_start_conversation`, `memory_get_core`, `memory_write_core`, `memory_get_index`, `memory_get_block`, `memory_write_block`, `memory_append_block`, `memory_append_episodic`, `memory_run_maintenance`) plus sub-agent lifecycle tools (`spawn_agent`, `check_agent`) and a direct local command execution tool (`run_command`). Memory tools address blocks by *name*, not by file path. Every conversation begins by calling `memory_start_conversation`, which returns an opaque 8-character handle; the handle is a required parameter on every subsequent memory tool call and lets the bridge track each conversation's reads to detect concurrent read-modify-write races. Non-memory filesystem operations (list, search, and non-memory reads/writes) are handled by the Filesystem extension.
 
-5. **Single-writer model with mutex protection and branching.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents have read-only access to Layer 2 memory. The bridge's in-process write mutex serializes all memory file I/O. When a concurrent read-modify-write race is detected (via per-session file version tracking), the bridge creates a "branch" of the memory file instead of overwriting the other conversation's changes. Branches are merged later during off-hours via a semantic merge process (see [Chapter 3, Section 3.12](stateful-agent-design-chapter3.md#312-branching) for details).
+5. **Single-writer model with invisible per-handle branching.** Only the primary Claude Desktop agent writes to Layer 2 memory. Sub-agents have read-only access to Layer 2 memory. The bridge's in-process write mutex serializes all memory file I/O. When a concurrent read-modify-write race is detected (via per-handle read baselines), the bridge transparently routes the write to a per-handle *branch* of the block instead of overwriting the other conversation's changes — and continues routing that handle's reads and writes of that block to its branch, so each conversation sees its own consistent view. Branches are completely invisible to the LLM: tool responses never mention them. Branches are merged back into the base block by a semantic merge process when the user invokes `memory_run_maintenance` (see [Chapter 3, Section 3.15](stateful-agent-design-chapter3.md#315-per-handle-branching-and-race-detection) and [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex) for details).
 
-6. **Compliance-based memory management.** Claude's memory updates are guided by skill instructions (compliance), not enforced by tool constraints. This is pragmatic — the alternative (a dedicated memory server with structured CRUD) is more complex and can be added later if compliance proves insufficient.
+6. **Compliance for policy, enforcement for structure.** Claude's memory *policy* — when to read, when to write, what's worth remembering — is guided by skill instructions (compliance). But memory *structure* — file layout, naming, frontmatter, index consistency, concurrency safety — is enforced by the bridge's tool interface and cannot be violated by the LLM, even accidentally. This is the key change from version 1.0, which relied on compliance for both. The version 1.0 approach (path-based `safe_*` file tools) is preserved for historical context in the [Design Update Plan](design-update-plan.md).
 
 ### 1.4 Terminology
 
@@ -75,18 +76,20 @@ These principles are inherited from the proposal and govern all design decisions
 | **Primary agent** | The Claude instance running in Claude Desktop App. Has Layer 1 memory, MCP tools, and the memory skill. |
 | **Sub-agent** | An ephemeral Claude Code CLI instance (`claude -p`) spawned by the bridge. One-shot, stateless, no Layer 1 memory. |
 | **Layer 1** | Anthropic's built-in memory. Auto-generated summary (~500–2,000 tokens) injected into every conversation. Influenced indirectly via `memory_user_edits` steering instructions. ~24-hour lag for updates. |
-| **Layer 2** | Our supplementary memory system. Markdown files at `C:\franl\.claude-agent-memory\`. Under our full control. Updates are immediate. |
-| **MCP bridge** | The Go binary that serves as an MCP server, providing `memory_session_start`, `safe_read_file`, `safe_write_file`, `safe_append_file`, `spawn_agent`, `check_agent`, and `run_command` tools. |
-| **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for non-memory file operations. Memory file reads go through the bridge's `safe_read_file` tool instead. |
-| **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file I/O (`safe_read_file`, `safe_write_file`, and `safe_append_file`). Prevents concurrent conversations from interleaving or corrupting memory updates. |
+| **Layer 2** | Our supplementary memory system. Markdown files at `C:\franl\.claude-agent-memory\`. Under our full control. Updates are immediate. Accessed only through the bridge's memory-aware tools. |
+| **MCP bridge** | The Go binary that serves as an MCP server, providing the nine memory-aware tools plus `spawn_agent`, `check_agent`, and `run_command` (twelve tools total). |
+| **Filesystem extension** | Anthropic's official `@modelcontextprotocol/server-filesystem` MCP server. Provides `read_file`, `write_file`, `edit_file`, etc. Used for **non-memory** file operations only. The LLM never uses it on the memory directory. |
+| **Handle** | An opaque 8-character lowercase alphanumeric identifier (e.g., `h7k3xy90`) minted by the bridge when a conversation calls `memory_start_conversation`. Required parameter on every memory tool call; echoed in every response. Identifies the conversation for read tracking and branch routing. |
+| **Handle map** | The bridge's in-memory per-handle state: read baselines (which version of each block this handle last read) and the branch map (which blocks this handle has been branched on, and where each branch file lives). Persisted to the bridge state file. |
+| **Read baseline** | The version signature (ModTime + size) of a block recorded when a handle reads it. Compared at write time to detect concurrent read-modify-write races. |
+| **Branch (memory)** | A per-handle copy of a block file, created transparently when a write races with another conversation's intervening write. Named `<basename>.branch-<handle>-<ISO8601compact-UTC>.<ext>` (e.g., `core.branch-h7k3xy90-20260520T142300Z.md`). The racing handle's subsequent reads and writes of that block are routed to its branch. Invisible to the LLM. |
+| **Merge (memory)** | A semantic merge process that reconciles a branched block with its base file, performed by a bridge-invoked sub-agent during `memory_run_maintenance`. The merger reads both versions, understands the meaning of each set of changes, and produces a unified result. |
+| **Derived index** | The block index returned by `memory_get_index`. Not a stored file — the bridge derives it on demand from the `summary` and `updated_at` YAML frontmatter inside each block, with a per-handle cache. |
+| **Bridge state file** | `.bridge-state.json` in the memory directory. Persists live handles, branch maps, and read baselines across bridge restarts (written at shutdown and at debounced checkpoints). |
+| **Write mutex** | A Go `sync.Mutex` in the bridge process that serializes all memory file I/O. Prevents concurrent conversations from interleaving or corrupting memory updates. |
 | **Memory skill** | The .zip file uploaded to Claude Desktop containing SKILL.md — instructions for managing Layer 2 memory. |
-| **Session ID** | A short, bridge-generated identifier (e.g., `ses-7ka2`) that uniquely identifies a conversation's memory session. Passed as a parameter to all memory tools so the bridge can track which files each conversation has read and detect stale-read races. |
-| **Session tracker** | An in-memory map in the bridge (`session_id → file_path → last_seen_modtime`) that records when each session last read each memory file. Used by `safe_write_file` and `safe_append_file` to detect concurrent read-modify-write races. |
-| **Branch (memory)** | A copy of a memory file created when a concurrent read-modify-write race is detected. Named with a timestamp and random suffix (e.g., `core.branch-20260313T1423-a1b2.md`). The original file is left unmodified; the racing conversation's changes go to the branch file. |
-| **Merge (memory)** | A semantic merge process that reconciles a branched memory file with its base file. Performed by a sub-agent during off-hours. The merger reads both versions, understands the meaning of each set of changes, and produces a unified result. |
-| **Sync window** | The 25-second window during which `spawn_agent` and `run_command` wait for their subprocess to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. Shared implementation via the async executor (see [Section 3.10](#310-async-executor)). |
-| **Block** | An individual markdown file in the `blocks/` directory. Each block covers a project, topic, or time period. |
-| **Block reference** | A row in `index.md` mapping a block filename to its summary and last-updated date. |
+| **Sync window** | The 25-second window during which `spawn_agent` and `run_command` wait for their subprocess to complete before switching to async mode. Sized to stay safely under Claude Desktop's ~30-second reliability threshold. Shared implementation via the async executor (see [Chapter 3, Section 3.20](stateful-agent-design-chapter3.md#320-async-executor)). |
+| **Block** | An individual markdown file in the `blocks/` directory, addressed by the LLM via a block *name* (filename without extension). Each block covers a project, topic, or time period. |
 
 ---
 
@@ -112,68 +115,100 @@ These principles are inherited from the proposal and govern all design decisions
 │  │  MCP Bridge Server   │  │  Anthropic Filesystem Ext.   │      │
 │  │  (our Go binary)     │  │  (@modelcontextprotocol/     │      │
 │  │                      │  │   server-filesystem)         │      │
-│  │  Tools:              │  │                              │      │
-│  │  • memory_session_   │  │  Tools:                      │      │
-│  │      start           │  │  • read_file                 │      │
-│  │  • safe_read_file    │  │  • write_file                │      │
-│  │  • safe_write_file   │  │  • edit_file                 │      │
-│  │  • safe_append_file  │  │  • create_directory          │      │
-│  │  • spawn_agent       │  │  • list_directory            │      │
-│  │  • check_agent       │  │  • search_files              │      │
-│  │  • run_command       │  │  • ... (11 tools total)      │      │
+│  │  Memory tools:       │  │                              │      │
+│  │  • memory_start_     │  │  Tools:                      │      │
+│  │      conversation    │  │  • read_file                 │      │
+│  │  • memory_get_core   │  │  • write_file                │      │
+│  │  • memory_write_core │  │  • edit_file                 │      │
+│  │  • memory_get_index  │  │  • create_directory          │      │
+│  │  • memory_get_block  │  │  • list_directory            │      │
+│  │  • memory_write_     │  │  • search_files              │      │
+│  │      block           │  │  • ... (11 tools total)      │      │
+│  │  • memory_append_    │  │                              │      │
+│  │      block           │  │  Allowed dirs:               │      │
+│  │  • memory_append_    │  │  • C:\franl                  │      │
+│  │      episodic        │  │  • C:\temp                   │      │
+│  │  • memory_run_       │  │  • C:\apps                   │      │
+│  │      maintenance     │  │  (NOT used for the memory    │      │
+│  │                      │  │   directory)                 │      │
+│  │  Agent tools:        │  │                              │      │
+│  │  • spawn_agent       │  │                              │      │
+│  │  • check_agent       │  │                              │      │
+│  │  • run_command       │  │                              │      │
 │  │       │              │  │                              │      │
-│  │       │ subprocess   │  │  Allowed dirs:               │      │
-│  │       ▼              │  │  • C:\franl                  │      │
-│  │  ┌────────────┐      │  │  • C:\temp                   │      │
-│  │  │ claude -p  │      │  │  • C:\apps                   │      │
+│  │       │ subprocess   │  │                              │      │
+│  │       ▼              │  │                              │      │
+│  │  ┌────────────┐      │  │                              │      │
+│  │  │ claude -p  │      │  │                              │      │
 │  │  │ (sub-agent)│      │  │                              │      │
 │  │  └────────────┘      │  │                              │      │
 │  └──────────────────────┘  └──────────────────────────────┘      │
 │                                                                  │
 │  Local filesystem: C:\franl\.claude-agent-memory\                │
 │  ├── core.md                                                     │
-│  ├── index.md                                                    │
+│  ├── .bridge-state.json     (bridge-internal state)              │
 │  └── blocks\                                                     │
 │      ├── project-*.md                                            │
 │      ├── reference-*.md                                          │
 │      ├── episodic-YYYY-MM.md                                     │
-│      └── decisions.md                                            │
+│      ├── decisions.md                                            │
+│      └── *.branch-<handle>-<timestamp>.md   (transient,          │
+│            bridge-internal, merged by maintenance)               │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+Note that there is no `index.md` — the index is derived on demand from block frontmatter (see [Chapter 4, Section 4.4](stateful-agent-design-chapter4.md#44-the-derived-index)). Branch files and `.bridge-state.json` are bridge-internal artifacts; the LLM never sees or references them.
+
 ### 2.2 Data Flow
 
-**Session initialization:**
+**Conversation start:**
 ```
 Claude LLM
-  → calls Bridge:memory_session_start()
-  → Bridge generates a unique session ID (e.g., "ses-7ka2")
-  → Bridge registers the session in its internal tracker
-  → Returns session_id to Claude (used in all subsequent memory tool calls)
+  → calls Bridge:memory_start_conversation()
+  → Bridge mints a unique opaque handle (e.g., "h7k3xy90")
+  → Bridge registers the handle in its handle map (and checkpoints state)
+  → Returns { handle, core, index } — core.md content and the derived
+    index are included so conversation start is a single round trip
 ```
 
-**Memory read (session start and during session):**
+**Memory read (during conversation):**
 ```
 Claude LLM
-  → calls Bridge:safe_read_file(path, session_id)
-  → Bridge acquires write mutex, reads file, records ModTime for this session
-  → If branched versions exist, their content is included (annotated)
-  → Returns file content (+ branch content if any)
-  Claude should NEVER use Filesystem:read_file for memory files — that
-  bypasses session tracking and prevents race detection.
-```
-
-**Memory write (during session):**
-```
-Claude LLM
-  → calls Bridge:safe_write_file(path, content, session_id)
+  → calls Bridge:memory_get_block(handle, name)
   → Bridge acquires write mutex
-  → Bridge compares file's current ModTime against this session's last-seen ModTime
-  → If ModTime matches (no race): atomic write replaces the file
-  → If ModTime differs (race detected): writes to a branch file instead
-  → Returns success (with branch_created flag if applicable)
-  Claude should NEVER use Filesystem:write_file or Filesystem:edit_file
-  for memory files — those bypass the mutex and session tracking.
+  → Bridge resolves name → file path; if this handle has a branch of
+    this block, the branch file is read instead (invisible routing)
+  → Bridge records the read baseline (ModTime + size) for this handle
+  → Returns { handle, ok, content, changed_since_last_read }
+  The LLM never uses Filesystem:read_file for memory — block names,
+  not paths, are the only memory addresses it knows.
+```
+
+**Memory write (during conversation):**
+```
+Claude LLM
+  → calls Bridge:memory_write_block(handle, name, content[, summary])
+  → Bridge acquires write mutex
+  → Bridge compares the block's current version signature against this
+    handle's read baseline
+  → No race: atomic write (temp file + rename) updates the base block,
+    preserving/updating YAML frontmatter (summary, updated_at)
+  → Race detected: write is routed to this handle's branch of the block
+    (creating it if needed); base block is untouched; response is
+    indistinguishable from the no-race case
+  → Returns { handle, ok }
+```
+
+**Maintenance (user-triggered):**
+```
+User: "Please run memory maintenance."
+Claude LLM
+  → calls Bridge:memory_run_maintenance(handle)
+  → Bridge merges pending branches (up to maintenance.max_blocks_per_call
+    blocks per call) via semantic-merge sub-agents, holding the merge mutex
+  → Bridge sweeps stale handles and deletes merged branch files
+  → Returns { handle, ok, merged_blocks, more_pending }
+  → If more_pending is true, Claude calls it again until false
 ```
 
 **Sub-agent invocation:**
@@ -203,11 +238,12 @@ Claude LLM
 
 The bridge is deliberately minimal. It does **not** provide:
 
-- Non-memory filesystem tools (list, search) — handled by the Filesystem extension. The bridge provides `safe_read_file`, `safe_write_file`, and `safe_append_file` specifically for memory files; all non-memory file operations use the Filesystem extension.
+- Non-memory filesystem tools (list, search) — handled by the Filesystem extension. The bridge's memory tools are specifically and exclusively for the memory directory; all non-memory file operations use the Filesystem extension.
 - Network request tools (http_get, http_post) — deferred. Sub-agents or `run_command` (e.g., `run_command("curl ...")`) can perform network operations. Dedicated network tools can be added to the bridge later if needed.
-- Memory-aware tools (update_memory_block, memory_search) — deferred to future enhancement. See [Chapter 9, Future Enhancements](stateful-agent-design-chapter9.md).
+- Memory search (`memory_search`) — deferred to a near-term enhancement. In v1, the derived index's block summaries are the search surface. See [Chapter 11, Open Question #16](stateful-agent-design-chapter11.md).
+- Automatic/scheduled maintenance — `memory_run_maintenance` is user-triggered in v1. Scheduled or idle-triggered maintenance is a future enhancement ([Chapter 9](stateful-agent-design-chapter9.md)).
 
-This keeps the initial bridge focused: seven tool handlers, a write mutex, a session tracker, branching logic, the async executor, and the job lifecycle manager.
+This keeps the initial bridge focused: twelve tool handlers, a write mutex, the handle map with read baselines and branch routing, the derived-index builder, the state persistence layer, the maintenance/merge engine, the async executor, and the job lifecycle manager.
 
 ---
 
@@ -256,13 +292,15 @@ See [Stateful Agent System: Detailed Design – Chapter 9](stateful-agent-design
 ## 10. References
 
 1. **Proposal document:** [stateful-agent-proposal.md](../../docs/stateful-agent-proposal.md) — Requirements, architecture evaluations, 27 open question resolutions, rationale for all major decisions.
-2. **Previous skill design (superseded):** [agent-memory-design.md](../../docs/agent-memory-design.md) — Earlier design for a standalone skill without MCP bridge. Concepts carried forward; implementation approach replaced.
-3. **Tim Kellogg's Strix architecture:** [Memory Architecture for a Synthetic Being](https://timkellogg.me/blog/2025/12/30/memory-arch) — Three-tier hierarchical memory model that inspired our core/index/blocks structure.
-4. **claude_life_assistant:** [GitHub](https://github.com/lout33/claude_life_assistant) — Luis Fernando's minimal stateful agent demonstrating the core concept.
-5. **mark3labs/mcp-go:** [GitHub](https://github.com/mark3labs/mcp-go) — Go SDK for the Model Context Protocol.
-6. **MCP specification:** [modelcontextprotocol.io](https://modelcontextprotocol.io) — Protocol specification for tool registration, stdio transport, and Streamable HTTP transport.
-7. **Claude Code system prompts:** [Piebald-AI/claude-code-system-prompts](https://github.com/Piebald-AI/claude-code-system-prompts) — Community-maintained extraction of Claude Code's default system prompt fragments.
-8. **Anthropic Filesystem extension:** [@modelcontextprotocol/server-filesystem](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) — Official MCP server providing 11 filesystem tools.
+2. **Design update plan:** [design-update-plan.md](design-update-plan.md) — The plan governing the version 2.0 rewrite: memory-aware tools, the handle protocol, invisible branching, the derived index, and bridge state persistence. Includes the full rationale and the resolution of eleven open questions.
+3. **Memory-aware tools analysis:** [memory-aware-tools-analysis.md](memory-aware-tools-analysis.md) — The analysis that motivated replacing path-based file tools with memory-aware tools.
+4. **Previous skill design (superseded):** [agent-memory-design.md](../../docs/agent-memory-design.md) — Earlier design for a standalone skill without MCP bridge. Concepts carried forward; implementation approach replaced.
+5. **Tim Kellogg's Strix architecture:** [Memory Architecture for a Synthetic Being](https://timkellogg.me/blog/2025/12/30/memory-arch) — Three-tier hierarchical memory model that inspired our core/index/blocks structure.
+6. **claude_life_assistant:** [GitHub](https://github.com/lout33/claude_life_assistant) — Luis Fernando's minimal stateful agent demonstrating the core concept.
+7. **mark3labs/mcp-go:** [GitHub](https://github.com/mark3labs/mcp-go) — Go SDK for the Model Context Protocol.
+8. **MCP specification:** [modelcontextprotocol.io](https://modelcontextprotocol.io) — Protocol specification for tool registration, stdio transport, and Streamable HTTP transport.
+9. **Claude Code system prompts:** [Piebald-AI/claude-code-system-prompts](https://github.com/Piebald-AI/claude-code-system-prompts) — Community-maintained extraction of Claude Code's default system prompt fragments.
+10. **Anthropic Filesystem extension:** [@modelcontextprotocol/server-filesystem](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) — Official MCP server providing 11 filesystem tools.
 
 ---
 
