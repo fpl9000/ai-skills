@@ -1,15 +1,16 @@
 # Stateful Agent System: Detailed Design
 
-**Version:** 1.0 (Draft)<br/>
-**Date:** February - March 2026<br/>
+**Version:** 2.0 (Draft)<br/>
+**Date:** February - June 2026<br/>
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
 - [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
+- [Design Update Plan](design-update-plan.md) — the plan that produced this version 2.0 rewrite.
 
 ## Contents
 
-- [9. Future Enhancements](#9-overview)
+- [9. Future Enhancements](#9-future-enhancements)
   - [9.1 FTS5 Search Index (Option 3)](#91-fts5-search-index-option-3)
   - [9.2 Memory-Aware Tools](#92-memory-aware-tools)
   - [9.3 Architecture B2 Upgrade](#93-architecture-b2-upgrade)
@@ -31,22 +32,22 @@ This document was previously section 9, "Future Enhancements", in that design.
 
 ### 9.1 FTS5 Search Index (Option 3)
 
-**Trigger:** When the number of blocks exceeds ~50 and filename-based retrieval from `index.md` becomes cumbersome.
+**Trigger:** When the number of blocks exceeds ~50 and summary-based retrieval from the derived index becomes cumbersome. See also [Chapter 11, Open Question #16](stateful-agent-design-chapter11.md), which covers the nearer-term need for a `memory_search` tool under the memory-aware abstraction.
 
 **Design:** Add a SQLite FTS5 full-text search index alongside the markdown files. The index is a derived artifact — it can be rebuilt from the markdown files at any time.
 
 ```
 C:\franl\.claude-agent-memory\
 ├── core.md
-├── index.md
+├── .bridge-state.json
 ├── blocks\
 │   └── ...
 └── .search-index.db     # SQLite FTS5 (in .gitignore)
 ```
 
-**New tool:** `memory_search(query: string, max_results: int) → [{file, snippet, score}]`
+**New tool:** `memory_search(handle, query: string, max_results: int) → [{block, snippet, score}]` — results identify blocks by *name*, consistent with the memory-aware tool abstraction (no file paths).
 
-**Implementation:** Use `modernc.org/sqlite` (pure Go, no CGO) or `mattn/go-sqlite3` for the SQLite driver. Maintain the FTS5 index via a post-write hook: whenever the bridge detects a write to the memory directory (via `append_file` or by observing file modification times), re-index the changed file.
+**Implementation:** Use `modernc.org/sqlite` (pure Go, no CGO) or `mattn/go-sqlite3` for the SQLite driver. Because all memory writes already flow through the bridge's memory-aware tools, maintaining the FTS5 index is a natural post-write hook inside `memory_write_core`, `memory_write_block`, and the append tools — no filesystem polling needed. (Direct user edits in a text editor would be picked up by a rebuild during `memory_run_maintenance`.)
 
 Also investigate semantic memory storage and search technologies such as:
 
@@ -64,17 +65,9 @@ Also investigate semantic memory storage and search technologies such as:
 
 ### 9.2 Memory-Aware Tools
 
-**Trigger:** When compliance-based memory management via the skill proves insufficient — Claude frequently forgets to update `index.md`, corrupts YAML frontmatter, or uses incorrect naming conventions.
+**Status: implemented in version 2.0 of this design — no longer a future enhancement.**
 
-**Candidate tools:**
-
-| Tool | Purpose |
-|------|---------| 
-| `update_memory_block(block, content)` | Write block content, auto-update `index.md` summary/date, validate YAML frontmatter |
-| `create_memory_block(name, content)` | Create block with validated name, add `index.md` row, generate YAML frontmatter |
-| `append_episodic_log(entry)` | Append entry to current month's episodic file, create file if needed, update `index.md` |
-
-These tools trade skill simplicity (fewer instructions needed) for bridge complexity (more code to maintain). They also provide the "unambiguous tool names" benefit described in proposal Open Question #22 — reducing the risk of Claude using cloud VM tools for memory operations.
+This section originally proposed memory-aware tools (`update_memory_block`, `create_memory_block`, `append_episodic_log`) as a contingency for when compliance-based memory management proved insufficient — Claude forgetting to update the index, corrupting YAML frontmatter, or using incorrect naming conventions. Exactly those failure modes (plus the "unambiguous tool names" benefit from proposal Open Question #22) motivated the version 2.0 redesign, which replaced the path-based `safe_*` file tools with a full family of nine memory-aware tools and an opaque handle protocol. See [Chapter 3](stateful-agent-design-chapter3.md) for the implemented design and the [Design Update Plan](design-update-plan.md) for the analysis and rationale.
 
 ### 9.3 Architecture B2 Upgrade
 
@@ -122,8 +115,8 @@ In March 2026, Anthropic launched **Dispatch** as a research preview — a Cowor
 | Limitation                                                                                                                                                                             | Impact                                                                                                           |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | **Mac-only.** Dispatch requires the Claude Mac app; our system runs on Windows 11.                                                                                                     | Blocking. No Windows support means Dispatch cannot be used at all.                                               |
-| **Cowork, not Claude Desktop.** Dispatch drives a Cowork session (sandboxed folder, Agent SDK). Our bridge is an MCP server that speaks stdio to Claude Desktop — a different runtime. | Blocking. Dispatch has no access to bridge tools (`safe_read_file`, `spawn_agent`, `run_command`, etc.).         |
-| **No MCP bridge access.** Cowork sessions do not currently expose user-configured MCP servers.                                                                                         | Blocking. Even on Mac, Dispatch wouldn't reach the bridge's memory mutex, session tracking, or sub-agent system. |
+| **Cowork, not Claude Desktop.** Dispatch drives a Cowork session (sandboxed folder, Agent SDK). Our bridge is an MCP server that speaks stdio to Claude Desktop — a different runtime. | Blocking. Dispatch has no access to bridge tools (the memory-aware tools, `spawn_agent`, `run_command`, etc.).         |
+| **No MCP bridge access.** Cowork sessions do not currently expose user-configured MCP servers.                                                                                         | Blocking. Even on Mac, Dispatch wouldn't reach the bridge's memory tools, handle tracking, or sub-agent system. |
 | **Research preview maturity.** Early testing reports ~50% success rate, slow performance, inability to interact with most apps.                                                        | Non-blocking but concerning. Expected to improve.                                                                |
 | **No programmatic API.** Dispatch is a human-facing UI, not an API. Cannot be driven by automation, webhooks, or other agents.                                                         | Non-blocking for the primary use case (human on phone), but limits future integration.                           |
 
@@ -175,7 +168,7 @@ Section 9.3 describes adding Streamable HTTP transport to the MCP bridge via a C
 
 1. **No intermediary.** Claude.ai connects directly to the bridge's MCP tools (memory, sub-agents, commands) over HTTPS. No polling, no relay repo, no message signing overhead.
 2. **Real-time.** Latency drops from 15–60 seconds (relay) to sub-second (direct HTTP).
-3. **Full tool access.** All bridge tools are available — `memory_session_start`, `safe_read_file`, `safe_write_file`, `safe_append_file`, `spawn_agent`, `check_agent`, `run_command` — with the same session tracking and mutex protection as local use.
+3. **Full tool access.** All bridge tools are available — the nine memory-aware tools (`memory_start_conversation`, `memory_get_core`, `memory_write_core`, `memory_get_index`, `memory_get_block`, `memory_write_block`, `memory_append_block`, `memory_append_episodic`, `memory_run_maintenance`) plus `spawn_agent`, `check_agent`, and `run_command` — with the same handle tracking and mutex protection as local use.
 4. **Platform-independent.** Works from any Claude client (web, mobile, API) with custom MCP connector support, regardless of OS.
 
 The B2 upgrade is deferred because it requires Cloudflare Tunnel setup and OAuth 2.1 authentication — operational complexity that isn't justified until the base system is stable and proven. But it should be the preferred path once the system matures, rendering both the relay and Dispatch integration moot.
@@ -189,81 +182,13 @@ The B2 upgrade is deferred because it requires Cloudflare Tunnel setup and OAuth
 | **Architecture B2** | Cloudflare Tunnel, OAuth 2.1, Streamable HTTP | Sub-second | Full bridge tools (direct MCP) | Deferred (long-term) |
 
 
-### 1.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition
+### 9.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition
 
-The current Layer 2 memory system design has a race condition: when multiple concurrent
-conversations read the same memory file (e.g., `core.md`), modify it in-context, then write back the
-modified version, the last write will overwrite the earlier ones, causing memory data to be lost.
+**Status: implemented (in evolved form) in version 2.0 of this design — preserved here as a historical stub.**
 
-Previously, we considered implementing optimistic concurrency control for memory files using
-timestamps. If a memory file needed to be updated, but it had been modified by another conversation
-after the current conversation last read the file, Claude would know to re-read, re-modify, and
-re-write the file. This unacceptably increases token and context usage. It also depends on Claude's
-compliance to instructions, which can fail unexpectedly.
+This section originally proposed solving the concurrent read-modify-write race by having the bridge's write tools perform optimistic concurrency control and "branch" a memory file when a race was detected, with branches merged later by a sub-agent. The proposal was adopted and substantially evolved in the version 2.0 redesign: races are detected via per-handle read baselines (version signature = ModTime + size), branches are *per-handle* and completely invisible to the LLM (reads and writes are transparently routed to the handle's branch), branch filenames follow `<basename>.branch-<handle>-<ISO8601compact-UTC>.<ext>`, and merging happens via the user-triggered `memory_run_maintenance` tool. See [Chapter 3, Sections 3.15 and 3.17](stateful-agent-design-chapter3.md#315-per-handle-branching-and-race-detection).
 
-This section proposes the following alternative approach:
-
-1. The MCP tools that write memory data (currently `safe_write_file`, `safe_append_file`, and any
-   added in the future) will implement optimistic concurrency control via timestamps.
-
-2. When a concurrent read-modify-write race is detected by an MCP tool for a given file (e.g.,
-   `core.md`), the bridge "branches" the memory file by writing the memory data to a filename
-   uniquely associated with that conversation (e.g., `core-a1b2c3d4.md`).  The original memory file
-   remains unmodified.
-
-3. Later, during off-hours wake up periods, Claude Desktop or a sub-agent detects these "branched"
-   memory files based on their names, and merges the branched files. This preserves memories from
-   all branches.
-
-4. If branched versions of files exist when memory is read or searched, results from all branches
-   will be included in the results, suitably annotated to indicate that branching happened.
-
-5. File names that appear in `index.md` do not change. `index.md` continues to reference memory
-   files by non-branched names (e.g., `core.md` and `decisions.md`). The date stamp in `index.md`
-   will always indicate the date of the most recent write to the listed file, including any of its
-   branches.
-
-Branched files are expected to be rare, as they are only created when multiple concurrent
-conversations update the same memory file.
-
-Advantages of this approach include:
-
-- The race condition is solved.
-- Claude is never involved in the optimistic concurrency control logic, which is faster and saves
-  token and context usage.
-
-Disadvantages of this system include:
-
-- Merges cost tokens if Claude does it, though simple merges could be done by a cheaper model
-  (Sonnet or Haiku).
-- When reading memories from branched files, more memory data is returned (until a merge happens),
-  which uses more tokens and context.
-
-**QUESTIONS:**
-
-1. How should the "timestamps" described above be implemented?  Should it be:
-
-   - The hash of the file's contents.  **Issue:** This does not capture the temporal aspect of
-     modifications, which would be valuable during merges.
-
-   - The filesystem modification times of the memory files.
-
-   - An internal mapping of memory file versions, tracked on each read and updated on each write.
-
-   - A custom timestamp field stored in the memory file content (e.g., YAML front matter).<br/>
-     **Issue:** Absent a `safe_edit_file` tool, this requires episodic memory files to be completely
-     re-written via `safe_write_file` whenever the frontmatter changes.
-
-   - What other options exist?
-
-2. Is there any value in tracking the time of creation of a brancg (in addition to its time of last
-   modification) as an aid to merging?<br/> **Issue:** The bridge would have to persist this
-   somewhere in the filesystem, so it survives restarts.
-
-2. How do the bridge tools know which conversation is reading/writing a given memory file? Does it
-   need to be passed as a parameter to the tools — or can it be inferred by the tools somehow?
-
-3. What is the exact file naming convention for branched files?
+The open QUESTIONS this section posed were all resolved by the [Design Update Plan](design-update-plan.md): version tracking uses an internal mapping (read baselines) rather than hashes or frontmatter timestamps; branch creation time is captured in the branch filename (informational only) and branch state is persisted in `.bridge-state.json`; the conversation identity is passed explicitly as the opaque `handle` parameter on every memory tool call; and the branch naming convention is as given above.
 
 ---
 
@@ -271,11 +196,11 @@ Disadvantages of this system include:
 
 **Inspiration:** The [HermitClaw](https://github.com/brendanhogan/hermitclaw) agent, which implements the memory architecture from [Park et al., 2023](https://arxiv.org/abs/2304.03442), assigns every memory object an importance score (1–10, LLM-evaluated) at write time. This score is then combined with recency and semantic relevance at retrieval time to rank memories. Computing importance eagerly at write time is cheap; recomputing it at every retrieval would be expensive.
 
-**Motivation:** Claude currently makes block-loading decisions by matching the current conversation's topic against the one-line summaries in `index.md`. This handles *relevance* well, but *importance* is invisible — two blocks might both match the current topic, while one contains a critical architectural decision and the other contains a routine note. Without importance scores, Claude has no principled way to prioritize.
+**Motivation:** Claude currently makes block-loading decisions by matching the current conversation's topic against the one-line block summaries in the derived index. This handles *relevance* well, but *importance* is invisible — two blocks might both match the current topic, while one contains a critical architectural decision and the other contains a routine note. Without importance scores, Claude has no principled way to prioritize.
 
-**Trigger:** When block count grows to the point where `index.md` topic-matching alone produces ambiguous or low-confidence loading decisions.
+**Trigger:** When block count grows to the point where index topic-matching alone produces ambiguous or low-confidence loading decisions.
 
-**Design:** Add an `importance` field (integer, 1–10) to the YAML frontmatter of all content blocks. The memory skill's write instructions include a single additional step: before closing a block write, assign an importance score using this scale:
+**Design:** Add an `importance` field (integer, 1–10) to the bridge-managed YAML frontmatter of content blocks. Because frontmatter is owned by the bridge in version 2.0 (the LLM never sees or writes it), this requires a small bridge change: an optional `importance` parameter on `memory_write_block` (preserved across updates, like `summary`), with the value stored in the frontmatter and surfaced as a field in the derived index. The memory skill's write instructions include a single additional step: when writing a block, assign an importance score using this scale:
 
 | Score | Meaning |
 |-------|---------|
@@ -286,12 +211,13 @@ Disadvantages of this system include:
 
 ```yaml
 ---
-created: 2026-02-15
-updated: 2026-05-02
+summary: MCP bridge server: Go implementation, tool design
+updated_at: 2026-05-02T14:23:00Z
 importance: 8          # 1=routine notes, 10=foundational/system-wide decision
-tags: [project, go, mcp]
 ---
 ```
+
+(The `summary` and `updated_at` fields are the existing bridge-managed frontmatter; `importance` is the addition.)
 
 For episodic log entries, importance is recorded as a parenthetical annotation on the section heading, keeping the cost to a single added token cluster per entry:
 
@@ -300,18 +226,24 @@ For episodic log entries, importance is recorded as a parenthetical annotation o
 Merged PR #27. HMAC authentication protocol for relay finalized. ...
 ```
 
-The `index.md` table may optionally surface an `Importance` column to make the signal available at the index scan stage, before any block is loaded:
+The derived index (returned by `memory_get_index`) would surface an `importance` field to make the signal available at the index scan stage, before any block is loaded:
 
-```markdown
-| Block | Summary | Importance | Updated |
-|-------|---------|------------|---------|
-| project-mcp-bridge.md | MCP bridge server: Go implementation, tool design | 7 | 2026-05-01 |
-| decisions.md | Cross-project architectural decisions and rationale | 9 | 2026-05-02 |
+```json
+[
+  { "name": "decisions",
+    "summary": "Cross-project architectural decisions and rationale",
+    "importance": 9,
+    "updated_at": "2026-05-02T14:23:00Z" },
+  { "name": "project-mcp-bridge",
+    "summary": "MCP bridge server: Go implementation, tool design",
+    "importance": 7,
+    "updated_at": "2026-05-01T09:10:00Z" }
+]
 ```
 
-**Implementation cost:** Low. No bridge changes required. The change is purely additive to the file format and skill instructions. Existing blocks can be back-filled with importance scores during any routine memory maintenance session.
+**Implementation cost:** Low, but no longer zero on the bridge side: an optional tool parameter, one frontmatter field, and one derived-index field. The skill change remains a single added instruction. Existing blocks can be back-filled with importance scores during any routine memory maintenance session (each back-fill is an ordinary `memory_write_block` call with the `importance` parameter).
 
-**Relationship to Section 9.1 (FTS5 Search):** If a search index is later added, the `importance` field becomes a first-class filter and sort key in search queries — e.g., `memory_search("race condition", min_importance=7)`.
+**Relationship to Section 9.1 (FTS5 Search):** If a search index is later added, the `importance` field becomes a first-class filter and sort key in search queries — e.g., `memory_search(handle, "race condition", min_importance=7)`.
 
 ---
 
@@ -362,9 +294,9 @@ tasks return a job_id for async polling. Rationale: simpler than progress tokens
 protocol extensions needed, enables parallel sub-agents as natural extension.
 ```
 
-**Implementation cost:** Medium. Requires a maintenance sub-agent capable of reading an episodic file, classifying content, writing to multiple target files, and condensing the source file — all in a single pass. The bridge's existing `safe_write_file` and `safe_append_file` tools are sufficient; no new bridge tools are needed. The primary cost is authoring the sub-agent prompt and skill instructions carefully enough that the classification step is reliable.
+**Implementation cost:** Medium. Requires a maintenance sub-agent capable of reading an episodic file, classifying content, writing to multiple target files, and condensing the source file — all in a single pass. Note that in the version 2.0 single-writer model the sub-agent itself does not write memory: like the maintenance merge sub-agents (see [Chapter 6, Section 6.6](stateful-agent-design-chapter6.md#66-sub-agent-memory-access-rules)), it returns its outputs and the bridge (or the primary agent, via `memory_write_block` / `memory_append_block`) performs the writes. No new bridge tools are needed. The primary cost is authoring the sub-agent prompt and skill instructions carefully enough that the classification step is reliable.
 
-**Relationship to Section 9.6 (Race Condition):** The condensation write to the episodic file is a full rewrite (`safe_write_file`), which means it is subject to the branching race detection mechanism. Since maintenance runs are typically off-hours with no concurrent conversations, this is unlikely to be a problem in practice.
+**Relationship to Section 9.6 (Race Condition):** The condensation write to the episodic file is a full rewrite (`memory_write_block`), which means it is subject to the per-handle branching race detection mechanism. Since reflection synthesis runs during maintenance with no concurrent conversations expected, this is unlikely to be a problem in practice.
 
 ---
 
@@ -382,10 +314,9 @@ protocol extensions needed, enables parallel sub-agents as natural extension.
 
 ```markdown
 ---
-created: 2026-05-01
-updated: 2026-05-15
+summary: Learned operational patterns derived from episodic synthesis
+updated_at: 2026-05-15T10:00:00Z
 importance: 8
-tags: [reflections, meta, operational]
 ---
 
 # Operational Reflections
@@ -408,12 +339,15 @@ tags: [reflections, meta, operational]
 
 The `*(derived: ...)` annotation records the source episodic files from which the reflection was extracted, providing an audit trail analogous to HermitClaw's `references` field on reflection memory objects.
 
-**`index.md` entry:**
+**Derived index entry** (as returned by `memory_get_index`, assuming the Section 9.7 `importance` field):
 
-```markdown
-| reflections.md | Learned operational patterns derived from episodic synthesis | 8 | 2026-05-15 |
+```json
+{ "name": "reflections",
+  "summary": "Learned operational patterns derived from episodic synthesis",
+  "importance": 8,
+  "updated_at": "2026-05-15T10:00:00Z" }
 ```
 
-**Loading behavior:** `reflections.md` should be loaded opportunistically — when the session involves meta-level questions about how to work effectively, when beginning a new project phase, or when the skill detects that `core.md` does not already address the relevant pattern. It should *not* be loaded by default on every session start, as its content is already incorporated into `core.md` for the most stable patterns.
+**Loading behavior:** The `reflections` block should be loaded opportunistically (via `memory_get_block`) — when the session involves meta-level questions about how to work effectively, when beginning a new project phase, or when the skill detects that `core.md` does not already address the relevant pattern. It should *not* be loaded by default on every session start, as its content is already incorporated into `core.md` for the most stable patterns.
 
 **Implementation cost:** Low, contingent on Section 9.8 being implemented first. The block format requires no new bridge tooling. The main investment is the synthesis prompt that correctly identifies meta-level patterns versus project-specific decisions during the episodic condensation pass.
