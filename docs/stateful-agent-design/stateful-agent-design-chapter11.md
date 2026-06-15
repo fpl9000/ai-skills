@@ -21,7 +21,7 @@ This section contains all questions that were ever open, even if they are now re
 
 2. **Should file core.md have special handling?** — Memory file `core.md` is treated specially: it has dedicated tools to access its contents: `memory_get_core` and `memory_write_core`. Is there a compelling reason to treat `core.md` specially, when the existing tools, `memory_get_block` and `memory_write_block`, could also read/write `core.md`?
 
-     - *Current status (open, target unknown)*
+     - *Current status (open, target release TBD)*
 
 ### 11.2 Resolved Questions
 
