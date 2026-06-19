@@ -1,8 +1,8 @@
 # Stateful Agent System: Detailed Design
 
-**Version:** 2.0 (Draft)<br/>
-**Date:** February - June 2026<br/>
-**Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
+**Version:** 2.0 (Draft)  
+**Date:** February - June 2026  
+**Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
 
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.

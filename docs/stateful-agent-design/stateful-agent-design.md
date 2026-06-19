@@ -43,15 +43,15 @@ The stateful agent system consists of three components that together give Claude
 
 ### 1.2 Component Inventory
 
-| Component | Type | Location | Purpose |
-|-----------|------|----------|---------|
-| MCP Bridge Server<br/>(aka "the bridge") | Go binary | `C:\franl\.claude-agent-memory\bin\mcp-bridge.exe` | Memory-aware tools, sub-agent spawning, local command execution. Source code located in `C:\franl\git\mcp-bridge\` |
-| Anthropic Filesystem Extension | MCP server | Installed via Claude Desktop | Basic filesystem tools (read, write, edit, list, search) for **non-memory** files only |
-| Memory directory | Markdown files | `C:\franl\.claude-agent-memory\` | Layer 2 persistent storage (managed exclusively by the bridge) |
-| Bridge state file | JSON file | `C:\franl\.claude-agent-memory\.bridge-state.json` | Persisted bridge state: live handles, branch map, read baselines. Survives bridge restarts. |
-| Memory skill | .zip file | Uploaded via Claude Desktop Settings | Instructions for memory lifecycle |
-| CLAUDE.md | Markdown file | `C:\Users\flitt\.claude\CLAUDE.md` | Sub-agent environment context |
-| Bridge config | YAML file | `C:\franl\.claude-agent-memory\bridge-config.yaml` | Bridge runtime settings |
+| Component                            | Type           | Location                                           | Purpose                                                                                                            |
+| ------------------------------------ | -------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| MCP Bridge Server (aka "the bridge") | Go binary      | `C:\franl\.claude-agent-memory\bin\mcp-bridge.exe` | Memory-aware tools, sub-agent spawning, local command execution. Source code located in `C:\franl\git\mcp-bridge\` |
+| Anthropic Filesystem Extension       | MCP server     | Installed via Claude Desktop                       | Basic filesystem tools (read, write, edit, list, search) for **non-memory** files only                             |
+| Memory directory                     | Markdown files | `C:\franl\.claude-agent-memory\`                   | Layer 2 persistent storage (managed exclusively by the bridge)                                                     |
+| Bridge state file                    | JSON file      | `C:\franl\.claude-agent-memory\.bridge-state.json` | Persisted bridge state: live handles, branch map, read baselines. Survives bridge restarts.                        |
+| Memory skill                         | .zip file      | Uploaded via Claude Desktop Settings               | Instructions for memory lifecycle                                                                                  |
+| CLAUDE.md                            | Markdown file  | `C:\Users\flitt\.claude\CLAUDE.md`                 | Sub-agent environment context                                                                                      |
+| Bridge config                        | YAML file      | `C:\franl\.claude-agent-memory\bridge-config.yaml` | Bridge runtime settings                                                                                            |
 
 ### 1.3 Design Principles
 

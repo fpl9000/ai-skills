@@ -1,8 +1,8 @@
 # Stateful Agent System: Detailed Design
 
-**Version:** 1.0 (Draft)<br/>
-**Date:** February - March 2026<br/>
-**Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)<br/>
+**Version:** 1.0 (Draft)  
+**Date:** February - March 2026  
+**Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
 
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
@@ -12,7 +12,7 @@
 
 This appendix documents the subset of the `mark3labs/mcp-go` SDK used by the MCP Bridge Server. All content is drawn directly from the library source and README. It is included here so that the implementer (Claude Sonnet running in Claude Code CLI) has an accurate, targeted reference and does not need to rely on training data, which may reflect an earlier API version.
 
-**Repository:** https://github.com/mark3labs/mcp-go<br/>
+**Repository:** https://github.com/mark3labs/mcp-go  
 **Import paths:** `github.com/mark3labs/mcp-go/mcp` and `github.com/mark3labs/mcp-go/server`
 
 ### 12.1 Installation
