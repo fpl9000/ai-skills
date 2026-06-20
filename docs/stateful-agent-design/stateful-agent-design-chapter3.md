@@ -194,20 +194,20 @@ func LoadConfig(path string) Config:
 
 The bridge registers twelve tools: three for sub-agents and local commands, and nine memory-aware tools.
 
-| Tool | Purpose |
-|------|---------|
-| `spawn_agent` | Launch a sub-agent (`claude -p`) with a task. Returns result (sync) or job_id (async). |
-| `check_agent` | Poll a running async job by job_id. Returns status and result. Used for both `spawn_agent` and `run_command` async jobs. |
-| `run_command` | Execute a shell command on the local machine. No LLM involved — direct subprocess execution. Uses the same hybrid sync/async model as `spawn_agent`. Far cheaper than spawning a sub-agent for simple commands. |
-| `memory_start_conversation` | Allocate a fresh handle for this conversation. Call once per conversation before any other memory tool, and again to recover from any handle error. |
-| `memory_get_core` | Return the core memory content. Sets this handle's read baseline for core and reports `changed_since_last_read`. |
-| `memory_write_core` | Replace the core memory content. Race-detected; may transparently route to a per-handle branch. |
-| `memory_get_index` | Return the derived index: a structured list of `{ name, summary, updated_at }` for every block visible to this handle. Assembled on demand from block frontmatter — not a stored file. |
-| `memory_get_block` | Return a block's body content (frontmatter stripped). Sets the read baseline and reports `changed_since_last_read`. |
-| `memory_write_block` | Replace a block's body content, optionally updating its summary. Race-detected; may transparently route to a per-handle branch. Creates the block if it doesn't exist (summary required for creation). |
-| `memory_append_block` | Append text to a block. Serialized, never creates a branch (routes to an existing per-handle branch if one exists). |
-| `memory_append_episodic` | Append an entry to the current month's episodic log. The bridge handles month rotation internally. |
-| `memory_run_maintenance` | Merge pending memory branches back into canonical state via sub-agents, then sweep and evict stale handles. Invoked when the user asks for memory maintenance. |
+| Tool                        | Purpose                                                                                                                                                                                                         |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spawn_agent`               | Launch a sub-agent (`claude -p`) with a task. Returns result (sync) or job_id (async).                                                                                                                          |
+| `check_agent`               | Poll a running async job by job_id. Returns status and result. Used for both `spawn_agent` and `run_command` async jobs.                                                                                        |
+| `run_command`               | Execute a shell command on the local machine. No LLM involved — direct subprocess execution. Uses the same hybrid sync/async model as `spawn_agent`. Far cheaper than spawning a sub-agent for simple commands. |
+| `memory_start_conversation` | Allocate a fresh handle for this conversation. Call once per conversation before any other memory tool, and again to recover from any handle error.                                                             |
+| `memory_get_core`           | Return the core memory content. Sets this handle's read baseline for core and reports `changed_since_last_read`.                                                                                                |
+| `memory_write_core`         | Replace the core memory content. Race-detected; may transparently route to a per-handle branch.                                                                                                                 |
+| `memory_get_index`          | Return the derived index: a structured list of `{ name, summary, updated_at }` for every block visible to this handle. Assembled on demand from block frontmatter — not a stored file.                          |
+| `memory_get_block`          | Return a block's body content (frontmatter stripped). Sets the read baseline and reports `changed_since_last_read`.                                                                                             |
+| `memory_write_block`        | Replace a block's body content, optionally updating its summary. Race-detected; may transparently route to a per-handle branch. Creates the block if it doesn't exist (summary required for creation).          |
+| `memory_append_block`       | Append text to a block. Serialized, never creates a branch (routes to an existing per-handle branch if one exists).                                                                                             |
+| `memory_append_episodic`    | Append an entry to the current month's episodic log. The bridge handles month rotation internally.                                                                                                              |
+| `memory_run_maintenance`    | Merge pending memory branches back into canonical state via sub-agents, then sweep and evict stale handles. Invoked when the user asks for memory maintenance.                                                  |
 
 Every memory tool takes `handle` as its first, required parameter and echoes the handle back in
 every response (see [Section 3.7](#37-memory-aware-tools-overview-and-abstraction)).
