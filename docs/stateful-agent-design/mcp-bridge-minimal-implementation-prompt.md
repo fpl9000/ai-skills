@@ -18,7 +18,8 @@ that are *specific to this task* and the decisions I've already made about scope
 The complete, authoritative design lives in my `fpl9000/ai-skills` repo located at
 `C:\franl\git\ai-skills\docs\stateful-agent-design`. The main document is
 `stateful-agent-design.md`; chapters 3 to 12 are `stateful-agent-design-chapter3.md`
-through `...-chapter12.md`.
+through `...-chapter12.md`. Ignore chapter 9 in `stateful-agent-design-chapter9.md`
+as it describes future enhancements not related to this task.
 
 **Important:** the design document describes the *full* twelve-tool system. You are
 building a deliberate **subset** of it. Where the document describes spawning,
@@ -74,16 +75,16 @@ These differ from the design document, so apply them everywhere:
 
 **Tools to implement (8):**
 
-| Tool | Behavior reference |
-|------|--------------------|
-| `memory_start_conversation` | §3.8 — mint an 8-char opaque handle; return `{ handle, core, index }` in one round trip |
-| `memory_get_core` | §3.9 — return core.md content; set read baseline; report `changed_since_last_read` |
-| `memory_write_core` | §3.9 — replace core.md atomically; **no** frontmatter on core; last-writer-wins |
-| `memory_get_index` | §3.10 — derive the index from block frontmatter on demand (per-handle cache); no stored index file |
-| `memory_get_block` | §3.11 — return block body with frontmatter stripped; set baseline; report `changed_since_last_read` |
-| `memory_write_block` | §3.11 — replace block body; manage `summary`/`updated_at` frontmatter; create block if absent (summary required for creation); last-writer-wins |
-| `memory_append_block` | §3.11 — append to an existing block under the mutex; never creates a block (`BLOCK_NOT_FOUND` if absent) |
-| `memory_append_episodic` | §3.12 — append a timestamped entry to `blocks/episodic-YYYY-MM.md`; handle month rotation; auto-create the monthly file with frontmatter |
+| Tool                        | Behavior reference                                                                                                                              |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_start_conversation` | §3.8 — mint an 8-char opaque handle; return `{ handle, core, index }` in one round trip                                                         |
+| `memory_get_core`           | §3.9 — return core.md content; set read baseline; report `changed_since_last_read`                                                              |
+| `memory_write_core`         | §3.9 — replace core.md atomically; **no** frontmatter on core; last-writer-wins                                                                 |
+| `memory_get_index`          | §3.10 — derive the index from block frontmatter on demand (per-handle cache); no stored index file                                              |
+| `memory_get_block`          | §3.11 — return block body with frontmatter stripped; set baseline; report `changed_since_last_read`                                             |
+| `memory_write_block`        | §3.11 — replace block body; manage `summary`/`updated_at` frontmatter; create block if absent (summary required for creation); last-writer-wins |
+| `memory_append_block`       | §3.11 — append to an existing block under the mutex; never creates a block (`BLOCK_NOT_FOUND` if absent)                                        |
+| `memory_append_episodic`    | §3.12 — append a timestamped entry to `blocks/episodic-YYYY-MM.md`; handle month rotation; auto-create the monthly file with frontmatter        |
 
 Every memory tool takes `handle` as its first required parameter and echoes it back in
 every response, success or failure (§3.7).
