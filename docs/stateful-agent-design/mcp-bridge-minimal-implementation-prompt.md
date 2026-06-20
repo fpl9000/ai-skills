@@ -15,10 +15,10 @@ that are *specific to this task* and the decisions I've already made about scope
 
 ## 1. Authoritative specification
 
-The complete, authoritative design lives in my `fpl9000/ai-skills` repo under
-`docs/stateful-agent-design/`. Read it there (clone the repo if you don't already have
-it locally). The main document is `stateful-agent-design.md`; the chapters are
-`stateful-agent-design-chapter3.md` through `...-chapter12.md`.
+The complete, authoritative design lives in my `fpl9000/ai-skills` repo located at
+`C:\franl\git\ai-skills\docs\stateful-agent-design`. The main document is
+`stateful-agent-design.md`; chapters 3 to 12 are `stateful-agent-design-chapter3.md`
+through `...-chapter12.md`.
 
 **Important:** the design document describes the *full* twelve-tool system. You are
 building a deliberate **subset** of it. Where the document describes spawning,
@@ -104,9 +104,10 @@ every response, success or failure (§3.7).
 ## 4. Repository and module
 
 - Module path: `github.com/fpl9000/mcp-bridge`.
-- Create a new **private** GitHub repo `fpl9000/mcp-bridge` and push to it (see the
-  acceptance gate in Section 8 — create and push only *after* the gate passes). Use
-  your existing local GitHub authentication; do not embed any token in the repo.
+- Create a new **private** GitHub repo `fpl9000/mcp-bridge` and push to it from
+  `C:\franl\git\mcp-bridge`, which is where the local code will live (see the
+  acceptance gate in Section 8 — create and push only *after* the gate passes).
+  Use your existing local GitHub authentication; do not embed any token in the repo.
 - Pure Go, no CGO, no external C libraries — must compile to a single static
   `mcp-bridge.exe`.
 - Provide a `--version` flag (used in the build smoke test) and a short `README.md`
@@ -259,7 +260,7 @@ The **final** state must build and pass; intermediate commits need not each be g
 4. `go test ./...` passes.
 
 Only once all four pass: create the private `fpl9000/mcp-bridge` repo and push the
-grouped commits over HTTPS.
+grouped commits over HTTPS (my `git` remotes default to HTTPS).
 
 ---
 
