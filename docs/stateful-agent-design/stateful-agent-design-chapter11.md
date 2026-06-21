@@ -1,14 +1,10 @@
-# Stateful Agent System: Detailed Design
+# Stateful Agent System: Detailed Design – Chapter 11
 
 **Version:** 2.0 (Draft)  
 **Date:** February - June 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
-
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
-- [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
-- [Design Update Plan](design-update-plan.md) — the plan that produced the version 2.0 rewrite.
-
 ## 11. Open Questions
 
 This section contains all questions that were ever open, even if they are now resolved. Each question carries a stable identifier, **OQ#N**, assigned in the order the question was first raised and shown at the start of its heading; this identifier is what cross-references elsewhere in the design point to. A question keeps its `OQ#N` label regardless of its list position or of whether it currently sits under *Remaining* or *Resolved*. Consequently the identifiers are not contiguous within a subsection: for example, OQ#16 remains open below while the later OQ#17 has already been resolved.

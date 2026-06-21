@@ -1,13 +1,10 @@
-# Stateful Agent System: Detailed Design
+# Stateful Agent System: Detailed Design – Chapter 8
 
 **Version:** 2.0 (Draft)  
 **Date:** February - June 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
 **Companion documents:**
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
-- [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
-- [Design Update Plan](design-update-plan.md) — the plan that produced this version 2.0 rewrite.
-
 ## Contents
 
 - [8. Testing Strategy](#8-testing-strategy)

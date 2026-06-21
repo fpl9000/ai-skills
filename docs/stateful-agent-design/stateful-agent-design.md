@@ -3,7 +3,9 @@
 **Version:** 2.0 (Draft)  
 **Date:** February - June 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
-**Companion documents:** [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals. [Design Update Plan](design-update-plan.md) — the plan that produced this version 2.0 rewrite (memory-aware tools, handle model, invisible branching).
+**Companion documents:**  
+- [Stateful Agent Proposal](stateful-agent-proposal.md) — pre-design architecture proposals.
+- [Design Update Plan](design-update-plan.md) — the plan that produced this version 2.0 rewrite (memory-aware tools, handle model, invisible branching).
 
 ## Contents
 

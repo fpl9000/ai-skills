@@ -149,11 +149,11 @@ Only once all four pass: create the private `fpl9000/mcp-bridge` repo and push t
 
 ---
 
-## 9. Part B — the memory SKILL.md (separate, ungated deliverable)
+## 9. Secondary task: the memory SKILL.md (separate, ungated deliverable)
 
 After the bridge is done, produce the memory skill's `SKILL.md` from the content in Chapter 5 §5.2, with these adjustments for the reduced scope:
 
-- **Remove or neutralize the "Memory Maintenance" section** and any other references to `memory_run_maintenance` (e.g., in the lifecycle and error-handling sections) — that tool does not exist in this build, and the skill must not instruct Claude to call it.
+- **Remove the "Memory Maintenance" section** and any other references to `memory_run_maintenance` (e.g., in the lifecycle and error-handling sections) — that tool does not exist in this build, and the skill must not instruct Claude to call it.
 - The skill must reference **only the eight implemented tools**.
 - Keep everything else: the memory model, handle protocol, conversation-start protocol, read/write/append triggers, stale-content guidance (which leans on `changed_since_last_read`), block-creation rules, and the `INVALID_HANDLE` re-init-and-retry recovery protocol.
 
