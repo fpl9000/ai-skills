@@ -8,9 +8,9 @@ My general conventions — code commenting density, commit-message style, shell 
 
 ## 1. Authoritative specification
 
-The complete, authoritative design lives in my `fpl9000/ai-skills` repo located at `C:\franl\git\ai-skills\docs\stateful-agent-design`. The main document is `stateful-agent-design.md`; chapters 3 to 12 are `stateful-agent-design-chapter3.md` through `...-chapter12.md`. Ignore chapter 9 in `stateful-agent-design-chapter9.md` as it describes future enhancements not related to this task.
+The complete, authoritative design lives in my `fpl9000/ai-skills` repo located in directory `C:\franl\git\ai-skills\docs\stateful-agent-design`. The main document is `stateful-agent-design.md`; chapters 3 to 12 are `stateful-agent-design-chapter3.md` through `...-chapter12.md`. Ignore chapter 9 in `stateful-agent-design-chapter9.md` because it describes future enhancements unrelated to this task.
 
-**Important:** the design document describes the *full* twelve-tool system. You are building a deliberate **subset** of it. Where the document describes spawning, `run_command`, maintenance, merging, or branching, read it for context but do **not** implement it. The scope table in Section 3 below is the contract — when the document and this prompt disagree about *what to build*, this prompt wins; when they disagree about *how a thing in scope behaves*, the document wins.
+**Important:** the design document describes the *full* twelve-tool system. You are building a deliberate **subset** of it. Where the document describes spawning, `run_command`, maintenance, merging, or branching, read it for context but do **not** implement it. The scope table in Section 3 below is the contract — when the design document and this prompt disagree about *what to build*, this prompt wins; when they disagree about *how a thing in scope behaves*, the document wins.
 
 Sections you must read closely (all in `chapter3` unless noted):
 
