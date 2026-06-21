@@ -1,6 +1,6 @@
 # Stateful Agent System: Detailed Design – Chapter 4
 
-**Version:** 2.0 (Draft)  
+**Version:** 2.0  
 **Date:** February - June 2026  
 **Author:** Claude Opus (with guidance from Fran Litterio, @fpl9000.bsky.social)  
 **Companion documents:**
