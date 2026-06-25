@@ -31,7 +31,7 @@
 
 ### 1.1 What We're Building
 
-The stateful agent system consists of three components that together give Claude persistent memory, local machine access, and task delegation capabilities:
+The stateful agent system consists of three components that together give Claude Desktop persistent memory, local machine access, and task delegation capabilities:
 
 1. **MCP Bridge Server** — A Go binary that runs locally, providing memory-aware tools (read/write access to Layer 2 memory through a structured tool interface), Bash access, and sub-agent spawning, to be used by the Claude Desktop App via the MCP protocol over stdio. The bridge owns all memory storage details — file layout, concurrency control, branching, and indexing are handled internally and are invisible to the LLM.
 
