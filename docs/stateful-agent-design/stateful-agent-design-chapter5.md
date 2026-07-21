@@ -21,20 +21,26 @@ The memory-aware tool redesign makes this the most-simplified chapter of the des
 
 ### 5.1 Skill Packaging
 
-The memory skill is a Claude Desktop skill packaged as a .zip file containing a single `SKILL.md` file. It does not contain scripts (all operations use the bridge's MCP tools). The .zip is uploaded via Claude Desktop > Settings > Capabilities.
+The memory skill is a Claude Desktop skill packaged as a `.zip` file. Claude Desktop's uploader expects the archive to contain a single top-level *folder* whose name matches the skill's `name`, with `SKILL.md` inside it — not a bare `SKILL.md` at the archive root (a mismatched or missing folder is a documented upload-failure cause). The skill contains no scripts (all operations use the bridge's MCP tools). Upload it via Claude Desktop > Customize > Skills > "+" > "Upload a skill". Keep the `.zip` extension; `.skill` is only the extension Claude Desktop produces when you *download* an existing skill.
 
 ```
 stateful-memory.zip
-└── SKILL.md           # Instructions for Layer 2 memory lifecycle
+└── stateful-memory/       # Folder name matches the skill's `name` (SKILL.md frontmatter)
+    └── SKILL.md           # Instructions for Layer 2 memory lifecycle
 ```
 
 **Why no scripts?** All memory operations are performed via the bridge's memory-aware MCP tools. No Python or shell scripts are needed. This eliminates dependency management and makes the skill trivially portable.
 
 ### 5.2 SKILL.md Content
 
-The SKILL.md below is the complete skill instruction file. It is the primary artifact that guides Claude's memory behavior. Note its brevity relative to the v1 skill: there are no file paths, no session-ID bookkeeping, no branch-handling instructions, and no index-maintenance rules — the bridge owns all of that.
+The SKILL.md below is the complete skill instruction file. It is the primary artifact that guides Claude's memory behavior. Note its brevity relative to the v1 skill: there are no file paths, no session-ID bookkeeping, no branch-handling instructions, and no index-maintenance rules — the bridge owns all of that. The file begins with YAML frontmatter — `name` and `description` — which Claude Desktop uses to index the skill and to decide when to invoke it; the `description` in particular must convey that the skill applies at the start of every conversation and whenever durable context is recalled or stored.
 
 ```markdown
+---
+name: stateful-memory
+description: Persistent memory that survives across conversations, accessed through the bridge's memory tools. Use it at the START of every conversation to load durable context about the user, their projects, and shared history (memory_start_conversation, memory_get_core, memory_get_index, memory_get_block), and DURING the conversation to record or update that context as it emerges (memory_write_core, memory_write_block, memory_append_block, memory_append_episodic). Invoke whenever you need to recall what you know about the user or persist anything worth remembering next time.
+---
+
 # Stateful Agent Memory Skill
 
 You have access to a persistent memory system that survives across conversations

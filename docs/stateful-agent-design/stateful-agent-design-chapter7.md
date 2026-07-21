@@ -102,12 +102,14 @@ Alternatively, ask Claude in an initial conversation to seed the memory from its
 
 ### 7.6 Skill Installation
 
-1. Create the `SKILL.md` file with the content from [Section 5.2](stateful-agent-design-chapter5.md#52-skillmd-content).
-2. Create a .zip file containing only `SKILL.md`:
+1. Create the `SKILL.md` file with the content from [Section 5.2](stateful-agent-design-chapter5.md#52-skillmd-content), including its YAML frontmatter.
+2. Place it inside a folder whose name matches the skill's `name`, then zip the folder so the archive contains `stateful-memory/SKILL.md` (not a bare `SKILL.md` at the root):
    ```bash
-   zip stateful-memory.zip SKILL.md
+   mkdir stateful-memory
+   cp SKILL.md stateful-memory/
+   zip -r stateful-memory.zip stateful-memory
    ```
-3. Upload via Claude Desktop > Settings > Capabilities > Add Skill.
+3. Upload via Claude Desktop > Customize > Skills > "+" > "Upload a skill", then toggle the skill on. (Skills require **Code execution and file creation** to be enabled under Settings > Capabilities; if it is off, the Skills section is hidden.)
 
 ### 7.7 CLAUDE.md Update
 
