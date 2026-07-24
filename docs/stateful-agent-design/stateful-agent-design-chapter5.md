@@ -14,12 +14,18 @@
   - [5.4 Memory Write Triggers](#54-memory-write-triggers)
   - [5.5 Memory Read Triggers](#55-memory-read-triggers)
   - [5.6 Reconciliation with Layer 1](#56-reconciliation-with-layer-1)
+  - [5.7 Frontmatter Constraints and Portability](#57-frontmatter-constraints-and-portability)
 
 ## 5. Memory Skill
 
 The memory-aware tool redesign makes this the most-simplified chapter of the design. The v1 skill had to teach Claude the storage model: file paths, session IDs, branch annotations, index maintenance, race recovery, and a list of forbidden tools. All of that is now enforced by the bridge in code. What remains for the skill is the part that genuinely requires judgment: **when** to read and write memory, **what** to store, and **how** to structure it. The skill teaches lifecycle and content quality; the bridge guarantees storage correctness.
 
 ### 5.1 Skill Packaging
+
+The memory skill is installed in one of two ways, depending on the client
+([Chapter 7](stateful-agent-design-chapter7.md#7-build-and-deployment)). Claude Code reads skills
+directly from the filesystem, so installation there is a file copy and the packaging rules below
+do not apply. Claude Desktop takes an uploaded archive, described here.
 
 The memory skill is a Claude Desktop skill packaged as a `.zip` file. Claude Desktop's uploader expects the archive to contain a single top-level *folder* whose name matches the skill's `name`, with `SKILL.md` inside it — not a bare `SKILL.md` at the archive root (a mismatched or missing folder is a documented upload-failure cause). The skill contains no scripts (all operations use the bridge's MCP tools). Upload it via Claude Desktop > Customize > Skills > "+" > "Upload a skill". Keep the `.zip` extension; `.skill` is only the extension Claude Desktop produces when you *download* an existing skill.
 
@@ -33,12 +39,12 @@ stateful-memory.zip
 
 ### 5.2 SKILL.md Content
 
-The SKILL.md below is the complete skill instruction file. It is the primary artifact that guides Claude's memory behavior. Note its brevity relative to the v1 skill: there are no file paths, no session-ID bookkeeping, no branch-handling instructions, and no index-maintenance rules — the bridge owns all of that. The file begins with YAML frontmatter — `name` and `description` — which Claude Desktop uses to index the skill and to decide when to invoke it; the `description` in particular must convey that the skill applies at the start of every conversation and whenever durable context is recalled or stored.
+The SKILL.md below is the complete skill instruction file. It is the primary artifact that guides Claude's memory behavior. Note its brevity relative to the v1 skill: there are no file paths, no session-ID bookkeeping, no branch-handling instructions, and no index-maintenance rules — the bridge owns all of that. The file begins with YAML frontmatter — `name` and `description` — which the client uses to index the skill and to decide when to invoke it; the `description` in particular must convey that the skill applies at the start of every conversation and whenever durable context is recalled or stored. The `description` is held to a 200-character budget for portability reasons set out in [Section 5.7](#57-frontmatter-constraints-and-portability); that budget is why it names no individual memory tools. The tool names live in the body below, which is loaded in full before any memory tool is called, so nothing is lost by omitting them from the frontmatter.
 
 ```markdown
 ---
 name: stateful-memory
-description: Persistent memory that survives across conversations, accessed through the bridge's memory tools. Use it at the START of every conversation to load durable context about the user, their projects, and shared history (memory_start_conversation, memory_get_core, memory_get_index, memory_get_block), and DURING the conversation to record or update that context as it emerges (memory_write_core, memory_write_block, memory_append_block, memory_append_episodic). Invoke whenever you need to recall what you know about the user or persist anything worth remembering next time.
+description: Persistent memory across conversations. Use at the START of every conversation to load user, project, and history context, and DURING it to record durable facts, decisions, and updates.
 ---
 
 # Stateful Agent Memory Skill
@@ -268,3 +274,53 @@ spawn_agent(
 **Step 3:** The primary agent applies fixes:
 - **Layer 1 fixes:** Add steering edits via the `memory_user_edits` tool. These are incorporated by Anthropic's nightly regeneration (~24-hour lag).
 - **Layer 2 fixes:** Update memory via `memory_write_core` / `memory_write_block` (immediate effect).
+
+### 5.7 Frontmatter Constraints and Portability
+
+The `description` field is subject to **three different documented limits**, depending on how the
+skill reaches the agent. Getting this wrong is a silent failure, so the constraints are recorded
+here rather than left to be rediscovered.
+
+| Surface | `name` | `description` | Nature of the limit |
+|---|---|---|---|
+| Agent Skills specification / Claude API skill upload | 64 chars | **1024 chars** | Hard validation; the Create Skill endpoint rejects a bundle that exceeds it |
+| Claude.ai skill upload (including Claude Desktop, which is a Claude.ai client) | 64 chars | **200 chars** | Documented product limit, tighter than the specification |
+| Claude Code (filesystem-installed skills) | 64 chars | No separate documented cap beyond the specification's 1024 | Subject instead to a context budget across the whole skill listing, which can drop or truncate descriptions when many skills are installed |
+
+**Design decision: the `description` targets 200 characters or fewer.**
+
+The reasoning is that 200 is the tightest documented ceiling among the surfaces this system may
+plausibly be delivered through, and a description authored to the 1024-character specification
+limit cannot be uploaded through the Claude.ai Skills UI without being edited first. Since the
+Stateful Agent system may eventually be packaged for general release rather than remaining a
+personal deployment, the skill must install unmodified on every surface. Designing to the tightest
+ceiling costs a little expressiveness once; designing to the loosest costs a manual edit on every
+constrained install, forever.
+
+**On enforcement.** In July 2026 the 570-character `description` this design previously specified
+was observed reaching a Claude.ai session's skill listing fully intact, so the 200-character limit
+is evidently not enforced uniformly on every upload path today. That observation is deliberately
+*not* treated as license to exceed it. Non-enforcement is not a contract: it can be tightened at
+any time, and — see below — the failure it would produce is invisible.
+
+**Why truncation is the dangerous failure mode.** A description that exceeds a limit is not
+rejected with an error the author will notice; it is silently cut, from the end. The trailing
+content of a description is where "and use it when…" trigger vocabulary conventionally sits, so
+truncation removes precisely the part that governs invocation while leaving the skill visibly
+installed and apparently healthy. The skill simply stops being selected in cases it used to cover,
+with nothing anywhere reporting why. Two consequences follow:
+
+1. **Front-load the triggers.** The earliest words must carry the conditions under which the skill
+   applies, so that any truncation removes elaboration rather than meaning.
+2. **Prefer trigger coverage to elegance.** Within the budget, spend characters on the vocabulary a
+   request is likely to use, not on describing the mechanism. The mechanism is what the body is
+   for.
+
+**Known limitation.** The frontmatter `description` is metadata consulted to decide whether a skill
+is *relevant*, which is not the same as an instruction that is reliably *executed*. A conversation
+in which the skill's start-of-conversation directive was present in the description but
+`memory_start_conversation` was nonetheless never called has been observed. Shortening the
+description neither causes nor cures this; the reliability of start-of-conversation initialization
+is tracked separately as an open question
+([Chapter 11](stateful-agent-design-chapter11.md#11-open-questions)) and is out of scope for this
+section, which governs only the field's length and content.

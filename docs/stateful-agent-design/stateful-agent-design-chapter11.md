@@ -15,6 +15,35 @@ This section contains all questions that were ever open, even if they are now re
 
     - *Current status (open, target v1.x):* For v1, the derived index is the search surface — `memory_get_index` returns every block's name, summary, and `updated_at`, and Claude selects blocks to load by scanning summaries. The summary contract (required for new blocks, ≤ 200 characters) exists partly to keep this scan effective. When summaries prove insufficient (anticipated at ~50+ blocks), a bridge-side `memory_search(handle, query, max_results)` tool is the planned remedy. Design requirements carried over and updated from OQ#13: (a) the tool takes the conversation handle like every other memory tool; (b) it searches base blocks *and*, for the calling handle, that handle's branches (preserving the per-handle consistent view) while never exposing other handles' branches; (c) results identify blocks by **name** with snippets — no file paths, no branch filenames; (d) it does not establish read baselines (search results are informational; a subsequent `memory_get_block` registers the read); and (e) it holds the mutex only long enough to snapshot the file list. Implementation options range from simple bridge-side text scan to the FTS5 index of [Chapter 9, Section 9.1](stateful-agent-design-chapter9.md#91-fts5-search-index-option-3).
 
+- **OQ#18: Reliability of start-of-conversation memory initialization** — The skill's
+  `description` instructs the agent to initialize memory at the start of every conversation, but a
+  conversation has been observed in which the description was present in the skill listing and
+  `memory_start_conversation` was nonetheless never called. The frontmatter `description` is
+  consulted to judge whether a skill is *relevant*; it is not a mechanism that guarantees an action
+  is *performed*. Contributing factors identified in that instance: the skill body (which contains
+  the explicit conversation-start protocol of
+  [Chapter 5, Section 5.3](stateful-agent-design-chapter5.md#53-conversation-lifecycle)) is only
+  loaded once the skill is judged relevant, so the directive that was actually in context was the
+  one-line description; the bridge's tools were presented as deferred definitions requiring a tool
+  search before they could be called; and a separate, non-deferred memory facility was available and
+  was used instead.
+
+    - *Current status (open):* Unresolved, and **not** addressed by the `description` shortening of
+      [Chapter 5, Section 5.7](stateful-agent-design-chapter5.md#57-frontmatter-constraints-and-portability),
+      which governs only the field's length. Two directions are worth evaluating. (a) *Make
+      initialization unnecessary rather than mandatory:* have any memory tool lazily mint a handle
+      when called without a valid one, converting a client-side compliance requirement into a
+      bridge-side invariant that holds regardless of agent behavior. This would interact with the
+      no-graceful-re-init decision of
+      [Chapter 3, Section 3.14](stateful-agent-design-chapter3.md#314-handle-management), which
+      deliberately chose error-and-recover, so the tradeoff must be re-examined rather than assumed.
+      (b) *Move the directive to an unconditionally-loaded channel* — `CLAUDE.md` for Claude Code,
+      user preferences or project instructions for Claude Desktop — leaving the `description` to do
+      only what descriptions do reliably, which is trigger discovery. A prerequisite for evaluating
+      either is **measurement**: the bridge currently records nothing that would distinguish "no
+      memory was needed" from "initialization never happened," so the compliance rate is not
+      observable. Instrumenting that is the first step.
+
 ### 11.2 Resolved Questions
 
 - **OQ#1: Race condition with memory writes** — MCP bridge tools `safe_write_file` and `safe_append_file` serialize file writes using a Go mutex, however this only prevents torn writes. It doesn't solve the problem where concurrent conversations race via read-modify-write.  For instance, if conversation A reads `core.md` and conversation B reads `core.md`, then after each is modified in-context, whichever conversation writes `core.md` last overwrites the other's changes.  Would it help to add a `safe_edit_file` tool that uses the same mutex?
