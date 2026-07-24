@@ -553,9 +553,10 @@ silently substituted.
 
 ```
 Name:        "memory_start_conversation"
-Description: "Start a memory conversation and receive a handle. Call this once
-             at the start of any conversation that will use memory, before any
-             other memory tool. Pass the returned handle to every subsequent
+Description: "Start a memory conversation and receive a handle, the current core
+             content, and the derived block index in one round trip. Call this
+             once at the start of any conversation that will use memory, before
+             any other memory tool. Pass the returned handle to every subsequent
              memory tool call. If any memory tool returns a handle error, call
              this again to obtain a fresh handle and retry the operation."
 
@@ -564,7 +565,23 @@ Input Schema:
 
 Output Schema:
   handle:  string   — Opaque 8-character handle (e.g., "h7k3xy90")
+  core:    string   — Current core content (empty string if the store is cold)
+  index:   Index    — The derived block index (empty array if no blocks exist)
 ```
+
+**Why the response bundles core and the index.** An earlier revision of this design returned the
+handle alone, leaving the skill to follow up with `memory_get_core` and `memory_get_index`. Those
+two calls are unconditional — every conversation that starts memory makes both, immediately — so
+the handle-only response guaranteed three round trips where one suffices. Bundling them removes two
+round trips at precisely the moment they are most costly: the start of a conversation, before the
+model has done anything useful for the user. It also removes two opportunities for the sequence to
+be abandoned partway through, which matters given the initialization-reliability concern recorded as
+OQ#18 ([Chapter 11](stateful-agent-design-chapter11.md#111-remaining-open-questions)).
+
+The baselines are recorded exactly as if the two calls had been made separately, so
+`changed_since_last_read` behaves identically on subsequent reads; bundling is a transport
+optimization, not a semantic change. `memory_get_core` and `memory_get_index` remain available and
+unchanged for re-reads later in the conversation.
 
 **Handler pseudo-code:**
 
@@ -589,7 +606,14 @@ func HandleMemoryStartConversation() MemoryStartConversationResult:
     //    the new handle survives a bridge restart.
     persistence.MarkDirty()
 
-    return { handle: handle }
+    // 5. Read core and derive the index under the new handle, recording this
+    //    handle's read baselines for both exactly as separate memory_get_core
+    //    and memory_get_index calls would have. A cold store is not an error:
+    //    core is returned as "" and the index as an empty array.
+    core  = readCore(handle)
+    index = deriveIndex(handle)
+
+    return { handle: handle, core: core, index: index }
 ```
 
 Note what this response deliberately does **not** include: a `branches_exist` flag, a pending-merge
