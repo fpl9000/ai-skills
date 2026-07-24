@@ -33,6 +33,7 @@
   - [3.22 Logging](#322-logging)
   - [3.23 Error Handling](#323-error-handling)
   - [3.24 Graceful Shutdown](#324-graceful-shutdown)
+  - [3.25 Multi-Bridge Concurrency](#325-multi-bridge-concurrency)
 
 ## 3. MCP Bridge Server
 
@@ -1102,6 +1103,9 @@ eviction when **both** hold:
    60 days since its last memory tool call. Baselines for a handle idle that long are very
    unlikely to ever be consulted again.
 
+**Multi-bridge note:** when more than one MCP client is deployed, a bridge evicts only handles
+recorded in its *own* state file; see [Section 3.25.4](#3254-per-client-state-files).
+
 Cleanup runs as the final sweep of every `memory_run_maintenance` call
 ([Section 3.13](#313-tool-memory_run_maintenance)) — no separate timer, no background thread, the
 same user-controlled cadence as merging. Eviction removes the handle's entry from the in-memory
@@ -1225,7 +1229,13 @@ it.
 
 **Expected frequency:** branching only occurs when two conversations are active simultaneously
 *and* both modify the same target after overlapping reads. The typical usage pattern — one active
-conversation at a time — produces zero branches.
+conversation at a time — produces zero branches. This changes materially in a multi-client
+deployment; see [Section 3.25.8](#3258-effect-on-branching-and-merging).
+
+**Multi-bridge note:** the routing rules above gain a self-healing precondition when a branch file
+has been merged away by a peer bridge, and the signature compared during write routing gains a
+content hash. Both are specified in [Section 3.25](#325-multi-bridge-concurrency); the branching
+algorithm itself is unchanged.
 
 ### 3.16 Block File Format and Atomic Writes
 
@@ -1273,7 +1283,11 @@ write with an `index.md` write; the simpler invariant is easier to verify and to
 **Windows rename caveat:** `os.Rename` cannot atomically overwrite an existing file on all Windows
 filesystems. The v1-proven approach applies: remove the target if it exists, then rename — an
 acceptably tiny non-existence window given mutex-serialized, low-frequency writes. If true
-atomicity is needed later, the Windows `ReplaceFile` API can be called via `syscall`.
+atomicity is needed later, the Windows `ReplaceFile` API can be called via `syscall`. **In a
+multi-bridge deployment this becomes mandatory rather than optional, and temp file names gain a
+client-id component so that one bridge's startup sweeper cannot delete a peer's in-flight temp
+file** — see [Sections 3.25.6](#3256-atomic-replace-on-windows) and
+[3.25.7](#3257-temp-file-naming-and-the-startup-sweeper).
 
 **Crash recovery (startup sweeper):**
 
@@ -1341,6 +1355,10 @@ signature recorded for a read is consistent with the content returned; writes ac
 signature-compare-then-write sequences are atomic with respect to other conversations. A single
 mutex (rather than per-file locks) keeps the implementation trivial and deadlock-free; memory I/O
 is infrequent and sub-millisecond, so the serialization cost is negligible.
+
+**Both mutexes described above are process-local and therefore insufficient once more than one MCP
+client is deployed.** [Section 3.25.3](#3253-the-cross-process-memory-lock) layers an OS-level
+advisory file lock beneath them, retaining the in-process mutexes as the fast path.
 
 ### 3.18 Bridge State Persistence and Recovery
 
@@ -1418,6 +1436,12 @@ The bridge is never worse off than a lazy-adoption-only design, even in the corr
 **Eviction interplay:** the cleanup sweep of [Section 3.14](#314-handle-management) removes
 evicted handles from the in-memory map; they disappear from the state file at its next write.
 
+**Multi-bridge revision.** Everything above describes a single bridge owning a single
+`.bridge-state.json`. When two or more MCP clients are deployed, that file is partitioned into one
+file per client and the load-and-reconcile procedure is extended accordingly; a whole-file rewrite
+by one bridge would otherwise destroy the other's handles, branch map, and baselines. See
+[Section 3.25.4](#3254-per-client-state-files).
+
 ### 3.19 Error Response Convention
 
 Traditional programming APIs tended toward terse, machine-only error codes (`ENOENT`) because the
@@ -1483,6 +1507,7 @@ situations are identified):
 | `SUMMARY_REQUIRED` | `memory_write_block` called for a new block without a `summary` argument |
 | `SUMMARY_TOO_LONG` | `summary` exceeds the configured length cap |
 | `MAINTENANCE_IN_PROGRESS` | The bridge is currently consolidating memory; the operation should be retried shortly (returned instead of blocking on the merge mutex past an acceptable wait) |
+| `MEMORY_BUSY` | Another memory operation is holding memory I/O longer than the configured wait; retry shortly. In a multi-client deployment this includes contention with a peer bridge ([Section 3.25.3](#3253-the-cross-process-memory-lock)) |
 | `INTERNAL_ERROR` | Catch-all; the message stays generic; details go to the server log |
 
 **Schema-validation errors:** if MCP itself rejects a call (e.g., the required `handle` parameter
@@ -1747,4 +1772,245 @@ func main():
     log.Info("Stdin EOF detected, killing %d active jobs", jobManager.ActiveCount())
     jobManager.KillAll()  // calls Process.Kill() on all running subprocesses
     os.Exit(0)
+```
+
+### 3.25 Multi-Bridge Concurrency
+
+Every MCP client that registers the bridge spawns its **own** copy of the binary as a stdio child
+process. Supporting Claude Code alongside Claude Desktop ([Section 7.8](stateful-agent-design-chapter7.md#78-claude-code-deployment))
+therefore means two or more bridge processes running simultaneously against a single shared memory
+root. Nothing about the MCP protocol makes those processes aware of one another: each has its own
+handle map, its own mutexes, and its own view of what is on disk.
+
+This section defines what must change for that to be correct. It is written as a delta against
+Sections 3.14–3.18, which describe the single-bridge behavior; those sections remain accurate for
+a one-client deployment, and each now carries a pointer here.
+
+#### 3.25.1 What the Existing Design Already Gets Right
+
+It is worth stating plainly what does *not* need to change, because it is more than one might
+expect, and it constrains how invasive the fix should be.
+
+- **Branch ownership never crosses processes.** A branch belongs to exactly one handle, a handle
+  belongs to exactly one conversation, and a conversation lives inside exactly one client. Two
+  bridges therefore never write the same branch file. The flat peer-branch storage model of
+  [Section 3.15](#315-per-handle-branching-and-race-detection) survives multi-bridge operation
+  unchanged.
+- **Race detection already consults the filesystem, not memory.** The signature comparison reads
+  the base file's current on-disk state rather than a cached in-process value, so it observes
+  writes made by a *peer* bridge exactly as it observes writes made by another conversation in
+  the same bridge. The detection mechanism is already cross-process; only its atomicity is not.
+- **Branch filenames embed the owning handle.** Lazy adoption ([Section 3.18](#318-bridge-state-persistence-and-recovery))
+  reconstructs the handle→branch association from the filesystem alone, which means a bridge can
+  correctly interpret branch files created by a peer it knows nothing about.
+- **Maintenance already enumerates branches regardless of handle liveness.** The merge process of
+  [Section 3.17](#317-merge-process-and-merge-mutex) folds in every peer branch of a block found
+  on disk, so a merge run from one client correctly incorporates branches created by another.
+
+The consequence is that the *algorithms* are sound and the *serialization* is not. The changes
+below are almost entirely about locking, state-file ownership, and a few file-naming details.
+
+#### 3.25.2 What Breaks Without Changes
+
+| Mechanism | Single-bridge assumption | Multi-bridge failure |
+|---|---|---|
+| Process-wide memory mutex ([3.17](#317-merge-process-and-merge-mutex)) | Compare-signature-then-write is atomic | Classic TOCTOU: bridge A reads a matching signature, bridge B writes the base, bridge A writes the base. The update is lost **and no branch is created** — the exact silent overwrite branching exists to prevent |
+| Merge mutex ([3.17](#317-merge-process-and-merge-mutex)) | A merge is isolated from all memory I/O | A peer bridge reads partial merge state, or creates a new branch of a block mid-merge that the merge then deletes |
+| `.bridge-state.json` whole-file rewrite ([3.18](#318-bridge-state-persistence-and-recovery)) | One writer | Last-writer-wins on the *whole file*: one bridge's entire handle set, branch map, and read baselines are destroyed by the other's next checkpoint |
+| Startup temp sweeper ([3.16](#316-block-file-format-and-atomic-writes)) | Only this bridge's temp files exist | A starting bridge deletes a peer's in-flight `*.tmp.*` file mid-write, corrupting that write |
+| Remove-then-rename window ([3.16](#316-block-file-format-and-atomic-writes)) | Window is covered by the memory mutex | A peer read lands in the window and observes the block as nonexistent |
+| Handle eviction ([3.14](#314-handle-management)) | The bridge knows every live handle | A bridge evicts a handle that is live in a peer, orphaning branches or forcing a spurious `INVALID_HANDLE` |
+| Handle minting collision check ([3.8](#38-tool-memory_start_conversation)) | One map holds all handles | Two bridges can mint the same handle; astronomically unlikely, but the check no longer covers the space it claims to |
+
+#### 3.25.3 The Cross-Process Memory Lock
+
+All memory file I/O is serialized across bridge processes by an **OS-level advisory lock** taken on
+a dedicated zero-length file, `.bridge-lock`, in the memory root.
+
+The choice of an OS lock over a hand-rolled lockfile (one containing a PID, say) is deliberate and
+load-bearing: **the operating system releases the lock automatically when the holding process
+terminates, for any reason, including a hard kill or a crash.** That single property eliminates the
+entire category of stale-lock recovery logic — no PID liveness probes, no lock expiry heuristics,
+no "is that process really dead?" ambiguity. Given that these bridges are killed routinely (Claude
+Desktop terminates its child on close, per [Section 3.24](#324-graceful-shutdown)), crash-safety by
+construction is worth far more here than it would be in a long-lived server.
+
+Implementation:
+
+- **Windows:** `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK`, taken on a fixed byte range of
+  `.bridge-lock`, via `golang.org/x/sys/windows`.
+- **POSIX:** `flock(2)` with `LOCK_EX`, via `golang.org/x/sys/unix`. Included because portability
+  costs little here and the system may be packaged for general release; `flock` is preferred over
+  POSIX record locks (`fcntl`), whose release-on-any-close-in-the-process semantics are a
+  well-known hazard.
+
+**Two-level locking.** The existing in-process `sync.Mutex` is retained and acquired *first*, then
+the file lock. The in-process mutex is cheap and serializes this bridge's own goroutines without
+touching the filesystem; the file lock is acquired only once contention has already been resolved
+locally. The ordering is fixed and uniform, so no deadlock is possible. Release is in reverse
+order.
+
+**Scope of the lock.** It is held for the whole of any sequence that must be atomic with respect to
+peers:
+
+1. The read path, from signature capture through content return, so the baseline recorded for a
+   read matches the content actually returned.
+2. The write path, from signature comparison through the atomic replace, so the branch/no-branch
+   decision cannot be invalidated between the decision and the write.
+3. The entire duration of each block's merge ([Section 3.17](#317-merge-process-and-merge-mutex)).
+
+**Acquisition timeout.** A new config key, `locking.acquire_timeout_seconds` (default 10), bounds
+how long a bridge waits. On expiry the tool returns `MEMORY_BUSY`
+([Section 3.19](#319-error-response-convention)) rather than hanging — a caller blocked behind a
+peer's long-running merge gets a clear, retryable error instead of a stalled conversation. The
+timeout must exceed the longest expected merge, which is itself bounded by the per-call merge cap
+of [Section 3.13](#313-tool-memory_run_maintenance).
+
+Per the abstraction-discipline rule of [Section 3.19](#319-error-response-convention), neither the
+code nor its message may reveal that locking or multiple bridge processes exist. `MEMORY_BUSY`
+carries a message such as *"Memory is busy; please retry in a moment"* — true at the block
+abstraction, and actionable without exposing anything internal.
+
+#### 3.25.4 Per-Client State Files
+
+The single `.bridge-state.json` is replaced by **one state file per client**:
+
+```
+.bridge-state-<client-id>.json
+```
+
+`client-id` is supplied by a new `--client-id` command-line flag (equivalently `client.id` in
+`bridge-config.yaml`), defaulting to `desktop` for backward compatibility. It must be
+filename-safe (`[a-z0-9-]{1,32}`) and, critically, **stable across restarts of the same client** —
+it identifies the client, not the process instance. A bridge launched by Claude Desktop uses
+`desktop`; one launched by Claude Code uses `claude-code`.
+
+This partitioning is what makes checkpointing safe *without* taking the memory lock. Handles are
+owned by exactly one client, so the per-client files have disjoint contents and exactly one writer
+each. The debounced checkpoint of [Section 3.18](#318-bridge-state-persistence-and-recovery) fires
+every few seconds; forcing it to contend with memory I/O on the shared lock would be both wasteful
+and a source of avoidable latency. Partitioning removes the contention entirely rather than
+managing it.
+
+**Startup load and reconcile**, revised:
+
+1. Load this bridge's own `.bridge-state-<client-id>.json`.
+2. Reconcile it against the filesystem exactly as before: drop branch-map entries whose branch
+   files no longer exist. Note that in a multi-bridge deployment this case is no longer rare —
+   a peer's maintenance run legitimately merges away and deletes this client's branches.
+3. Read peer state files (`.bridge-state-*.json`, excluding this client's) **read-only**, solely
+   to learn which handles are owned elsewhere. This informs eviction and handle minting. A bridge
+   never writes a peer's file.
+4. Run lazy adoption as before, over branch files not represented in *any* loaded state.
+
+**Migration.** On first startup, a bridge finding a legacy `.bridge-state.json` renames it to
+`.bridge-state-<client-id>.json` using its own client id, then proceeds. Since the legacy file
+could only have been produced by a single-client deployment, attributing it to the current client
+is correct in every realistic case, and harmless otherwise (the worst outcome is lost baselines,
+which degrades exactly as a missing state file already does).
+
+**Eviction, revised.** A bridge evicts only handles present in its *own* state file. It never
+evicts a handle it learned about from a peer's file, because it cannot observe that handle's
+activity and has no authority over its lifetime. The eligibility rules of
+[Section 3.14](#314-handle-management) are otherwise unchanged.
+
+**Handle minting, revised.** The collision check of [Section 3.8](#38-tool-memory_start_conversation)
+consults the union of this bridge's handles and those read from peer state files. Minting is rare
+(once per conversation), so performing it under the memory lock with a fresh re-read of peer files
+costs nothing measurable and restores the guarantee the check is supposed to provide.
+
+#### 3.25.5 Strengthening the Read Baseline Signature
+
+`Signature` gains a content hash:
+
+```go
+type Signature struct {
+    ModTime time.Time
+    Size    int64
+    Hash    string  // first 16 hex chars of SHA-256 over the file's bytes
+}
+```
+
+Comparison uses `Hash` as the authoritative discriminator; `ModTime` and `Size` are retained for
+cheap early-out and for human debugging.
+
+The motivation is that ModTime-plus-size is a materially weaker discriminator once independent
+processes are writing. Windows filesystem timestamp granularity, combined with a rewrite that
+happens to produce the same file size — hardly exotic for prose blocks edited in place — yields a
+false "signatures match," which the write path reads as "no race" and resolves by overwriting the
+base. That is precisely the silent data loss branching exists to prevent, so paying a SHA-256 over
+a file that is at most a few tens of kilobytes, on operations that occur at conversational
+frequency, is an obviously good trade.
+
+#### 3.25.6 Atomic Replace on Windows
+
+The remove-then-rename fallback described in [Section 3.16](#316-block-file-format-and-atomic-writes)
+is **no longer acceptable**. Its justification was that the non-existence window is tiny and
+mutex-serialized; with peers holding no such mutex, a concurrent read can land inside the window
+and observe a block as missing, which the caller would interpret as "this block does not exist."
+
+The bridge must therefore use a genuinely atomic replace: `MoveFileEx` with
+`MOVEFILE_REPLACE_EXISTING`, or `ReplaceFile` where its additional semantics are wanted, via
+`golang.org/x/sys/windows`. Both are atomic on NTFS. Section 3.16 already anticipated this as a
+future refinement; multi-bridge support is what makes it mandatory.
+
+#### 3.25.7 Temp File Naming and the Startup Sweeper
+
+Temp file names gain the client id:
+
+```
+<name>.md.tmp.<client-id>.<random>
+```
+
+The startup sweeper deletes only orphan temp files carrying **its own** client id and older than
+the existing age threshold. A peer's in-flight temp file is neither matched nor removed. Temp files
+belonging to a client that is no longer deployed persist harmlessly until that client next starts;
+they are small, and deleting a peer's file cannot be made safe without a liveness check the lock
+design deliberately avoids.
+
+#### 3.25.8 Effect on Branching and Merging
+
+Branching needs no algorithmic change. This is the payoff from
+[Section 3.25.1](#3251-what-the-existing-design-already-gets-right): the branch/no-branch decision
+was already made against on-disk state, so restoring atomicity around it — via the cross-process
+lock — plus strengthening the signature is sufficient to make it correct across bridges. The branch
+map, the naming convention, read-your-own-writes, and the no-branches-of-branches rule all carry
+over verbatim.
+
+Merging requires one genuine addition. Step 7 of [Section 3.17](#317-merge-process-and-merge-mutex)
+clears branch-map entries `(*, B)` so that every handle routes back to the merged base. A bridge
+can do that for its own handles, but it **cannot** write a peer's state file, so a peer's handles
+would retain branch-map entries pointing at files the merge has deleted.
+
+The fix is to make branch-map entries **self-healing at routing time** rather than requiring the
+merging bridge to reach into peer state. The read and write routing rules of
+[Section 3.15](#315-per-handle-branching-and-race-detection) gain a precondition:
+
+> If the branch map has an entry for `(H, B)` but the referenced branch file no longer exists,
+> the branch was merged away by a peer. Drop the entry, fall back to the base file, and reset
+> `H`'s baseline for `B` on the next read.
+
+This keeps every bridge the sole writer of its own state while guaranteeing that a merge performed
+anywhere becomes visible everywhere, on next use, with no coordination. It also subsumes the
+startup reconcile step (item 2 of [Section 3.25.4](#3254-per-client-state-files)) as a runtime
+invariant rather than a startup-only sweep, which is strictly stronger.
+
+**Expected frequency, revised.** [Section 3.15](#315-per-handle-branching-and-race-detection) notes
+that the typical one-conversation-at-a-time pattern produces zero branches. With two clients in
+regular use — particularly Claude Code, where long agentic sessions may run while a Desktop
+conversation is also active — simultaneous conversations become common rather than exceptional.
+Branching should be expected to occur in normal operation, and the merge path becomes a routine
+code path rather than a rarely-exercised one. It must be tested accordingly
+([Chapter 8](stateful-agent-design-chapter8.md#8-testing-strategy)).
+
+#### 3.25.9 Configuration Summary
+
+```yaml
+# Client identity (see Section 3.25.4)
+client:
+  id: desktop            # or claude-code; stable per client, [a-z0-9-]{1,32}
+
+# Cross-process locking (see Section 3.25.3)
+locking:
+  acquire_timeout_seconds: 10
 ```
