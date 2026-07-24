@@ -70,9 +70,10 @@ to know how or where memory is stored.
 ## Handles
 
 Call `memory_start_conversation` once at the start of any conversation that will
-use memory. It returns a `handle` — an opaque token identifying this conversation.
-Pass the handle to every memory tool call, always using the most recently returned
-value (every memory tool response echoes it back).
+use memory. It returns a `handle` — an opaque token identifying this conversation —
+along with the current core content and the derived block index, all in one round
+trip. Pass the handle to every subsequent memory tool call, always using the most
+recently returned value (every memory tool response echoes it back).
 
 If any memory tool returns a handle error, the recovery is always the same:
 call `memory_start_conversation` to get a fresh handle, then retry the operation.
@@ -81,12 +82,11 @@ call `memory_start_conversation` to get a fresh handle, then retry the operation
 
 At the start of every conversation, BEFORE responding to the user's first message:
 
-1. Call `memory_start_conversation` to get a handle.
-2. Call `memory_get_core(handle)`.
-3. Call `memory_get_index(handle)`.
-4. If any index entry is relevant to the user's opening message, load it with
+1. Call `memory_start_conversation` to get a handle, the current core content,
+   and the derived index — all in one call.
+2. If any index entry is relevant to the user's opening message, load it with
    `memory_get_block(handle, block_name)`.
-5. Respond to the user, informed by your loaded context.
+3. Respond to the user, informed by your loaded context.
 
 If core comes back empty, this is a first-run scenario: write an initial core with
 `memory_write_core`, seeded from your built-in memory and the current conversation.
@@ -184,6 +184,16 @@ You can mention that the underlying storage is plain markdown files on their mac
 that they can edit directly — the bridge will pick up their edits.
 ```
 
+**This is the canonical full-design skill; a given build may ship a subset.** The `SKILL.md`
+deployed with a build must not instruct Claude to call tools that build does not register — an
+instruction to invoke a nonexistent tool is worse than a missing instruction, because the model
+will attempt it. Concretely, the minimal Layer 2 build in `fpl9000/mcp-bridge` registers eight
+tools and defers `memory_run_maintenance` along with the sub-agent machinery its semantic merge
+requires, so that build's `SKILL.md` correctly omits both the `## Memory Maintenance` section above
+and the `MAINTENANCE_IN_PROGRESS` bullet from `## Error Handling`. Those are restored when the tool
+is implemented, not before. When comparing a deployed `SKILL.md` against this section, check the
+build's registered tool list before treating a difference as drift.
+
 ### 5.3 Conversation Lifecycle
 
 Detailed sequence of operations at each phase:
@@ -193,12 +203,11 @@ Conversation Start
 │
 ├─ 1. Skill instructions loaded into context (automatic, ~400 tokens)
 ├─ 2. Layer 1 memory loaded into context (automatic, ~500–2,000 tokens)
-├─ 3. Call memory_start_conversation → receive handle (echoed on every later call)
-├─ 4. memory_get_core(handle) (~500–1,000 tokens)
-├─ 5. memory_get_index(handle) (~300–800 tokens)
-├─ 6. Evaluate user's first message against index entries
-├─ 7. memory_get_block(handle, name) for any relevant blocks (varies)
-└─ 8. Respond to user's first message
+├─ 3. Call memory_start_conversation → receive handle (echoed on every later
+│       call), core (~500–1,000 tokens), and the derived index (~300–800 tokens)
+├─ 4. Evaluate user's first message against index entries
+├─ 5. memory_get_block(handle, name) for any relevant blocks (varies)
+└─ 6. Respond to user's first message
 │
 Conversation Active
 │
