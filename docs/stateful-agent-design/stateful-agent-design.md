@@ -257,23 +257,11 @@ client. The system supports two:
 | Claude Desktop | stdio, spawned as a child process | Uploaded `.zip` archive | The `description` frontmatter field is subject to a 200-character product limit ([Chapter 5, Section 5.7](stateful-agent-design-chapter5.md#57-frontmatter-constraints-and-portability)) |
 | Claude Code | stdio, spawned as a child process | Filesystem copy into `~/.claude/skills/` | Registered at user scope; MCP tool definitions may be deferred, and sub-agents do not inherit MCP connections |
 
-**The bridge binary is identical for both.** Nothing about the MCP interface differs between the
-clients; they are distinguished only by how they are configured
-([Chapter 7, Sections 7.2 and 7.8](stateful-agent-design-chapter7.md#7-build-and-deployment)) and by
-the `--client-id` value each passes.
+**The bridge binary is identical for both.** Nothing about the MCP interface differs between the clients; they are distinguished only by how they are configured ([Chapter 7, Sections 7.2 and 7.8](stateful-agent-design-chapter7.md#7-build-and-deployment)) and by the `--client-id` value each passes.
 
-**Both may run at once.** Because each client spawns its own copy of the binary, concurrent use
-means two bridge processes against one memory root. The single-writer assumptions that the original
-design could safely make — a process-wide mutex serializing all memory I/O, one owner of
-`.bridge-state.json` — no longer hold in that configuration. The provisions that restore them are
-specified in [Chapter 3, Section 3.25](stateful-agent-design-chapter3.md#325-multi-bridge-concurrency)
-and their deployment requirements in
-[Chapter 7, Section 7.9](stateful-agent-design-chapter7.md#79-running-multiple-clients-concurrently).
+**Both may run at once.** Because each client spawns its own copy of the binary, concurrent use means two bridge processes against one memory root. The single-writer assumptions that the original design could safely make — a process-wide mutex serializing all memory I/O, one owner of `.bridge-state.json` — no longer hold in that configuration. The provisions that restore them are specified in [Chapter 3, Section 3.25](stateful-agent-design-chapter3.md#325-multi-bridge-concurrency) and their deployment requirements in [Chapter 7, Section 7.9](stateful-agent-design-chapter7.md#79-running-multiple-clients-concurrently).
 
-**A note on the diagram.** The diagram in [Section 2.1](#21-component-diagram) is drawn from the
-Claude Desktop perspective and has not been redrawn per-client. The Anthropic Filesystem extension
-shown there is a Claude Desktop feature specifically; Claude Code provides its own file access and
-does not use it. The bridge box and every memory tool in it apply unchanged to both clients.
+**A note on the diagram.** The diagram in [Section 2.1](#21-component-diagram) is drawn from the Claude Desktop perspective and has not been redrawn per-client. The Anthropic Filesystem extension shown there is a Claude Desktop feature specifically; Claude Code provides its own file access and does not use it. The bridge box and every memory tool in it apply unchanged to both clients.
 
 ## 3. MCP Bridge Server
 
