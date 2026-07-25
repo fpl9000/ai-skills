@@ -28,21 +28,37 @@ This section contains all questions that were ever open, even if they are now re
   search before they could be called; and a separate, non-deferred memory facility was available and
   was used instead.
 
-    - *Current status (open):* Unresolved, and **not** addressed by the `description` shortening of
-      [Chapter 5, Section 5.7](stateful-agent-design-chapter5.md#57-frontmatter-constraints-and-portability),
-      which governs only the field's length. Two directions are worth evaluating. (a) *Make
-      initialization unnecessary rather than mandatory:* have any memory tool lazily mint a handle
-      when called without a valid one, converting a client-side compliance requirement into a
-      bridge-side invariant that holds regardless of agent behavior. This would interact with the
-      no-graceful-re-init decision of
-      [Chapter 3, Section 3.14](stateful-agent-design-chapter3.md#314-handle-management), which
-      deliberately chose error-and-recover, so the tradeoff must be re-examined rather than assumed.
-      (b) *Move the directive to an unconditionally-loaded channel* — `CLAUDE.md` for Claude Code,
-      user preferences or project instructions for Claude Desktop — leaving the `description` to do
-      only what descriptions do reliably, which is trigger discovery. A prerequisite for evaluating
-      either is **measurement**: the bridge currently records nothing that would distinguish "no
-      memory was needed" from "initialization never happened," so the compliance rate is not
-      observable. Instrumenting that is the first step.
+    - *Current status (partially resolved; core reliability question still open):* Of the two
+      directions previously recorded, one is now decided against and one is adopted.
+
+        - *Direction (a) — lazy handle minting — REJECTED.* Having any memory tool mint a handle
+          when called without one would create a second handle-minting mechanism, and the
+          [Chapter 3, Section 3.3/3.14](stateful-agent-design-chapter3.md#314-handle-management)
+          decision that `memory_start_conversation` is the *sole* minting path and mandatory first
+          call is reaffirmed. Multiple minting mechanisms add bridge complexity, reintroduce the
+          handle-collision and honored-or-substituted reasoning burden that §3.3 was written to
+          avoid, and do so precisely at the one moment the agent must reliably bootstrap the memory
+          system and load `core.md` and the index. Simplicity at that moment is worth more than the
+          resilience lazy minting would buy, so the invariant is kept intact.
+
+        - *Direction (b) — move the directive to an unconditionally-loaded channel — ADOPTED.* The
+          bootstrap directive is now additionally carried in each client's always-loaded channel:
+          Claude Desktop user preferences and Claude Code `CLAUDE.md`, specified with proposed
+          wording in [Chapter 5, Section 5.8](stateful-agent-design-chapter5.md#58-bootstrapping-via-an-unconditionally-loaded-channel)
+          and [Chapter 6, Section 6.5](stateful-agent-design-chapter6.md#65-claudemd-recommendations)
+          respectively. The skill description and body are unchanged; execution reliability no longer
+          depends on the skill being judged relevant.
+
+        - *What remains open.* Whether direction (b) actually raises the bootstrap-compliance rate in
+          practice is an empirical question that is not yet answered. The instrument for answering it
+          already exists — the compliance-monitoring script of
+          [Chapter 8, Section 8.2.8](stateful-agent-design-chapter8.md#828-compliance-monitoring-script)
+          detects sessions that used memory tooling without a leading `memory_start_conversation` —
+          so the next step is to measure the rate before and after the channel change. (Note that the
+          richer "explicit vs. lazy initialization" denominator floated earlier is moot now that lazy
+          initialization is rejected: there is only one initialization path to count.) This question
+          stays in §11.1 until that measurement is in hand; if compliance remains inadequate even with
+          the unconditional-channel directive in place, the problem is escalated rather than closed.
 
 ### 11.2 Resolved Questions
 
