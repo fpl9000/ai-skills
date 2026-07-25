@@ -102,6 +102,9 @@ The file `C:\Users\flitt\.claude\CLAUDE.md` is loaded into every Claude Code inv
 - OS environment (Windows 11 + Cygwin, shell behavior, pathname conventions)
 - Available tools (compilers, package managers, utilities)
 - Source code conventions (line width, comments, encoding, newlines)
+- Memory bootstrap — the mandatory `memory_start_conversation` call at conversation start
+  (see the sub-agent-safety note below). This is session-core behavior, not a service-specific
+  instruction, so it is not excluded by the "should NOT include" rule that follows.
 
 **Should NOT include:**
 - Credentials (API tokens, passwords — use environment variables instead)
@@ -148,7 +151,34 @@ Recommended `CLAUDE.md` content:
 - Prefer Python and Bash for scripts. Use PEP 723 metadata in Python scripts.
 - Bash variables: UPPERCASE for globals, _UPPERCASE for function locals.
 - When building executables, always use .exe extension (Windows).
+
+# Memory Bootstrap
+
+- If the memory tools (memory_start_conversation and the other memory_* tools) are
+  available in this session, call memory_start_conversation ONCE, before any other
+  action, at the very start of the conversation. It returns a handle together with the
+  current core memory and the block index; pass that handle to every later memory tool
+  call. This is the only way to obtain a handle.
+- If a memory tool reports an unknown or invalid handle, call memory_start_conversation
+  again to get a fresh handle and retry.
+- If the memory tools are NOT available in this session, this instruction does not apply;
+  do nothing for it.
 ```
+
+**Sub-agent safety of the memory-bootstrap block.** The `CLAUDE.md` above is loaded into *every*
+Claude Code invocation, including sub-agents, and sub-agents do not inherit the parent session's MCP
+connections ([Section 7.8](stateful-agent-design-chapter7.md#78-claude-code-deployment)) — so a
+sub-agent has no memory tools. The block is therefore written as a **conditional guarded on tool
+availability**: the primary agent, which has the memory tools, acts on it; a sub-agent, which does
+not, treats it as inert. Without that guard the instruction would tell every sub-agent to call a
+tool it cannot reach, producing a guaranteed failed call at the top of every sub-agent run. The
+guard is the reason the directive is phrased "if the memory tools are available" rather than as a
+bare imperative. This is consistent with [Section 6.6](#66-sub-agent-memory-access-rules): sub-agents
+receive no Layer 2 write access, and here they correctly receive no bootstrap obligation either.
+
+The token cost of the block is small (well under 100 tokens), so it does not threaten the target
+size above. The rationale for placing it here at all — rather than relying on the skill description —
+is given in [Chapter 5, Section 5.8](stateful-agent-design-chapter5.md#58-bootstrapping-via-an-unconditionally-loaded-channel).
 
 ### 6.6 Sub-Agent Memory Access Rules
 

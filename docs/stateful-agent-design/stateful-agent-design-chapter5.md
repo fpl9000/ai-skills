@@ -15,6 +15,7 @@
   - [5.5 Memory Read Triggers](#55-memory-read-triggers)
   - [5.6 Reconciliation with Layer 1](#56-reconciliation-with-layer-1)
   - [5.7 Frontmatter Constraints and Portability](#57-frontmatter-constraints-and-portability)
+  - [5.8 Bootstrapping via an Unconditionally-Loaded Channel](#58-bootstrapping-via-an-unconditionally-loaded-channel)
 
 ## 5. Memory Skill
 
@@ -333,3 +334,55 @@ description neither causes nor cures this; the reliability of start-of-conversat
 is tracked separately as an open question
 ([Chapter 11](stateful-agent-design-chapter11.md#11-open-questions)) and is out of scope for this
 section, which governs only the field's length and content.
+
+### 5.8 Bootstrapping via an Unconditionally-Loaded Channel
+
+[Section 5.7](#57-frontmatter-constraints-and-portability) established that the skill `description`
+is metadata used to decide whether a skill is *relevant*, not a mechanism that guarantees an
+instruction is *executed* — and OQ#18
+([Chapter 11](stateful-agent-design-chapter11.md#111-remaining-open-questions)) records a real
+conversation in which the description was present in the skill listing and
+`memory_start_conversation` was nonetheless never called. Relying on the description alone to make
+the agent bootstrap memory is therefore unreliable by construction: the directive that governs the
+single most important action in the whole system — the mandatory first call that loads `core.md`
+and the block index — lives in a field whose job is discovery, and it is only elaborated in the
+skill body once the skill has already been judged relevant.
+
+**The resolution is to place the bootstrap directive additionally in a channel that is loaded
+verbatim into every conversation, with no relevance gating.** This does not replace the skill: the
+skill's conversation-start protocol ([Section 5.3](#53-conversation-lifecycle)) and its description
+remain exactly as specified, the description continuing to do the discovery job it does well. What
+changes is that *execution reliability no longer depends on relevance matching* — the unconditional
+channel carries the imperative, and the skill carries the detail. The two reinforce each other; the
+belt does not need the suspenders to be present, but both cost little and the failure mode being
+guarded against is silent.
+
+Each client has such a channel:
+
+- **Claude Desktop:** the user's preferences (Settings → Profile personalization), which are loaded
+  into every conversation. The wording below belongs there. (This is the same mechanism that already
+  reliably steers other cross-conversation behavior in this deployment, such as the GitHub and
+  Bluesky conventions.)
+- **Claude Code:** the auto-loaded `CLAUDE.md`. The wording, and an important sub-agent-safety
+  caveat, are given in [Section 6.5](stateful-agent-design-chapter6.md#65-claudemd-recommendations).
+
+**Proposed Claude Desktop user-preferences wording:**
+
+> At the start of every conversation, before doing anything else, call `memory_start_conversation`
+> to load my stored memory. It returns a handle together with my core memory and the block index;
+> use that handle on every subsequent memory tool call. If any memory tool reports an unknown or
+> invalid handle, call `memory_start_conversation` again to obtain a fresh handle and retry. This is
+> the only way to mint a handle — there is no other initialization path.
+
+The final sentence is deliberate: it reflects the reaffirmed decision
+([Chapter 3, Sections 3.3/3.14](stateful-agent-design-chapter3.md#314-handle-management)) that
+`memory_start_conversation` is the *sole* handle-minting mechanism and that the bridge performs no
+auto-initialization. Stating that plainly in the channel the agent actually reads removes any
+temptation to expect a handle to appear by some other means, and it makes the uniform error-recovery
+procedure ("get a new handle, retry") the obvious response to any handle error.
+
+**What this section does not do.** It does not weaken or bypass the mandatory-first-call invariant;
+it strengthens the odds that the invariant is honored by putting the instruction where it will be
+read every time. And it does not make initialization automatic — an agent that ignores both the
+unconditional channel and the skill still fails to bootstrap, and that residual case is exactly what
+OQ#18 leaves open pending measurement (see [Chapter 8, Section 8.2.8](stateful-agent-design-chapter8.md#828-compliance-monitoring-script)).
