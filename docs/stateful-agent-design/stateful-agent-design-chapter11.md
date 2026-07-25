@@ -15,50 +15,15 @@ This section contains all questions that were ever open, even if they are now re
 
     - *Current status (open, target v1.x):* For v1, the derived index is the search surface — `memory_get_index` returns every block's name, summary, and `updated_at`, and Claude selects blocks to load by scanning summaries. The summary contract (required for new blocks, ≤ 200 characters) exists partly to keep this scan effective. When summaries prove insufficient (anticipated at ~50+ blocks), a bridge-side `memory_search(handle, query, max_results)` tool is the planned remedy. Design requirements carried over and updated from OQ#13: (a) the tool takes the conversation handle like every other memory tool; (b) it searches base blocks *and*, for the calling handle, that handle's branches (preserving the per-handle consistent view) while never exposing other handles' branches; (c) results identify blocks by **name** with snippets — no file paths, no branch filenames; (d) it does not establish read baselines (search results are informational; a subsequent `memory_get_block` registers the read); and (e) it holds the mutex only long enough to snapshot the file list. Implementation options range from simple bridge-side text scan to the FTS5 index of [Chapter 9, Section 9.1](stateful-agent-design-chapter9.md#91-fts5-search-index-option-3).
 
-- **OQ#18: Reliability of start-of-conversation memory initialization** — The skill's
-  `description` instructs the agent to initialize memory at the start of every conversation, but a
-  conversation has been observed in which the description was present in the skill listing and
-  `memory_start_conversation` was nonetheless never called. The frontmatter `description` is
-  consulted to judge whether a skill is *relevant*; it is not a mechanism that guarantees an action
-  is *performed*. Contributing factors identified in that instance: the skill body (which contains
-  the explicit conversation-start protocol of
-  [Chapter 5, Section 5.3](stateful-agent-design-chapter5.md#53-conversation-lifecycle)) is only
-  loaded once the skill is judged relevant, so the directive that was actually in context was the
-  one-line description; the bridge's tools were presented as deferred definitions requiring a tool
-  search before they could be called; and a separate, non-deferred memory facility was available and
-  was used instead.
+- **OQ#18: Reliability of start-of-conversation memory initialization** — The skill's `description` instructs the agent to initialize memory at the start of every conversation, but a conversation has been observed in which the description was present in the skill listing and `memory_start_conversation` was nonetheless never called. The frontmatter `description` is consulted to judge whether a skill is *relevant*; it is not a mechanism that guarantees an action is *performed*. Contributing factors identified in that instance: the skill body (which contains the explicit conversation-start protocol of [Chapter 5, Section 5.3](stateful-agent-design-chapter5.md#53-conversation-lifecycle)) is only loaded once the skill is judged relevant, so the directive that was actually in context was the one-line description; the bridge's tools were presented as deferred definitions requiring a tool search before they could be called; and a separate, non-deferred memory facility was available and was used instead.
 
-    - *Current status (partially resolved; core reliability question still open):* Of the two
-      directions previously recorded, one is now decided against and one is adopted.
+    - *Current status (partially resolved; core reliability question still open):* Of the two directions previously recorded, one is now decided against and one is adopted.
 
-        - *Direction (a) — lazy handle minting — REJECTED.* Having any memory tool mint a handle
-          when called without one would create a second handle-minting mechanism, and the
-          [Chapter 3, Section 3.3/3.14](stateful-agent-design-chapter3.md#314-handle-management)
-          decision that `memory_start_conversation` is the *sole* minting path and mandatory first
-          call is reaffirmed. Multiple minting mechanisms add bridge complexity, reintroduce the
-          handle-collision and honored-or-substituted reasoning burden that §3.3 was written to
-          avoid, and do so precisely at the one moment the agent must reliably bootstrap the memory
-          system and load `core.md` and the index. Simplicity at that moment is worth more than the
-          resilience lazy minting would buy, so the invariant is kept intact.
+        - *Direction (a) — lazy handle minting — REJECTED.* Having any memory tool mint a handle when called without one would create a second handle-minting mechanism, and the [Chapter 3, Section 3.3/3.14](stateful-agent-design-chapter3.md#314-handle-management) decision that `memory_start_conversation` is the *sole* minting path and mandatory first call is reaffirmed. Multiple minting mechanisms add bridge complexity, reintroduce the handle-collision and honored-or-substituted reasoning burden that §3.3 was written to avoid, and do so precisely at the one moment the agent must reliably bootstrap the memory system and load `core.md` and the index. Simplicity at that moment is worth more than the resilience lazy minting would buy, so the invariant is kept intact.
 
-        - *Direction (b) — move the directive to an unconditionally-loaded channel — ADOPTED.* The
-          bootstrap directive is now additionally carried in each client's always-loaded channel:
-          Claude Desktop user preferences and Claude Code `CLAUDE.md`, specified with proposed
-          wording in [Chapter 5, Section 5.8](stateful-agent-design-chapter5.md#58-bootstrapping-via-an-unconditionally-loaded-channel)
-          and [Chapter 6, Section 6.5](stateful-agent-design-chapter6.md#65-claudemd-recommendations)
-          respectively. The skill description and body are unchanged; execution reliability no longer
-          depends on the skill being judged relevant.
+        - *Direction (b) — move the directive to an unconditionally-loaded channel — ADOPTED.* The bootstrap directive is now additionally carried in each client's always-loaded channel: Claude Desktop user preferences and Claude Code `CLAUDE.md`, specified with proposed wording in [Chapter 5, Section 5.8](stateful-agent-design-chapter5.md#58-bootstrapping-via-an-unconditionally-loaded-channel) and [Chapter 6, Section 6.5](stateful-agent-design-chapter6.md#65-claudemd-recommendations) respectively. The skill description and body are unchanged; execution reliability no longer depends on the skill being judged relevant.
 
-        - *What remains open.* Whether direction (b) actually raises the bootstrap-compliance rate in
-          practice is an empirical question that is not yet answered. The instrument for answering it
-          already exists — the compliance-monitoring script of
-          [Chapter 8, Section 8.2.8](stateful-agent-design-chapter8.md#828-compliance-monitoring-script)
-          detects sessions that used memory tooling without a leading `memory_start_conversation` —
-          so the next step is to measure the rate before and after the channel change. (Note that the
-          richer "explicit vs. lazy initialization" denominator floated earlier is moot now that lazy
-          initialization is rejected: there is only one initialization path to count.) This question
-          stays in §11.1 until that measurement is in hand; if compliance remains inadequate even with
-          the unconditional-channel directive in place, the problem is escalated rather than closed.
+        - *What remains open.* Whether direction (b) actually raises the bootstrap-compliance rate in practice is an empirical question that is not yet answered. The instrument for answering it already exists — the compliance-monitoring script of [Chapter 8, Section 8.2.8](stateful-agent-design-chapter8.md#828-compliance-monitoring-script) detects sessions that used memory tooling without a leading `memory_start_conversation` — so the next step is to measure the rate before and after the channel change. (Note that the richer "explicit vs. lazy initialization" denominator floated earlier is moot now that lazy initialization is rejected: there is only one initialization path to count.) This question stays in §11.1 until that measurement is in hand; if compliance remains inadequate even with the unconditional-channel directive in place, the problem is escalated rather than closed.
 
 ### 11.2 Resolved Questions
 
