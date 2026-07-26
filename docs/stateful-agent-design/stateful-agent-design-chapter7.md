@@ -109,7 +109,7 @@ Alternatively, ask Claude in an initial conversation to seed the memory from its
 
 ### 7.6 Skill Installation
 
-1. Create the `SKILL.md` file with the content from [Section 5.2](stateful-agent-design-chapter5.md#52-skillmd-content), including its YAML frontmatter.
+1. Obtain `SKILL.md` from [`skill/SKILL.md`](https://github.com/fpl9000/mcp-bridge/blob/main/skill/SKILL.md) in the bridge repository, which is its source of truth (see [Section 5.2](stateful-agent-design-chapter5.md#52-skillmd-content)). Running `build-release.sh` in that repository performs steps 1 and 2 together, emitting a correctly structured `stateful-memory.zip` into `deploy/`; the manual equivalents are given here for readers packaging the skill by hand.
 2. Place it inside a folder whose name matches the skill's `name`, then zip the folder so the archive contains `stateful-memory/SKILL.md` (not a bare `SKILL.md` at the root):
    ```bash
    mkdir stateful-memory
@@ -159,7 +159,7 @@ cp SKILL.md ~/.claude/skills/stateful-memory/
 ```
 
 The directory name must match the skill's `name` frontmatter field (`stateful-memory`). The same
-`SKILL.md` authored per [Chapter 5, Section 5.2](stateful-agent-design-chapter5.md#52-skillmd-content)
+`SKILL.md` taken from the bridge repository per [Chapter 5, Section 5.2](stateful-agent-design-chapter5.md#52-skillmd-content)
 is used verbatim for both clients — this is the practical payoff of holding the `description` to
 the tightest documented limit ([Section 5.7](stateful-agent-design-chapter5.md#57-frontmatter-constraints-and-portability)):
 one artifact, no per-client variants to keep in sync.
