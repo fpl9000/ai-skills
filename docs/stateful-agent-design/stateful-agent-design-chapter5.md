@@ -40,108 +40,27 @@ stateful-memory.zip
 
 ### 5.2 SKILL.md Content
 
-The SKILL.md below is the complete skill instruction file. It is the primary artifact that guides Claude's memory behavior. Note its brevity relative to the v1 skill: there are no file paths, no session-ID bookkeeping, no branch-handling instructions, and no index-maintenance rules — the bridge owns all of that. The file begins with YAML frontmatter — `name` and `description` — which the client uses to index the skill and to decide when to invoke it; the `description` in particular must convey that the skill applies at the start of every conversation and whenever durable context is recalled or stored. The `description` is held to a 200-character budget for portability reasons set out in [Section 5.7](#57-frontmatter-constraints-and-portability); that budget is why it names no individual memory tools. The tool names live in the body below, which is loaded in full before any memory tool is called, so nothing is lost by omitting them from the frontmatter.
+**The skill file is not reproduced here. Its single source of truth is [`skill/SKILL.md`](https://github.com/fpl9000/mcp-bridge/blob/main/skill/SKILL.md) in the `fpl9000/mcp-bridge` repository** (note that repository is private, so the link resolves only for its owner).
+
+Earlier revisions of this section carried a complete copy of the file. That arrangement put the same artifact under version control in two repositories, with no mechanism keeping them equal, and the two had in fact already diverged in both directions: the copy here was a superset in one place (it retained the maintenance instructions preserved below) and stale in another (it predated changes made directly to the shipped file). Prose about the skill belongs in a design document; the skill itself is a build input, it is packaged by `build-release.sh`, and it is versioned alongside the bridge whose tools it describes. It lives there.
+
+What this section still owns is the *design intent* the file has to satisfy. Three constraints are normative and are stated elsewhere in this document rather than in the file itself:
+
+- **Packaging** — [Section 5.1](#51-skill-packaging) governs the archive layout and the installation path for each client.
+- **Frontmatter** — [Section 5.7](#57-frontmatter-constraints-and-portability) governs the `name` and `description` fields, including the 200-character budget on `description` and the reasoning behind it.
+- **Bootstrapping** — [Section 5.8](#58-bootstrapping-via-an-unconditionally-loaded-channel) governs how the skill comes to be invoked at the start of a conversation in the first place.
+
+In outline, the file covers the memory model (core, blocks, the derived index, the episodic log), conversation handles and their recovery, the conversation-start protocol, read and write triggers during a conversation, block-creation rules, memory-quality guidelines, error handling, and end-of-conversation behavior. Sections 5.3 through 5.6 below give the design rationale for each of those; the file is the operative statement of them.
+
+#### Deferred content
+
+A shipped `SKILL.md` must never instruct Claude to call a tool that its build does not register — an instruction to invoke a nonexistent tool is worse than a missing instruction, because the model will attempt the call. The minimal Layer 2 build registers eight tools and defers `memory_run_maintenance`, along with the sub-agent machinery its semantic merge requires, so the file correctly says nothing about maintenance today.
+
+The following text is held here, outside the file, and is to be added to it when `memory_run_maintenance` is implemented — not before. It is recorded in this document precisely because it must *not* live in the shipped file yet, which makes this the one part of the skill's content that the design spec still holds directly.
+
+A `## Memory Maintenance` section, placed between `### Memory quality guidelines` and `## Error Handling`:
 
 ```markdown
----
-name: stateful-memory
-description: Persistent memory across conversations. Use at the START of every conversation to load user, project, and history context, and DURING it to record durable facts, decisions, and updates.
----
-
-# Stateful Agent Memory Skill
-
-You have access to a persistent memory system that survives across conversations
-and gives you deep context about the user, their projects, and your shared history.
-You interact with it exclusively through the bridge's memory tools. You never need
-to know how or where memory is stored.
-
-## The Memory Model
-
-- **Core** — a compact always-loaded summary: who the user is, active projects,
-  key preferences. Read it with `memory_get_core`; replace it with `memory_write_core`.
-- **Blocks** — named content documents (e.g., `project-foo`, `decisions`,
-  `reference-go-patterns`). Read with `memory_get_block`, write with
-  `memory_write_block`, append with `memory_append_block`.
-- **The index** — a list of every block's name, one-line summary, and last-updated
-  time, returned by `memory_get_index`. Use it to decide which blocks to load.
-- **The episodic log** — a chronological record of significant conversations.
-  Add entries with `memory_append_episodic`; past months appear in the index as
-  `episodic-YYYY-MM` blocks.
-
-## Handles
-
-Call `memory_start_conversation` once at the start of any conversation that will
-use memory. It returns a `handle` — an opaque token identifying this conversation —
-along with the current core content and the derived block index, all in one round
-trip. Pass the handle to every subsequent memory tool call, always using the most
-recently returned value (every memory tool response echoes it back).
-
-If any memory tool returns a handle error, the recovery is always the same:
-call `memory_start_conversation` to get a fresh handle, then retry the operation.
-
-## Conversation Start Protocol
-
-At the start of every conversation, BEFORE responding to the user's first message:
-
-1. Call `memory_start_conversation` to get a handle, the current core content,
-   and the derived index — all in one call.
-2. If any index entry is relevant to the user's opening message, load it with
-   `memory_get_block(handle, block_name)`.
-3. Respond to the user, informed by your loaded context.
-
-If core comes back empty, this is a first-run scenario: write an initial core with
-`memory_write_core`, seeded from your built-in memory and the current conversation.
-
-## During the Conversation
-
-### Reading
-- When the conversation shifts to a topic listed in the index that you haven't
-  loaded, read that block.
-- When the user asks "what do you remember about X?", check the index for matching
-  blocks and read them. If the index summaries are too terse to identify the right
-  block, read the most plausible candidates. Combine with your built-in (Layer 1)
-  memory and respond naturally, as if recalling from your own knowledge.
-
-### Stale content
-A `memory_get_core` or `memory_get_block` response may include
-`changed_since_last_read: true`. This means the content has been updated since you
-last read it. Treat any earlier reasoning that depended on the previous version as
-potentially stale — double-check anything you concluded from it before relying on it.
-
-### Writing
-Write memory updates incrementally as significant information emerges. Do NOT
-accumulate changes and batch-write at the end — conversations can end abruptly.
-
-- **Update core** (`memory_write_core`) when a project starts or significantly
-  changes status, or when key facts about the user change. Provide the COMPLETE
-  document (full replacement). Keep core under ~1,000 tokens; move detail to blocks.
-- **Update a block** (`memory_write_block`) when significant project decisions are
-  made, technical details worth remembering emerge, or the user shares information
-  useful in future conversations. Provide the COMPLETE content (full replacement).
-  The optional `summary` parameter sets the block's one-line index description:
-  REQUIRED when creating a new block; omit it on updates unless the summary needs
-  to change.
-- **Append to a block** (`memory_append_block`) when adding to a running list or
-  log-style block without rewriting it.
-- **Append to the episodic log** (`memory_append_episodic`) periodically during
-  long conversations, at natural breakpoints, and when the user is wrapping up.
-  Format: `## YYYY-MM-DD — Brief Title` followed by a 2–5 sentence summary.
-
-### Creating new blocks
-If a conversation introduces a significant new project or topic that doesn't fit an
-existing block, create one with `memory_write_block` (a `summary` is required):
-- Projects: `project-<name>`
-- Reference material: `reference-<topic>`
-Do NOT create blocks for trivial or one-off topics — those go in the episodic log.
-
-### Memory quality guidelines
-- Be concise. Memory content is loaded into your context window — every token counts.
-- Prefer facts and decisions over process narrative. "Chose Go for single-binary
-  deployment" is better than "We discussed several languages and eventually...".
-- Date-stamp significant decisions and status changes.
-- Write summaries that will let a future conversation decide whether to load the
-  block — name the topic and its key contents, not just a title.
-
 ## Memory Maintenance
 
 If the user asks you to run memory maintenance, merge memory, consolidate memory,
@@ -152,48 +71,15 @@ concurrent conversations will briefly block while it runs — that's expected, a
 acceptable because the user asked for it. If the response has `more_pending: true`,
 call it again to continue until `more_pending` is false, then report the total
 number of merged blocks to the user.
-
-## Error Handling
-
-Memory tools may return `{ ok: false, error: { code, message } }`. The `message`
-is written to be self-explanatory — read it and act on it. Common patterns:
-
-- `INVALID_HANDLE` or `MALFORMED_HANDLE` → call `memory_start_conversation`, retry.
-- `SUMMARY_REQUIRED` → retry with a one-line `summary` argument.
-- `BLOCK_NOT_FOUND` → check the name against the index; create the block if creation
-  was the intent.
-- `MAINTENANCE_IN_PROGRESS` → memory is being consolidated; retry shortly.
-- `INTERNAL_ERROR` → mention the failure to the user; do not retry blindly.
-
-For any other code, follow the message's instructions.
-
-## Conversation End
-
-If the user says goodbye, thanks you, or the conversation is clearly winding down:
-
-1. Persist any pending memory updates (core, relevant blocks).
-2. Append an episodic entry summarizing the conversation.
-3. You do not need to announce that you're saving memory — just do it.
-
-## User Questions and Corrections
-
-If the user asks to correct or delete a memory: read the relevant block (or core),
-make the correction, write it back, and acknowledge.
-
-If the user asks to see their memory: show them the relevant content from the tools.
-You can mention that the underlying storage is plain markdown files on their machine
-that they can edit directly — the bridge will pick up their edits.
 ```
 
-**This is the canonical full-design skill; a given build may ship a subset.** The `SKILL.md`
-deployed with a build must not instruct Claude to call tools that build does not register — an
-instruction to invoke a nonexistent tool is worse than a missing instruction, because the model
-will attempt it. Concretely, the minimal Layer 2 build in `fpl9000/mcp-bridge` registers eight
-tools and defers `memory_run_maintenance` along with the sub-agent machinery its semantic merge
-requires, so that build's `SKILL.md` correctly omits both the `## Memory Maintenance` section above
-and the `MAINTENANCE_IN_PROGRESS` bullet from `## Error Handling`. Those are restored when the tool
-is implemented, not before. When comparing a deployed `SKILL.md` against this section, check the
-build's registered tool list before treating a difference as drift.
+And a bullet added to the `## Error Handling` list:
+
+```markdown
+- `MAINTENANCE_IN_PROGRESS` → memory is being consolidated; retry shortly.
+```
+
+When comparing a deployed `SKILL.md` against the repository copy, check the build's registered tool list before treating a difference as drift.
 
 ### 5.3 Conversation Lifecycle
 
