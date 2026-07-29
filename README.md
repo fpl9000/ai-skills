@@ -6,8 +6,11 @@ official skills specification and documentation.
 This repo contains the following skills.  Each `.skill` file has a matching directory containing the
 files in the skill package (e.g., the files for `myskill.skill` are in directory `myskill`).
 
-- [**github.skill**](github.skill): A skill to read and write GitHub repositories, including cloning
-  repos, pushing/pulling, creating issues, pull requests, branches, commits, and files.
+- [**github.skill**](github.skill): A skill for the GitHub operations that plain `git` cannot perform:
+  creating, listing, inspecting, and merging pull requests; creating, listing, and updating issues;
+  and enumerating a user's or organization's repositories. Repository *content* — reading and writing
+  files, branches, and commit history — is deliberately out of scope, because `git` itself does all of
+  that better.
 
   - Use this skill only in cloud environments (e.g., Claude.ai on the Web, or the Claude Code
     desktop app with a cloud environment).
