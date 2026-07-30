@@ -80,6 +80,12 @@ This section contains all questions that were ever open, even if they are now re
 >We should add all the remaining implementation work to Chapter 13, even if only at a very high-level. As each section's functionality becomes ready to implement, it will be expanded. This may help us decide the order to implement the remaining functionality.
 
 *Resolution:* TBD
+
+#### OQ#26: Need install script for Claude Code CLI and Claude Code Desktop
+
+>The existing install script (`deploy/install-bridge.sh` in repo `mcp-bridge`) supports only installing to Claude Desktop Chat. It should be updated to support Claude Code (CLI and Desktop).
+
+*Resolution:* TBD
 ### 11.2 Resolved Questions
 
 #### OQ#1: Race condition with memory writes
