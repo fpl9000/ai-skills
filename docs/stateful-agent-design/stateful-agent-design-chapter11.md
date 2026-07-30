@@ -77,7 +77,7 @@ This section contains all questions that were ever open, even if they are now re
 
 #### OQ#25: Add remaining implementation work to Chapter 13
 
->Should we add all the remaining implementation work to Chapter 13? Or is it better to only add each new stage as it is about to be implemented?
+>We should add all the remaining implementation work to Chapter 13, even if only at a very high-level. As each section's functionality becomes ready to implement, it will be expanded. This may help us decide the order to implement the remaining functionality.
 
 *Resolution:* TBD
 ### 11.2 Resolved Questions
