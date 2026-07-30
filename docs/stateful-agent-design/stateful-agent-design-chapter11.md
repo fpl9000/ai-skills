@@ -75,6 +75,11 @@ This section contains all questions that were ever open, even if they are now re
 
 *Resolution:* TBD
 
+#### OQ#25: Add remaining implementation work to Chapter 13
+
+>Should we add all the remaining implementation work to Chapter 13? Or is it better to only add each new stage as it is about to be implemented?
+
+*Resolution:* TBD
 ### 11.2 Resolved Questions
 
 #### OQ#1: Race condition with memory writes
