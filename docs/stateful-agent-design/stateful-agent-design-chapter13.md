@@ -118,7 +118,7 @@ the position it does. Steps 1–5 are prerequisites; step 6 is branching itself;
   cache.
 - **Touches:** `assembleIndex` (exclude `*.branch-*` files from block enumeration); the index-read
   path (substitute a handle's branch of a block for the base when the branch map has an entry); the
-  `IndexCache` type (from a single shared cache keyed on directory mtime to one cache per handle).
+  `IndexCache` type (from a single shared cache to one cache per handle).
 - **Why here, and why corrective — two distinct problems:**
   1. *Enumeration.* Once branch files live in the blocks directory, `assembleIndex`'s "every `*.md`"
      walk will index them as if they were blocks, producing phantom index entries the LLM can see.
