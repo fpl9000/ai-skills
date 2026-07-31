@@ -23,10 +23,7 @@ The memory-aware tool redesign makes this the most-simplified chapter of the des
 
 ### 5.1 Skill Packaging
 
-The memory skill is installed in one of two ways, depending on the client
-([Chapter 7](stateful-agent-design-chapter7.md#7-build-and-deployment)). Claude Code reads skills
-directly from the filesystem, so installation there is a file copy and the packaging rules below
-do not apply. Claude Desktop takes an uploaded archive, described here.
+The memory skill is installed in one of two ways, depending on the client ([Chapter 7](stateful-agent-design-chapter7.md#7-build-and-deployment)). Claude Code reads skills directly from the filesystem, so installation there is a file copy and the packaging rules below do not apply. Claude Desktop takes an uploaded archive, described here.
 
 The memory skill is a Claude Desktop skill packaged as a `.zip` file. Claude Desktop's uploader expects the archive to contain a single top-level *folder* whose name matches the skill's `name`, with `SKILL.md` inside it — not a bare `SKILL.md` at the archive root (a mismatched or missing folder is a documented upload-failure cause). The skill contains no scripts (all operations use the bridge's MCP tools). Upload it via Claude Desktop > Customize > Skills > "+" > "Upload a skill". Keep the `.zip` extension; `.skill` is only the extension Claude Desktop produces when you *download* an existing skill.
 
@@ -173,9 +170,7 @@ spawn_agent(
 
 ### 5.7 Frontmatter Constraints and Portability
 
-The `description` field is subject to **three different documented limits**, depending on how the
-skill reaches the agent. Getting this wrong is a silent failure, so the constraints are recorded
-here rather than left to be rediscovered.
+The `description` field is subject to **three different documented limits**, depending on how the skill reaches the agent. Getting this wrong is a silent failure, so the constraints are recorded here rather than left to be rediscovered.
 
 | Surface | `name` | `description` | Nature of the limit |
 |---|---|---|---|
@@ -185,90 +180,32 @@ here rather than left to be rediscovered.
 
 **Design decision: the `description` targets 200 characters or fewer.**
 
-The reasoning is that 200 is the tightest documented ceiling among the surfaces this system may
-plausibly be delivered through, and a description authored to the 1024-character specification
-limit cannot be uploaded through the Claude.ai Skills UI without being edited first. Since the
-Stateful Agent system may eventually be packaged for general release rather than remaining a
-personal deployment, the skill must install unmodified on every surface. Designing to the tightest
-ceiling costs a little expressiveness once; designing to the loosest costs a manual edit on every
-constrained install, forever.
+The reasoning is that 200 is the tightest documented ceiling among the surfaces this system may plausibly be delivered through, and a description authored to the 1024-character specification limit cannot be uploaded through the Claude.ai Skills UI without being edited first. Since the Stateful Agent system may eventually be packaged for general release rather than remaining a personal deployment, the skill must install unmodified on every surface. Designing to the tightest ceiling costs a little expressiveness once; designing to the loosest costs a manual edit on every constrained install, forever.
 
-**On enforcement.** In July 2026 the 570-character `description` this design previously specified
-was observed reaching a Claude.ai session's skill listing fully intact, so the 200-character limit
-is evidently not enforced uniformly on every upload path today. That observation is deliberately
-*not* treated as license to exceed it. Non-enforcement is not a contract: it can be tightened at
-any time, and — see below — the failure it would produce is invisible.
+**On enforcement.** In July 2026 the 570-character `description` this design previously specified was observed reaching a Claude.ai session's skill listing fully intact, so the 200-character limit is evidently not enforced uniformly on every upload path today. That observation is deliberately *not* treated as license to exceed it. Non-enforcement is not a contract: it can be tightened at any time, and — see below — the failure it would produce is invisible.
 
-**Why truncation is the dangerous failure mode.** A description that exceeds a limit is not
-rejected with an error the author will notice; it is silently cut, from the end. The trailing
-content of a description is where "and use it when…" trigger vocabulary conventionally sits, so
-truncation removes precisely the part that governs invocation while leaving the skill visibly
-installed and apparently healthy. The skill simply stops being selected in cases it used to cover,
-with nothing anywhere reporting why. Two consequences follow:
+**Why truncation is the dangerous failure mode.** A description that exceeds a limit is not rejected with an error the author will notice; it is silently cut, from the end. The trailing content of a description is where "and use it when…" trigger vocabulary conventionally sits, so truncation removes precisely the part that governs invocation while leaving the skill visibly installed and apparently healthy. The skill simply stops being selected in cases it used to cover, with nothing anywhere reporting why. Two consequences follow:
 
-1. **Front-load the triggers.** The earliest words must carry the conditions under which the skill
-   applies, so that any truncation removes elaboration rather than meaning.
-2. **Prefer trigger coverage to elegance.** Within the budget, spend characters on the vocabulary a
-   request is likely to use, not on describing the mechanism. The mechanism is what the body is
-   for.
+1. **Front-load the triggers.** The earliest words must carry the conditions under which the skill applies, so that any truncation removes elaboration rather than meaning.
+2. **Prefer trigger coverage to elegance.** Within the budget, spend characters on the vocabulary a request is likely to use, not on describing the mechanism. The mechanism is what the body is for.
 
-**Known limitation.** The frontmatter `description` is metadata consulted to decide whether a skill
-is *relevant*, which is not the same as an instruction that is reliably *executed*. A conversation
-in which the skill's start-of-conversation directive was present in the description but
-`memory_start_conversation` was nonetheless never called has been observed. Shortening the
-description neither causes nor cures this; the reliability of start-of-conversation initialization
-is tracked separately as an open question
-([Chapter 11](stateful-agent-design-chapter11.md#11-open-questions)) and is out of scope for this
-section, which governs only the field's length and content.
+**Known limitation.** The frontmatter `description` is metadata consulted to decide whether a skill is *relevant*, which is not the same as an instruction that is reliably *executed*. A conversation in which the skill's start-of-conversation directive was present in the description but `memory_start_conversation` was nonetheless never called has been observed. Shortening the description neither causes nor cures this; the reliability of start-of-conversation initialization is tracked separately as an open question ([Chapter 11](stateful-agent-design-chapter11.md#11-open-questions)) and is out of scope for this section, which governs only the field's length and content.
 
 ### 5.8 Bootstrapping via an Unconditionally-Loaded Channel
 
-[Section 5.7](#57-frontmatter-constraints-and-portability) established that the skill `description`
-is metadata used to decide whether a skill is *relevant*, not a mechanism that guarantees an
-instruction is *executed* — and OQ#18
-([Chapter 11](stateful-agent-design-chapter11.md#111-remaining-open-questions)) records a real
-conversation in which the description was present in the skill listing and
-`memory_start_conversation` was nonetheless never called. Relying on the description alone to make
-the agent bootstrap memory is therefore unreliable by construction: the directive that governs the
-single most important action in the whole system — the mandatory first call that loads `core.md`
-and the block index — lives in a field whose job is discovery, and it is only elaborated in the
-skill body once the skill has already been judged relevant.
+[Section 5.7](#57-frontmatter-constraints-and-portability) established that the skill `description` is metadata used to decide whether a skill is *relevant*, not a mechanism that guarantees an instruction is *executed* — and OQ#18 ([Chapter 11](stateful-agent-design-chapter11.md#111-remaining-open-questions)) records a real conversation in which the description was present in the skill listing and `memory_start_conversation` was nonetheless never called. Relying on the description alone to make the agent bootstrap memory is therefore unreliable by construction: the directive that governs the single most important action in the whole system — the mandatory first call that loads `core.md` and the block index — lives in a field whose job is discovery, and it is only elaborated in the skill body once the skill has already been judged relevant.
 
-**The resolution is to place the bootstrap directive additionally in a channel that is loaded
-verbatim into every conversation, with no relevance gating.** This does not replace the skill: the
-skill's conversation-start protocol ([Section 5.3](#53-conversation-lifecycle)) and its description
-remain exactly as specified, the description continuing to do the discovery job it does well. What
-changes is that *execution reliability no longer depends on relevance matching* — the unconditional
-channel carries the imperative, and the skill carries the detail. The two reinforce each other; the
-belt does not need the suspenders to be present, but both cost little and the failure mode being
-guarded against is silent.
+**The resolution is to place the bootstrap directive additionally in a channel that is loaded verbatim into every conversation, with no relevance gating.** This does not replace the skill: the skill's conversation-start protocol ([Section 5.3](#53-conversation-lifecycle)) and its description remain exactly as specified, the description continuing to do the discovery job it does well. What changes is that *execution reliability no longer depends on relevance matching* — the unconditional channel carries the imperative, and the skill carries the detail. The two reinforce each other; the belt does not need the suspenders to be present, but both cost little and the failure mode being guarded against is silent.
 
 Each client has such a channel:
 
-- **Claude Desktop:** the user's preferences (Settings → Profile personalization), which are loaded
-  into every conversation. The wording below belongs there. (This is the same mechanism that already
-  reliably steers other cross-conversation behavior in this deployment, such as the GitHub and
-  Bluesky conventions.)
-- **Claude Code:** the auto-loaded `CLAUDE.md`. The wording, and an important sub-agent-safety
-  caveat, are given in [Section 6.5](stateful-agent-design-chapter6.md#65-claudemd-recommendations).
+- **Claude Desktop:** the user's preferences (Settings → Profile personalization), which are loaded into every conversation. The wording below belongs there. (This is the same mechanism that already reliably steers other cross-conversation behavior in this deployment, such as the GitHub and Bluesky conventions.)
+- **Claude Code:** the auto-loaded `CLAUDE.md`. The wording, and an important sub-agent-safety caveat, are given in [Section 6.5](stateful-agent-design-chapter6.md#65-claudemd-recommendations).
 
 **Proposed Claude Desktop user-preferences wording:**
 
-> At the start of every conversation, before doing anything else, call `memory_start_conversation`
-> to load my stored memory. It returns a handle together with my core memory and the block index;
-> use that handle on every subsequent memory tool call. If any memory tool reports an unknown or
-> invalid handle, call `memory_start_conversation` again to obtain a fresh handle and retry. This is
-> the only way to mint a handle — there is no other initialization path.
+> At the start of every conversation, before doing anything else, call `memory_start_conversation` to load my stored memory. It returns a handle together with my core memory and the block index; use that handle on every subsequent memory tool call. If any memory tool reports an unknown or invalid handle, call `memory_start_conversation` again to obtain a fresh handle and retry. This is the only way to mint a handle — there is no other initialization path.
 
-The final sentence is deliberate: it reflects the reaffirmed decision
-([Chapter 3, Sections 3.3/3.14](stateful-agent-design-chapter3.md#314-handle-management)) that
-`memory_start_conversation` is the *sole* handle-minting mechanism and that the bridge performs no
-auto-initialization. Stating that plainly in the channel the agent actually reads removes any
-temptation to expect a handle to appear by some other means, and it makes the uniform error-recovery
-procedure ("get a new handle, retry") the obvious response to any handle error.
+The final sentence is deliberate: it reflects the reaffirmed decision ([Chapter 3, Sections 3.3/3.14](stateful-agent-design-chapter3.md#314-handle-management)) that `memory_start_conversation` is the *sole* handle-minting mechanism and that the bridge performs no auto-initialization. Stating that plainly in the channel the agent actually reads removes any temptation to expect a handle to appear by some other means, and it makes the uniform error-recovery procedure ("get a new handle, retry") the obvious response to any handle error.
 
-**What this section does not do.** It does not weaken or bypass the mandatory-first-call invariant;
-it strengthens the odds that the invariant is honored by putting the instruction where it will be
-read every time. And it does not make initialization automatic — an agent that ignores both the
-unconditional channel and the skill still fails to bootstrap, and that residual case is exactly what
-OQ#18 leaves open pending measurement (see [Chapter 8, Section 8.2.8](stateful-agent-design-chapter8.md#828-compliance-monitoring-script)).
+**What this section does not do.** It does not weaken or bypass the mandatory-first-call invariant; it strengthens the odds that the invariant is honored by putting the instruction where it will be read every time. And it does not make initialization automatic — an agent that ignores both the unconditional channel and the skill still fails to bootstrap, and that residual case is exactly what OQ#18 leaves open pending measurement (see [Chapter 8, Section 8.2.8](stateful-agent-design-chapter8.md#828-compliance-monitoring-script)).
