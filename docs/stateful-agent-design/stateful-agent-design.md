@@ -25,7 +25,7 @@
 - [10. References](#10-references)
 - [11. Open Questions](stateful-agent-design-chapter11.md)
 - [12. Appendix: mark3labs/mcp-go SDK Reference](stateful-agent-design-chapter12.md)
-- [13. Appendix: Implementation Ordering for Branching and Merging](stateful-agent-design-chapter13.md)
+- [13. Appendix: Implementation Status and Ordering](stateful-agent-design-chapter13.md)
 
 ---
 
@@ -330,6 +330,6 @@ See [Stateful Agent System: Detailed Design – Chapter 11](stateful-agent-desig
 
 See [Stateful Agent System: Detailed Design – Chapter 12](stateful-agent-design-chapter12.md).
 
-## 13. Appendix: Implementation Ordering for Branching and Merging
+## 13. Appendix: Implementation Status and Ordering
 
-See [Stateful Agent System: Detailed Design – Chapter 13](stateful-agent-design-chapter13.md). This appendix sequences the implementation of the branching and merging functionality that the minimal Layer 2 build omits, for the single-bridge case. It is a companion to the normative specification in [Chapter 3, Sections 3.15 and 3.17](stateful-agent-design-chapter3.md#315-per-handle-branching-and-race-detection).
+See [Stateful Agent System: Detailed Design – Chapter 13](stateful-agent-design-chapter13.md). This appendix is the master implementation-ordering document: it records what has been built and what has not, and for the work that remains it gives the order in which that work should be done and why that order is forced. The outstanding work is currently the branching and merging functionality that the minimal Layer 2 build omits, for the single-bridge case, so the appendix is also a companion to the normative specification in [Chapter 3, Sections 3.15 and 3.17](stateful-agent-design-chapter3.md#315-per-handle-branching-and-race-detection).
