@@ -45,7 +45,7 @@ Everything in this section is specified in Chapter 3 and absent from the current
 
 #### 13.2.1 The Governing Constraint
 
-**No functionality is re-implemented.** Every piece of new code either (a) implements a Chapter 3 specification that the minimal build left unimplemented, or (b) is functionality the minimal build *explicitly* marked as omitted (in a code comment referencing the relevant section or the `IMPLEMENTATION-PROMPT.md` scope). Nothing is redesigned in passing, and no working code is rewritten except where this appendix identifies it as **currently correct only under the no-branching assumption** — see [Section 13.2.2](#1322-two-kinds-of-prerequisite).
+**No functionality is re-implemented.** Every piece of new code either (a) implements a Chapter 3 specification that the minimal build left unimplemented, or (b) is functionality the minimal build *explicitly* marked as omitted (in a code comment referencing the relevant section or the scope of `IMPLEMENTATION-PROMPT-minimal.md`). Nothing is redesigned in passing, and no working code is rewritten except where this appendix identifies it as **currently correct only under the no-branching assumption** — see [Section 13.2.2](#1322-two-kinds-of-prerequisite).
 
 The practical test for the implementer: before writing any code for an item below, locate the Chapter 3 section it implements and the matching "deferred / omitted / not implemented in this build" marker in the current source. If both exist, the item is in scope as specified. If the source has no such marker — meaning the minimal build already implemented something in this area — stop and treat the difference as potential drift to be reconciled against the spec before proceeding, exactly as was done for the `memory_start_conversation` bundling deviation.
 
@@ -104,18 +104,46 @@ Each step lists the Chapter 3 section it implements, its category, what it touch
 ##### Step 7 — Implement the semantic merge: `memory_run_maintenance` **[additive — but drags in the sub-agent subsystem]**
 
 - **Implements:** [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex), plus the `MAINTENANCE_IN_PROGRESS` error code ([Section 3.19](stateful-agent-design-chapter3.md#319-error-response-convention)) and the ninth registered tool.
-- **Touches:** far more than the preceding steps. The merge is performed by a `claude -p` sub-agent doing a three-way semantic combine, so this step unblocks the entire deferred sub-agent subsystem: `spawn_agent`, the shared async executor, `ClaudeCLIConfig`, and `MaintenanceConfig`, all of which the minimal build defers together (see the `(deferred)` markers in `config.go` and the scope note in `tools.go`). It also adds the merge mutex and its interaction with the memory mutex ([Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex)).
 - **Why last, and why it is a hard gate rather than a nicety:** branching without merging is coherent but **monotonic** — every raced write forks a branch that nothing ever folds back, so branch files accumulate without bound. Within a single bridge this accumulates slowly, but it does accumulate. Merging is therefore not optional for a long-lived deployment; it is the second half of branching. Its cost is that it cannot be done as a self-contained memory feature: it requires the sub-agent machinery, which is why it is isolated as the final milestone rather than bundled with step 6.
+- **Why it is subdivided:** step 7 is substantially larger than steps 1 through 6 combined, and unlike them it is not a single coherent change. It spans process management, locking, a file-manipulation algorithm, an unwritten LLM prompt, and a new tool — five concerns that will be built and tested separately even though they ship as one milestone. The substeps below name them so that the work can be ordered and estimated. They are **placeholders**: each states what it covers and where it is specified, and is expected to be expanded before implementation begins.
+
+The substeps are given in dependency order. Only 7e is user-visible; 7a through 7d are internal machinery that 7e exposes.
+
+###### Step 7a — Sub-agent execution machinery **[additive]**
+
+- **Implements:** the async executor ([Section 3.20](stateful-agent-design-chapter3.md#320-async-executor)), the job lifecycle manager ([Section 3.21](stateful-agent-design-chapter3.md#321-job-lifecycle-manager)), and `ClaudeCLIConfig` — the `(deferred)` configuration markers in `config.go`.
+- **Scope note, and a scope reduction to confirm:** [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex) says the bridge invokes the merge sub-agent by "reusing the spawn machinery **internally**." If that is exact, this substep needs only the internal ability to run a `claude -p` process and collect its output — **not** the LLM-facing `spawn_agent` and `check_agent` tools of [Sections 3.4](stateful-agent-design-chapter3.md#34-tool-spawn_agent) and 3.5, which could remain deferred through this entire milestone. That reading should be verified against Sections 3.4 and 3.20 before this substep is expanded, because it materially changes its size.
+
+###### Step 7b — The merge mutex **[additive]**
+
+- **Implements:** the merge mutex and its interaction with the process-wide memory mutex ([Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex)), plus the `MAINTENANCE_IN_PROGRESS` error code ([Section 3.19](stateful-agent-design-chapter3.md#319-error-response-convention)) returned to a caller that would otherwise wait unacceptably long.
+- **Scope note:** for v1 the merge lock is the existing process-wide memory mutex held for the duration of each block's merge, so this substep is smaller than it sounds; a finer-grained per-block lock is explicitly a future optimization. Note that both mutexes are process-local and are superseded once multiple MCP clients are deployed ([Section 3.25.3](stateful-agent-design-chapter3.md#3253-the-cross-process-memory-lock)).
+
+###### Step 7c — The merge algorithm **[additive]**
+
+- **Implements:** the eight-step merge procedure of [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex) — select peer branches, acquire the lock, invoke the sub-agent, regenerate frontmatter, atomically replace the base, delete the branch files, clear the branch-map entries, release.
+- **Scope note:** this is the bridge-side half of the merge and preserves the single-writer model — the sub-agent produces merged *content*, but the bridge alone performs the file replacement. It depends on the atomic replace of step 5 and the branch-map structures of steps 2 and 4.
+
+###### Step 7d — The merge prompt **[additive — BLOCKED: not yet specified]**
+
+- **Implements:** nothing yet. This substep has no Chapter 3 section to point at, which is the reason it is called out separately.
+- **Blocked on:** OQ#21 in [Chapter 11](stateful-agent-design-chapter11.md), which asks whether the design specifies the prompt given to the merge sub-agent. It does not. [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex) specifies the merge *semantics* the prompt must produce — identify what is unique to each version, what is shared, and what conflicts; treat the chronologically latest version as authoritative on conflict while preserving earlier facts absent from it; take chronology from branch-filename timestamps and file mtimes — and it specifies model selection by merge complexity. But the prompt text itself does not exist, and step 7 cannot be completed without it.
+- **Why this is worth its own substep:** it is the only part of the remaining work that is not merely unimplemented but **unspecified**, so it is the only part that cannot be started by reading Chapter 3. Resolving OQ#21 is a prerequisite for this milestone, not a documentation nicety.
+
+###### Step 7e — The `memory_run_maintenance` tool **[additive]**
+
+- **Implements:** [Section 3.13](stateful-agent-design-chapter3.md#313-tool-memory_run_maintenance) — the ninth registered tool, its synchronous return contract, its per-call cap on blocks merged, and `MaintenanceConfig`.
+- **Scope note:** this is the only user-visible substep, and the thinnest: with 7a through 7d in place it is a tool registration, argument validation, and a loop over blocks with pending branches. It is listed last because it is the point at which the milestone becomes observable, not because it is the largest piece of work.
 
 #### 13.2.4 Milestone Boundaries and Stopping Points
 
 There are exactly two safe places to stop, and one place that looks like a stopping point but is not:
 
 - **After step 6 — Branching milestone (safe, shippable).** Single-bridge branching is complete and correct: concurrent conversations never silently overwrite one another. Deployable as-is for as long as branch accumulation stays tolerable. This is the correct first delivery.
-- **After step 7 — Merging milestone (safe, complete for single-bridge).** Branches are folded back on user-invoked maintenance; the single-bridge memory system matches the full Chapter 3 specification. This is the correct second delivery and the prerequisite for any multi-bridge / Claude Code work ([Section 13.2.7](#1327-relationship-to-multi-bridge-concurrency-section-325)).
+- **After step 7 (all of 7a–7e) — Merging milestone (safe, complete for single-bridge).** Branches are folded back on user-invoked maintenance; the single-bridge memory system matches the full Chapter 3 specification. This is the correct second delivery and the prerequisite for any multi-bridge / Claude Code work ([Section 13.2.7](#1327-relationship-to-multi-bridge-concurrency-section-325)).
 - **Between steps 6 and 7, as a permanent state — not safe.** Shipping branching with no merge path and leaving it there indefinitely lets branches grow without bound. Acceptable as a temporary milestone boundary; not acceptable as a destination.
 
-Steps 1–5 individually are **not** stopping points in the product sense — they add latent structure and corrective changes that are inert until step 6 switches branching on — but each is independently testable and should be landed and tested on its own before the next begins. In particular, steps 1, 3, and 5 (the corrective ones) each warrant regression tests proving the pre-branching behavior is unchanged, since their whole risk is disturbing code that currently works.
+The substeps of step 7 are likewise not individually shippable: until 7e lands there is no way to invoke a merge, so 7a–7d are inert machinery in the same way steps 1–5 are. Steps 1–5 individually are **not** stopping points in the product sense — they add latent structure and corrective changes that are inert until step 6 switches branching on — but each is independently testable and should be landed and tested on its own before the next begins. In particular, steps 1, 3, and 5 (the corrective ones) each warrant regression tests proving the pre-branching behavior is unchanged, since their whole risk is disturbing code that currently works.
 
 #### 13.2.5 Dependency Summary
 
@@ -124,13 +152,19 @@ Step 1  content-hash signature   ─┐
 Step 2  branch map + persistence ─┤
 Step 3  branch-aware index+cache ─┼──►  Step 6  race-routing (BRANCHING)  ──►  Step 7  merge (MERGING)
 Step 4  branch filename codec    ─┤                                              │
-Step 5  atomic Windows replace   ─┘                                              └─ unblocks sub-agent
-                                                                                    subsystem (spawn_agent,
-   corrective: 1, 3, 5                                                              async executor, CLI cfg,
-   additive:   2, 4                                                                 maintenance cfg, merge mutex)
+Step 5  atomic Windows replace   ─┘                                              │
+                                                                                 ├─ 7a  sub-agent execution
+   corrective: 1, 3, 5                                                           │      machinery (async executor,
+   additive:   2, 4                                                              │      job lifecycle, CLI config)
+                                                                                 ├─ 7b  merge mutex
+                                                                                 ├─ 7c  merge algorithm
+                                                                                 ├─ 7d  merge prompt  [BLOCKED:
+                                                                                 │      unspecified, OQ#21]
+                                                                                 └─ 7e  memory_run_maintenance
+                                                                                        (the ninth tool)
 ```
 
-Steps 1–5 have no ordering dependencies *among themselves* and may be implemented in any internal order or in parallel; the numbering reflects recommended risk-first sequencing (corrective items and the hash the write decision depends on come first). Step 6 depends on all of 1–5. Step 7 depends on 6.
+Steps 1–5 have no ordering dependencies *among themselves* and may be implemented in any internal order or in parallel; the numbering reflects recommended risk-first sequencing (corrective items and the hash the write decision depends on come first). Step 6 depends on all of 1–5. Step 7 depends on 6. Within step 7, 7c depends on 7a and 7b, and 7e depends on all of 7a–7d; 7a and 7b are independent of each other. 7d is not blocked by any other substep — it is blocked by an unresolved open question, so it can and should be settled before implementation of the milestone begins.
 
 #### 13.2.6 Effect on Chapter 7 (Build and Deployment)
 
@@ -153,6 +187,8 @@ Implementing both in their Section 3.25 form now means they will not need to be 
 
 ### 13.3 Already Implemented
 
-The minimal Layer 2 build in `fpl9000/mcp-bridge` — the eight-tool, memory-only bridge — is complete and deployed. Its scope is defined authoritatively by [Claude Code Prompt — Minimal `mcp-bridge` Implementation](mcp-bridge-minimal-implementation-prompt.md), mirrored in the bridge repository as `IMPLEMENTATION-PROMPT.md`.
+The minimal Layer 2 build in `fpl9000/mcp-bridge` — the eight-tool, memory-only bridge — is complete and deployed. Its scope is defined authoritatively by [`IMPLEMENTATION-PROMPT-minimal.md`](https://github.com/fpl9000/mcp-bridge/blob/main/IMPLEMENTATION-PROMPT-minimal.md) in that repository.
+
+**Implementation prompts live in the bridge repository, one file per round of work, named `IMPLEMENTATION-PROMPT-<round>.md`.** They govern Claude Code's work in that repository directly, so they belong beside the code they produce rather than in the design repository. A new round of work gets a new file; an existing prompt is never rewritten to describe different work, because each one is the durable record of what a given build was asked to be.
 
 That document is the record, and this section deliberately does not restate it. A second enumeration of the same scope in a second place is precisely the arrangement that drifts: the two copies disagree, and nothing signals which is right. Anyone needing to know what the current build does should read the implementation prompt, and anyone needing to know how it came to do so should read the repository's commit and pull-request history, which carries the detail at a granularity no prose summary here would keep current.
