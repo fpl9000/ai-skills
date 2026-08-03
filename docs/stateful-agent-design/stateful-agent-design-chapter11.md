@@ -86,6 +86,27 @@ This section contains all questions that were ever open, even if they are now re
 >The existing install script (`deploy/install-bridge.sh` in repo `mcp-bridge`) supports only installing to Claude Desktop Chat. It should be updated to support Claude Code (CLI and Desktop).
 
 *Resolution:* TBD
+
+#### OQ#27: Entry heading structure in non-episodic blocks
+
+>Should `memory_append_block` enforce an entry heading invariant the way `memory_append_episodic` now does? Episodic entries gained a `title` parameter: the bridge renders the heading itself and rejects a `content` body that begins with one, so entry structure in episodic files is an invariant of the storage layer. `memory_append_block` appends its `content` verbatim and imposes nothing, so heading structure in ordinary blocks depends entirely on the calling LLM applying the same convention consistently across separate conversations.
+
+*Resolution:* TBD
+
+The question was raised by an observed failure rather than in the abstract. Appending to `project-stateful-agent-system` across one working session, Claude wrote two consecutive entries at `##` and then, without any prompting or reason, wrote the next five at `###`. The result was that five unrelated entries appeared nested beneath an earlier one in Obsidian's outline panel, which is how Fran noticed. Nothing detected the drift, because nothing was watching: the write path has no notion of what an "entry" is.
+
+Note that this is not a variant of the defect that PR #7 fixed in the episodic path. That defect was a missing newline welding a heading onto the end of a preceding paragraph, and the storage layer could see it. Here every write was individually well-formed; only the *sequence* was inconsistent, and consistency across separate calls is not something a verbatim-append tool is positioned to check.
+
+Three options, with the trade-off being how much structure the storage layer should own versus leave to the writer:
+
+- **Do nothing.** Blocks are free-form by design, unlike the strictly chronological episodic log, and some blocks legitimately want nested headings — the standing sections at the top of `project-stateful-agent-system` (`## Repos and docs`, `## Key architectural decisions`) are not dated entries and a rigid rule would fight them. This option accepts that block structure is the writer's responsibility and treats the drift as a lapse rather than a design gap.
+- **Add an optional `title` parameter** to `memory_append_block`, mirroring `memory_append_episodic` but rendering `## Title` with no date, since block entries are not inherently chronological. When `title` is supplied, the same no-heading-in-`content` guard applies. When it is omitted, behavior is unchanged, so existing callers and free-form appends are unaffected. This makes the convention *available* as an invariant without making it mandatory.
+- **Enforce a maximum heading depth** on appended content — reject any `content` whose first heading is deeper than `##`. This is the strictest option and the one most likely to be wrong, since it would prevent a legitimately nested append.
+
+A prerequisite for any of these is deciding whether "entry" is even a meaningful concept for a non-episodic block, or whether that framing is being imported from the episodic log where it genuinely applies. If blocks are simply documents that get appended to, the second option is the most that is warranted; if blocks are logs with standing preamble sections, a stronger rule may be justified.
+
+This question is related to OQ#20, which asks how older episodic entries should be marked as potentially superseded. Both are ultimately about how much responsibility for entry structure and entry metadata belongs to the bridge rather than to the LLM writing through it, and they may be worth resolving together.
+
 ### 11.2 Resolved Questions
 
 #### OQ#1: Race condition with memory writes
