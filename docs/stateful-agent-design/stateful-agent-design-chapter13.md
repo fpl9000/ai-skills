@@ -19,6 +19,7 @@
     - [13.2.5 Dependency Summary](#1325-dependency-summary)
     - [13.2.6 Effect on Chapter 7 (Build and Deployment)](#1326-effect-on-chapter-7-build-and-deployment)
     - [13.2.7 Relationship to Multi-Bridge Concurrency (Section 3.25)](#1327-relationship-to-multi-bridge-concurrency-section-325)
+    - [13.2.8 Work Outside the Branching and Merging Chain](#1328-work-outside-the-branching-and-merging-chain)
   - [13.3 Already Implemented](#133-already-implemented)
 
 ---
@@ -29,11 +30,13 @@
 
 This appendix is the master implementation-ordering document for the Stateful Agent System. It records what has been built and what has not, and for the work that remains it says *in what order* that work should be done and *why that order is forced*.
 
-It is a sequencing document, not a specification. Every item in it is already specified normatively in Chapter 3; nothing here defines behavior, and where an item's position in the order is non-obvious or counter-intuitive, the reasoning is given explicitly.
+It is a sequencing document, not a specification. Almost every item in it is already specified normatively in Chapter 3; nothing here defines behavior, and where an item's position in the order is non-obvious or counter-intuitive, the reasoning is given explicitly. There are exactly two exceptions, and both are marked as such where they appear: the merge prompt of [Step 7d](#step-7d--the-merge-prompt-additive--blocked-not-yet-specified), which has no Chapter 3 section and is blocked on [OQ#21](stateful-agent-design-chapter11.md#oq21-sub-agent-merge-prompt); and `memory_search`, whose requirements live in [OQ#16](stateful-agent-design-chapter11.md#oq16-memory-search-under-the-memory-aware-abstraction) and which is owed a Chapter 3 section before implementation begins. An item that is queued but unspecified is a real state and is recorded honestly rather than hidden, but it is a state that should be exited before the work starts, not during it.
 
 The material is organized into two groups. [Section 13.2](#132-not-yet-implemented) covers what is **not yet implemented**, and comes first because it is the part that is actively consulted — it is the work queue. [Section 13.3](#133-already-implemented) covers what is **already implemented**, and is a pointer to the record of that work rather than a restatement of it. Within each group, the order in which items are recorded is the order in which they should be, or were, implemented.
 
-The remaining work currently consists of the invisible per-handle branching subsystem of [Section 3.15](stateful-agent-design-chapter3.md#315-per-handle-branching-and-race-detection) and the semantic merge process of [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex), both of which the minimal Layer 2 build deliberately omitted. In that build, writes are unconditional last-writer-wins. The immediate goal is to make branching work correctly in the **single-bridge** case.
+The bulk of the remaining work is the invisible per-handle branching subsystem of [Section 3.15](stateful-agent-design-chapter3.md#315-per-handle-branching-and-race-detection) and the semantic merge process of [Section 3.17](stateful-agent-design-chapter3.md#317-merge-process-and-merge-mutex), both of which the minimal Layer 2 build deliberately omitted. In that build, writes are unconditional last-writer-wins. The immediate goal is to make branching work correctly in the **single-bridge** case, and that chain of work is what [Section 13.2.3](#1323-the-ordered-plan) sequences.
+
+It is not, however, the whole of what remains. Three further items are decided and unbuilt: the `run_command` tool of [Section 3.6](stateful-agent-design-chapter3.md#36-tool-run_command), the LLM-facing `spawn_agent` and `check_agent` tools of [Sections 3.4](stateful-agent-design-chapter3.md#34-tool-spawn_agent) and [3.5](stateful-agent-design-chapter3.md#35-tool-check_agent), and the `memory_search` tool resolved in [OQ#16](stateful-agent-design-chapter11.md#oq16-memory-search-under-the-memory-aware-abstraction). None of them belongs to the branching chain, so forcing them into its numbered sequence would assert an ordering that does not exist; they are recorded instead in [Section 13.2.8](#1328-work-outside-the-branching-and-merging-chain). Their earlier absence from this appendix was an oversight rather than a deliberate exclusion — each meets Section 13.2's stated inclusion criterion, and `run_command` in particular was affirmatively decided by [OQ#2](stateful-agent-design-chapter11.md#oq2-need-a-tool-to-run-commands).
 
 Multi-bridge concurrency ([Section 3.25](stateful-agent-design-chapter3.md#325-multi-bridge-concurrency)) is a later goal and is out of scope here except where a single-bridge step should be implemented in its multi-bridge-ready form to avoid rework; those cases are called out individually in [Section 13.2.7](#1327-relationship-to-multi-bridge-concurrency-section-325).
 
@@ -143,6 +146,8 @@ There are exactly two safe places to stop, and one place that looks like a stopp
 - **After step 7 (all of 7a–7e) — Merging milestone (safe, complete for single-bridge).** Branches are folded back on user-invoked maintenance; the single-bridge memory system matches the full Chapter 3 specification. This is the correct second delivery and the prerequisite for any multi-bridge / Claude Code work ([Section 13.2.7](#1327-relationship-to-multi-bridge-concurrency-section-325)).
 - **Between steps 6 and 7, as a permanent state — not safe.** Shipping branching with no merge path and leaving it there indefinitely lets branches grow without bound. Acceptable as a temporary milestone boundary; not acceptable as a destination.
 
+The three items in [Section 13.2.8](#1328-work-outside-the-branching-and-merging-chain) do not create further milestones of their own. `run_command` is independently shippable at any time and needs no milestone; the sub-agent tools become shippable the moment step 7a lands; and `memory_search` sits after the merging milestone, extending it rather than adding a third stopping point. The two boundaries above therefore remain the only two.
+
 The substeps of step 7 are likewise not individually shippable: until 7e lands there is no way to invoke a merge, so 7a–7d are inert machinery in the same way steps 1–5 are. Steps 1–5 individually are **not** stopping points in the product sense — they add latent structure and corrective changes that are inert until step 6 switches branching on — but each is independently testable and should be landed and tested on its own before the next begins. In particular, steps 1, 3, and 5 (the corrective ones) each warrant regression tests proving the pre-branching behavior is unchanged, since their whole risk is disturbing code that currently works.
 
 #### 13.2.5 Dependency Summary
@@ -164,6 +169,8 @@ Step 5  atomic Windows replace   ─┘                                         
                                                                                         (the ninth tool)
 ```
 
+The diagram covers the branching-and-merging chain only. The three items of [Section 13.2.8](#1328-work-outside-the-branching-and-merging-chain) are deliberately absent from it: `run_command` has no edges at all, and the other two hang off single points already shown — the sub-agent tools off 7a, and `memory_search` off the completion of step 7 — so drawing them would add lines without adding constraints.
+
 Steps 1–5 have no ordering dependencies *among themselves* and may be implemented in any internal order or in parallel; the numbering reflects recommended risk-first sequencing (corrective items and the hash the write decision depends on come first). Step 6 depends on all of 1–5. Step 7 depends on 6. Within step 7, 7c depends on 7a and 7b, and 7e depends on all of 7a–7d; 7a and 7b are independent of each other. 7d is not blocked by any other substep — it is blocked by an unresolved open question, so it can and should be settled before implementation of the milestone begins.
 
 #### 13.2.6 Effect on Chapter 7 (Build and Deployment)
@@ -184,6 +191,29 @@ Two of the prerequisites here were originally specified in the multi-bridge sect
 - **The atomic Windows replace (step 5)** is likewise specified in [Section 3.25.6](stateful-agent-design-chapter3.md#3256-atomic-replace-on-windows) but is a single-bridge branching prerequisite (step 5's rationale).
 
 Implementing both in their Section 3.25 form now means they will not need to be revisited when multi-bridge support is built. **Everything else in Section 3.25 remains deferred** and must not be pulled forward: the cross-process file lock, per-client state files, client-scoped temp filenames, and the self-healing branch-map routing are multi-bridge concerns with no single-bridge purpose, and adding them now would be unused complexity. The correct reading is: single-bridge branching and merging (steps 1–7) come first and are a hard prerequisite for multi-bridge, because [Section 3.25.8](stateful-agent-design-chapter3.md#3258-effect-on-branching-and-merging) shows that multi-bridge turns branching from rare to routine — and there is no point making routine an operation that does not yet exist.
+
+#### 13.2.8 Work Outside the Branching and Merging Chain
+
+Three decided-and-unbuilt items do not belong to the chain sequenced in [Section 13.2.3](#1323-the-ordered-plan). They are recorded here rather than given step numbers, because a number in that sequence asserts a position in a forced order, and none of these has one. Two of the three have a single ordering constraint each; the first has none at all.
+
+##### `run_command` **[additive, unconstrained]**
+
+- **Implements:** [Section 3.6](stateful-agent-design-chapter3.md#36-tool-run_command) — shell execution via Cygwin bash, the hybrid sync/async model shared with `spawn_agent`, a 50 KB default output limit with middle truncation, no command restrictions for v1, and logging of every command.
+- **Depends on:** the async executor of [Section 3.20](stateful-agent-design-chapter3.md#320-async-executor), which is also built by [Step 7a](#step-7a--sub-agent-execution-machinery-additive). This is a shared component rather than a dependency on the branching chain: whichever of the two is built first builds it, and the other then consumes it.
+- **Why it is unconstrained:** it touches no memory state — no signatures, no branch map, no index — so nothing about branching or merging changes what it must do or how it must behave. It can be built before step 1, after step 7, or at any point between, and it was decided in its own right by [OQ#2](stateful-agent-design-chapter11.md#oq2-need-a-tool-to-run-commands) rather than as a consequence of the memory work.
+- **Note on where it runs:** this tool exists to serve Claude Desktop Chat, which has no native command execution. Claude Code already has it natively in both its CLI and Desktop forms, so this tool is not a general capability being added everywhere; it closes a gap in one harness.
+
+##### `spawn_agent` and `check_agent` **[additive, after Step 7a]**
+
+- **Implements:** [Sections 3.4](stateful-agent-design-chapter3.md#34-tool-spawn_agent) and [3.5](stateful-agent-design-chapter3.md#35-tool-check_agent) — the LLM-facing sub-agent tools, their 25-second synchronous window, and the `job_id` polling contract.
+- **Why after 7a, and not merely alongside it:** these two tools are the LLM-facing *surface* over exactly the machinery [Step 7a](#step-7a--sub-agent-execution-machinery-additive) builds — the async executor, the job lifecycle manager, and `ClaudeCLIConfig`. They are not a parallel track that happens to need similar parts. Building them before 7a would mean building that machinery twice, once for each consumer, and then reconciling the two; building them after makes 7a's scope note precise instead of speculative.
+- **What this settles:** Step 7a currently carries a scope question — whether Section 3.17's phrase about reusing the spawn machinery "internally" means these tools stay deferred through the whole merging milestone. It does, and this entry is where they come back. 7a builds the machinery for the merge sub-agent's use only; this item exposes it to the LLM afterward.
+
+##### `memory_search` **[additive, after Step 7 — and unspecified]**
+
+- **Implements:** the five requirements resolved in [OQ#16](stateful-agent-design-chapter11.md#oq16-memory-search-under-the-memory-aware-abstraction): handle-scoped, branch-aware for the calling handle only, results identified by block name with snippets and never by path, no read baselines established, and the memory mutex held only long enough to snapshot the file list.
+- **Why last:** the tool ships branch-aware from the outset, and branch-awareness presupposes that branches exist. A base-blocks-only version could be built against the current build, which has no branches at all, but retrofitting requirement (b) afterward would mean rewriting the result-assembly loop. Placing it after the merging milestone buys correctness at the cost of deferring a convenience.
+- **Unspecified — and this must be exited before work begins.** `memory_search` has no Chapter 3 section. Its requirements are stated in OQ#16 and nowhere else, which makes it the second item in this appendix in that condition, after the merge prompt of [Step 7d](#step-7d--the-merge-prompt-additive--blocked-not-yet-specified). The two differ in kind and the distinction matters: 7d is blocked because nobody has yet decided *what the prompt should say*, whereas `memory_search` is fully decided and merely undocumented in its normative home. Writing its Chapter 3 section is a transcription task with a known answer; resolving OQ#21 is not.
 
 ### 13.3 Already Implemented
 

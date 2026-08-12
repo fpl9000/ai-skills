@@ -7,15 +7,9 @@
 - [Stateful Agent System: Detailed Design](stateful-agent-design.md) — main design document, of which this is a part.
 ## 11. Open Questions
 
-This section contains all questions that were ever open, even if they are now resolved. Each question carries a stable identifier, **OQ#N**, assigned in the order the question was first raised and shown at the start of its heading; this identifier is what cross-references elsewhere in the design point to. A question keeps its `OQ#N` label regardless of its list position or of whether it currently sits under *Remaining* or *Resolved*. Consequently the identifiers are not contiguous within a subsection: for example, OQ#16 remains open below while the later OQ#17 has already been resolved.
+This section contains all questions that were ever open, even if they are now resolved. Each question carries a stable identifier, **OQ#N**, assigned in the order the question was first raised and shown at the start of its heading; this identifier is what cross-references elsewhere in the design point to. A question keeps its `OQ#N` label regardless of its list position or of whether it currently sits under *Remaining* or *Resolved*. Consequently the identifiers are not contiguous within a subsection: for example, OQ#18 remains open below while the later OQ#25 has already been resolved.
 
 ### 11.1 Remaining Open Questions
-
-#### OQ#16: Memory search under the memory-aware abstraction
-
->How should memory search work now that the LLM has no knowledge of the memory directory layout? OQ#13's interim workaround (`Filesystem:search_files` on the memory directory) is invalid in the version 2.0 design: it would leak the directory layout and branch filenames (e.g., `core.branch-h7k3xy90-20260520T142300Z.md`), violating the invisible-branching invariant, and the skill prohibits all Filesystem access to the memory directory.
-
-*Current status (open, target v1.x):* For v1, the derived index is the search surface — `memory_get_index` returns every block's name, summary, and `updated_at`, and Claude selects blocks to load by scanning summaries. The summary contract (required for new blocks, ≤ 200 characters) exists partly to keep this scan effective. When summaries prove insufficient (anticipated at ~50+ blocks), a bridge-side `memory_search(handle, query, max_results)` tool is the planned remedy. Design requirements carried over and updated from OQ#13: (a) the tool takes the conversation handle like every other memory tool; (b) it searches base blocks *and*, for the calling handle, that handle's branches (preserving the per-handle consistent view) while never exposing other handles' branches; (c) results identify blocks by **name** with snippets — no file paths, no branch filenames; (d) it does not establish read baselines (search results are informational; a subsequent `memory_get_block` registers the read); and (e) it holds the mutex only long enough to snapshot the file list. Implementation options range from simple bridge-side text scan to the FTS5 index of [Chapter 9, Section 9.1](stateful-agent-design-chapter9.md#91-fts5-search-index-option-3).
 
 #### OQ#18: Reliability of start-of-conversation memory initialization
 
@@ -72,12 +66,6 @@ This section contains all questions that were ever open, even if they are now re
 >>Artifacts can also now call MCP connectors directly. Build a dashboard or app that pulls information and takes actions for viewers, on demand.
 >
 >Can we leverage this functionality to enable access to Layer 2 memory in all 3 Claude environments: Desktop, Web, and mobile?
-
-*Resolution:* TBD
-
-#### OQ#25: Add remaining implementation work to Chapter 13
-
->We should add all the remaining implementation work to Chapter 13, even if only at a very high-level. As each section's functionality becomes ready to implement, it will be expanded. This may help us decide the order to implement the remaining functionality.
 
 *Resolution:* TBD
 
@@ -257,6 +245,22 @@ The one concern is output token cost for large blocks. If a block grows to 5,000
 
 *Note (version 2.0):* Section 4.1's "Update mechanism" row now reads "Direct via the bridge's memory-aware tools (`memory_write_core`, `memory_write_block`, `memory_append_block`, `memory_append_episodic`)", superseding the `safe_*` wording from this resolution.
 
+#### OQ#16: Memory search under the memory-aware abstraction
+
+>How should memory search work now that the LLM has no knowledge of the memory directory layout? OQ#13's interim workaround (`Filesystem:search_files` on the memory directory) is invalid in the version 2.0 design: it would leak the directory layout and branch filenames (e.g., `core.branch-h7k3xy90-20260520T142300Z.md`), violating the invisible-branching invariant, and the skill prohibits all Filesystem access to the memory directory.
+
+*Resolution:* Implement `memory_search(handle, query, max_results)` as a bridge-side tool, with the five design requirements carried forward from this question unchanged: (a) it takes the conversation handle like every other memory tool; (b) it searches base blocks *and*, for the calling handle, that handle's branches — preserving the per-handle consistent view — while never exposing another handle's branches; (c) results identify blocks by **name** with snippets, never by file path or branch filename; (d) it does not establish read baselines, since search results are informational and a subsequent `memory_get_block` registers the read; and (e) it holds the memory mutex only long enough to snapshot the file list, releasing it before text matching, which could be slow across many blocks and must not block writes.
+
+Two decisions settle the shape of the work. First, **the tool ships branch-aware from the outset** rather than in a base-blocks-only form that is retrofitted later. Requirement (b) is not a refinement of search; it is the invariant that keeps one conversation from seeing another's divergent view, and retrofitting it would mean revisiting the result-assembly path after it is written. Second, and following from the first, **the tool is implemented last** in the ordering of [Chapter 13](stateful-agent-design-chapter13.md): branch-awareness presupposes that branches exist, so the work cannot begin in earnest until the branching subsystem is complete. Searching for a way to ship it sooner was considered and rejected — a base-blocks-only version could indeed land against the current build, since that build has no branches at all, but it would buy a few weeks of a convenience tool at the cost of a rewrite of its core loop.
+
+The interim search surface is unchanged and remains adequate: the derived index returned by `memory_get_index` gives every block's name, summary, and `updated_at`, and the LLM selects blocks to load by scanning summaries. The summary contract — required when a block is created, capped at 200 characters — exists partly to keep that scan effective. The point at which summaries were anticipated to become insufficient was roughly 50 blocks, which remains far off.
+
+The implementation strategy is deliberately left open between a straightforward bridge-side text scan and the FTS5 index of [Chapter 9, Section 9.1](stateful-agent-design-chapter9.md#91-fts5-search-index-option-3). That choice depends on how large the store has actually grown by the time the work starts, and committing to it now would be guessing at a number that will be observable then.
+
+One consequence must be tracked rather than assumed: **`memory_search` has no Chapter 3 section.** Its requirements are stated here and nowhere else, which makes it the second item — after the merge prompt of [Chapter 13, Step 7d](stateful-agent-design-chapter13.md#step-7d--the-merge-prompt-additive--blocked-not-yet-specified) — that is queued for implementation without a normative specification to build from. A Chapter 3 section for it is owed before implementation begins.
+
+*Disposition:* queued as [Chapter 13, Section 13.2.8](stateful-agent-design-chapter13.md#1328-work-outside-the-branching-and-merging-chain).
+
 #### OQ#17: Should file `core.md` have special handling?
 
 >Memory file `core.md` is treated specially: it has dedicated tools to access its contents, `memory_get_core` and `memory_write_core`. Is there a compelling reason to treat `core.md` specially, when the existing tools, `memory_get_block` and `memory_write_block`, could also read/write `core.md`?
@@ -274,3 +278,14 @@ At that surface, core and blocks are legitimately different concepts, and four c
 
 The decisive point is what merging would actually cost. Merging would *not* eliminate the special handling; it would merely relocate it from a pair of cleanly separate tools into a reserved name plus a cluster of conditionals inside the generic block tools (suppress frontmatter for core, forbid the summary for core, exempt core from `INVALID_BLOCK_NAME`, hide append for core). By the design's own standards that is a regression: [Chapter 3, Section 3.7](stateful-agent-design-chapter3.md#37-memory-aware-tools-overview-and-abstraction) presents the LLM's mental model as "exactly five concepts," with **Core** and **Blocks** as distinct entries, and its abstraction-discipline rule warns against leaking machinery into the tool surface. Collapsing core into the block tools blurs that five-concept model and smears core's exceptions across the generic contract. Because the engine is already shared, merging also buys no implementation simplicity in return: `memory_get_core` and `memory_write_core` are thin wrappers that pass a fixed `target = core`, while the per-concept usage guidance ("call at the start of every conversation"; "keep core under ~1,000 tokens; move detail into blocks") lives where it is most useful — in each tool's own description. The dedicated tools are therefore retained.
 
+#### OQ#25: Add remaining implementation work to Chapter 13
+
+>We should add all the remaining implementation work to Chapter 13, even if only at a very high-level. As each section's functionality becomes ready to implement, it will be expanded. This may help us decide the order to implement the remaining functionality.
+
+*Resolution:* Adopted. [Chapter 13](stateful-agent-design-chapter13.md) was restructured to take on the master implementation-ordering role, and was retitled from "Implementation Ordering for Branching and Merging" to "Implementation Status and Ordering" to match its widened remit. It is now organized into [Section 13.2](stateful-agent-design-chapter13.md#132-not-yet-implemented), the work queue, and [Section 13.3](stateful-agent-design-chapter13.md#133-already-implemented), which is a pointer to the record of completed work rather than a restatement of it.
+
+Four decisions govern how the chapter is maintained. The already-implemented group is **a pointer, not a restatement** — a second enumeration of the same scope in a second place is the arrangement that drifts, so Section 13.3 links to the authoritative implementation prompt in the bridge repository instead of summarizing it. The ordering of material already recorded was left as it stood. Steps too large to be a single coherent change are **decomposed into substeps** rather than being estimated as a unit, which is how Step 7 came to have 7a through 7e. And candidate work that is still an open question in this chapter **stays out of Chapter 13 until it is individually decided**, because an undecided question may yet resolve as "do not implement" or "defer as a future enhancement", and listing it as pending work would misrepresent its status.
+
+*Note (this resolution was recorded late):* The work was carried out in `ai-skills` PR #57 on 2026-07-30, but this question was left in Section 11.1 marked `Resolution: TBD` until the audit that produced the Disposition convention noticed the discrepancy. The gap is itself an argument for the convention: a resolution that ends without a disposition leaves nothing that would look wrong if the corresponding work silently happened, or silently did not.
+
+*Disposition:* implemented — `ai-skills` PR #57 (2026-07-30).
