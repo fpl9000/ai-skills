@@ -221,7 +221,9 @@ This separation avoids mixing two distinct concerns in a single skill: the mecha
 
 The `RELAY_HMAC_SECRET` environment variable value is stored in the user's Claude.ai personal instructions (the `<userPreferences>` block), alongside the existing `GITHUB_TOKEN` and Bluesky credentials. These instructions are shared by both Claude Desktop and Claude.ai, so both environments have access to the secret.
 
-The script specifications, the github skill SKILL.md additions, and the ai-messaging skill's complete SKILL.md are preserved in the relay detailed specification referenced from [Chapter 9, Section 9.5.2](stateful-agent-design-chapter9.md#952-github-relay-fallback).
+The script specifications, the github skill SKILL.md additions, and the ai-messaging skill's complete SKILL.md are preserved in the relay detailed specification referenced from [Chapter 9, Section 9.5.2](stateful-agent-design-chapter9.md#952-github-relay-withdrawn).
+
+*Note (relay withdrawn, 2026-05-03):* This resolution is retained as a record of what was decided and why, but the thing it decided about no longer exists. The GitHub Relay has been withdrawn — see [Chapter 9, Section 9.5.2](stateful-agent-design-chapter9.md#952-github-relay-withdrawn) for the two reasons (impractical latency, and the disappearance of the remote-control goal it served). Consequently neither the `ai-messaging` skill nor the three relay scripts (`relay_common.py`, `relay_send.py`, `relay_receive.py`) will be built, the `github` skill gains no relay transport section, and no `RELAY_HMAC_SECRET` needs to be provisioned. The detailed specification this resolution points at was deleted in commit `beabbc1` and remains recoverable from git history as described in Section 9.5.2. The transport-versus-semantics separation argued for above is still sound as a general principle and may be worth reusing if a different messaging skill is ever built; only its application to the relay is void.
 
 #### OQ#13: Memory search tool
 

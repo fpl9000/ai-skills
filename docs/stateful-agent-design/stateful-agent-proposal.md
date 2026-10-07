@@ -43,7 +43,7 @@
 
 The goal is to use Claude — accessed through Anthropic's own UIs rather than a custom harness like LettaBot — as a **stateful agent** with persistent memory, full local system access (filesystem, network, command execution), and a graphical user interface. No single Claude environment currently provides all of these capabilities simultaneously. This proposal evaluates four architectures that bridge the gaps. The chosen architecture is **B1: Claude Desktop App + Local MCP Bridge** — a Go-based MCP bridge server running locally via stdio, providing filesystem, network, and command access to the Claude Desktop App. No tunnel, no cloud dependency for local operations, and a single static binary with no runtime dependencies. **Architecture A** (Claude Code Desktop + Stateful Memory Skill) remains as a fallback that requires no MCP infrastructure at all. **Architecture B2** (Claude.ai + tunnel) is documented as a potential future upgrade if the Desktop App's UI proves insufficient, but is not planned for initial implementation.
 
-Because Anthropic's built-in memory is limited (~500–2,000 tokens — adequate for identity and preferences, but far too small for deep project context, episodic recall, or technical notes), this proposal also defines a **two-layer memory strategy**. Layer 1 is Anthropic's built-in memory (automatic, compact, always present). Layer 2 is a supplementary system using the three-tier markdown memory model from the [existing design document](stateful-agent-skill-design.md), accessed via the MCP bridge's filesystem tools. This layered approach brings Claude closer to the deep memory capabilities of systems like Letta (formerly MemGPT) while maintaining transparency (human-readable markdown files) and portability (Git-backed, no vendor lock-in).
+Because Anthropic's built-in memory is limited (~500–2,000 tokens — adequate for identity and preferences, but far too small for deep project context, episodic recall, or technical notes), this proposal also defines a **two-layer memory strategy**. Layer 1 is Anthropic's built-in memory (automatic, compact, always present). Layer 2 is a supplementary system using the three-tier markdown memory model from the [existing design document](../agent-memory-design.md), accessed via the MCP bridge's filesystem tools. This layered approach brings Claude closer to the deep memory capabilities of systems like Letta (formerly MemGPT) while maintaining transparency (human-readable markdown files) and portability (Git-backed, no vendor lock-in).
 
 The proposal additionally defines a **sub-agent architecture** for delegating focused tasks to ephemeral Claude Code CLI instances via a `spawn_agent` MCP tool. Sub-agents are one-shot (fire-and-forget), have no memory of their own, and return results to the primary agent for incorporation into the conversation and optional persistence to Layer 2 memory.
 
@@ -84,7 +84,7 @@ The central tension is: **memory and rich UI live in the cloud; local access liv
 
 ### Architecture A: Claude Code Desktop + Stateful Memory Skill
 
-**Strategy:** Use the environment that already has full local access and a GUI, then add the missing piece (persistent memory) via the stateful memory skill described in the [existing design document](stateful-agent-skill-design.md).
+**Strategy:** Use the environment that already has full local access and a GUI, then add the missing piece (persistent memory) via the stateful memory skill described in the [existing design document](../agent-memory-design.md).
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -474,7 +474,7 @@ The recommended approach is a **two-layer memory system**:
 
 Layer 1 is always present and requires no user effort — Anthropic maintains it automatically. Layer 2 is opt-in and managed by Claude via the MCP bridge's tools, guided by a skill that teaches Claude the memory structure and lifecycle.
 
-The key insight is that **Layer 2 content does not need to be loaded all at once**. The three-tier model from the [existing design document](stateful-agent-skill-design.md) — core summary, index, and on-demand content blocks — is designed precisely for this. Claude loads only the core summary and index at session start (a bounded cost), then retrieves specific content blocks as needed during the conversation.
+The key insight is that **Layer 2 content does not need to be loaded all at once**. The three-tier model from the [existing design document](../agent-memory-design.md) — core summary, index, and on-demand content blocks — is designed precisely for this. Claude loads only the core summary and index at session start (a bounded cost), then retrieves specific content blocks as needed during the conversation.
 
 ### Option 1: Tiered Memory via MCP Filesystem Tools
 
@@ -1006,7 +1006,7 @@ Note: Project-level CLAUDE.md files (placed in a project's `.claude/CLAUDE.md`) 
 
 ## Relation to Existing Design
 
-This proposal is a **companion to** the [Stateful Agent Skill Design Document](stateful-agent-skill-design.md), not a replacement for it. The design document specifies *how the memory skill works internally* (three-tier model, markdown storage, pluggable backends, session lifecycle). This proposal specifies *which Claude environment to run it in* and *what additional infrastructure is needed* to satisfy the full set of requirements.
+This proposal is a **companion to** the [Stateful Agent Skill Design Document](../agent-memory-design.md), not a replacement for it. The design document specifies *how the memory skill works internally* (three-tier model, markdown storage, pluggable backends, session lifecycle). This proposal specifies *which Claude environment to run it in* and *what additional infrastructure is needed* to satisfy the full set of requirements.
 
 The key design decisions from the existing document that carry forward into **all** architectures, including Architecture B:
 

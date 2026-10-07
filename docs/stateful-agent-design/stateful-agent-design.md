@@ -307,7 +307,7 @@ See [Stateful Agent System: Detailed Design – Chapter 9](stateful-agent-design
 
 ## 10. References
 
-1. **Proposal document:** [stateful-agent-proposal.md](../../docs/stateful-agent-proposal.md) — Requirements, architecture evaluations, 27 open question resolutions, rationale for all major decisions.
+1. **Proposal document:** [stateful-agent-proposal.md](stateful-agent-proposal.md) — Requirements, architecture evaluations, 27 open question resolutions, rationale for all major decisions.
 2. **Design update plan:** [design-update-plan.md](design-update-plan.md) — The plan governing the version 2.0 rewrite: memory-aware tools, the handle protocol, invisible branching, the derived index, and bridge state persistence. Includes the full rationale and the resolution of eleven open questions.
 3. **Memory-aware tools analysis:** [memory-aware-tools-analysis.md](memory-aware-tools-analysis.md) — The analysis that motivated replacing path-based file tools with memory-aware tools.
 4. **Previous skill design (superseded):** [agent-memory-design.md](../../docs/agent-memory-design.md) — Earlier design for a standalone skill without MCP bridge. Concepts carried forward; implementation approach replaced.

@@ -14,7 +14,7 @@
   - [9.4 GitHub Backup Automation](#94-github-backup-automation)
   - [9.5 Remote Access: Mobile-to-Local Communication](#95-remote-access-mobile-to-local-communication)
     - [9.5.1 Dispatch Integration (Preferred Path)](#951-dispatch-integration-preferred-path)
-    - [9.5.2 GitHub Relay (Fallback)](#952-github-relay-fallback)
+    - [9.5.2 GitHub Relay (Withdrawn)](#952-github-relay-withdrawn)
     - [9.5.3 Architecture B2 as Long-Term Solution](#953-architecture-b2-as-long-term-solution)
   - [9.6 Proposed Solution to Concurrent Read-Modify-Write Race Condition](#96-proposed-solution-to-concurrent-read-modify-write-race-condition)
   - [9.7 Importance Scoring on Blocks and Episodic Entries](#97-importance-scoring-on-blocks-and-episodic-entries)
@@ -117,43 +117,23 @@ In March 2026, Anthropic launched **Dispatch** as a research preview — a Cowor
 
 1. **Monitor Dispatch GA and platform expansion.** If Anthropic releases Dispatch for Windows and/or adds MCP server access within Cowork sessions, re-evaluate. Both conditions must be met for Dispatch to replace the relay.
 2. **Monitor Cowork + MCP convergence.** Anthropic may eventually allow Cowork sessions to connect to user-configured MCP servers (the way Claude Desktop does today). This would resolve the second and third limitations above.
-3. **Do not implement the relay preemptively.** If Dispatch reaches our requirements within a reasonable timeframe (6–12 months), the relay design is unnecessary.
+3. **The relay fallback no longer exists.** This action item originally advised against building the GitHub Relay preemptively while Dispatch matured. The relay has since been withdrawn outright ([Section 9.5.2](#952-github-relay-withdrawn)), so Dispatch is no longer being weighed against a fallback that is waiting in reserve; if Dispatch does not reach the requirements above, the alternative to evaluate is Architecture B2 ([Section 9.3](#93-architecture-b2-upgrade)), not the relay.
 
-#### 9.5.2 GitHub Relay (Fallback)
+#### 9.5.2 GitHub Relay (Withdrawn)
 
-If Dispatch does not gain Windows support and MCP bridge access within a reasonable timeframe, the **GitHub Relay** protocol remains a viable fallback. The relay uses a private GitHub repository as an asynchronous message bus, leveraging the fact that both Claude.ai (via the GitHub skill) and the local MCP bridge can read/write to the GitHub REST API.
+**Status: withdrawn on 2026-05-03 — preserved here as a historical stub. Superseded by Dispatch ([Section 9.5.1](#951-dispatch-integration-preferred-path)) for the sub-agent and command-execution use case, and by Architecture B2 ([Section 9.3](#93-architecture-b2-upgrade)) for direct remote tool access.**
 
-**Architecture summary:**
+This section originally specified the **GitHub Relay**: a protocol that used a private GitHub repository as an asynchronous message bus, so that Claude.ai (via the GitHub skill) and the local MCP bridge could exchange signed request/response messages without either one being able to reach the other directly. It defined three operations (`memory_query`, `shell_command`, and `claude_prompt`), bidirectional HMAC-SHA256 authentication over a shared secret, replay prevention via timestamp validation, and a split across two skills — a `github` skill carrying the operation-agnostic transport layer and a new `ai-messaging` skill carrying the operational semantics.
+
+The relay is withdrawn for two independent reasons. The first is **performance**: a single prompt-and-response round trip took minutes, because the protocol is built on polling a git remote rather than on a live connection, and that latency makes conversational use impractical regardless of how well the rest of the protocol works. The second, and more fundamental, is that the relay solves a problem this design no longer has. Its purpose was *remote control* — driving tool execution on the home machine from a phone or from the web — and remote control has since been judged to be of no practical value here. The goal that replaced it is **remote access to Layer 2 memory data from as many Claude harnesses as possible**, with sub-agent spawning and command execution deliberately remaining confined to Claude Desktop Chat (Claude Code already provides both natively in its own harnesses). The architecture question that goal raises — how to reach Layer 2 from every harness without depending on a machine that is kept running — is taken up as an open question in [Chapter 11](stateful-agent-design-chapter11.md).
+
+The full protocol specification lived in a companion file, `stateful-agent-design-chapter9-appendix-relay.md`, which was deleted from this repository in commit `beabbc1` on 2026-05-03. It is recoverable from git history and is not reproduced here:
 
 ```
-┌──────────────────┐       ┌──────────────┐       ┌──────────────────────┐
-│  Claude.ai       │       │   GitHub     │       │  Local Machine       │
-│  (phone/web)     │       │   Private    │       │  (Windows 11)        │
-│                  │  PUT  │   Repo       │  GET  │                      │
-│  GitHub skill ───────────▶ requests/   ─────────▶  MCP Bridge         │
-│                  │       │              │       │    │                 │
-│                  │  GET  │              │  PUT  │    ├─ memory_query   │
-│  GitHub skill ◀─────────── responses/ ◀──────────   ├─ shell_command  │
-│                  │       │              │       │    └─ claude_prompt  │
-└──────────────────┘       └──────────────┘       └──────────────────────┘
+git show beabbc1^:docs/stateful-agent-design/stateful-agent-design-chapter9-appendix-relay.md
 ```
 
-**Three operations, two execution paths:**
-
-- **`memory_query`** — Reads a memory file from the Layer 2 directory. Handled directly by the bridge (no inference). Fast, deterministic.
-- **`shell_command`** — Executes a shell command locally via Cygwin bash. Handled directly by the bridge (no inference). Equivalent to the bridge's `run_command` tool.
-- **`claude_prompt`** — Forwards a prompt to Claude Desktop for full agent-loop processing. Claude Desktop performs whatever tool calls it deems appropriate, then returns its response via a `relay_respond` MCP tool. Requires an AutoHotkey-based prompt injection mechanism (design TBD).
-
-**Security:** Bidirectional HMAC-SHA256 authentication via shared-secret signing of all messages. Both request and response payloads are signed using relay skill scripts (`relay_send.py`, `relay_receive.py`) that run via `uv run`. Replay prevention via ±5-minute timestamp validation. Operation allowlisting, rate limiting, and audit logging in the bridge.
-
-**Typical round-trip latency:** 15–60 seconds for bridge-local operations (`memory_query`, `shell_command`); 30 seconds to 5+ minutes for `claude_prompt` (depends on task complexity and Claude Desktop inference time).
-
-**Detailed specification:** The full protocol design — message format, HMAC protocol, bridge relay integration, Claude.ai workflow, script inventory, relay transport additions to the GitHub skill, and the AI Messaging skill — is preserved in [Appendix: GitHub Relay Detailed Specification](stateful-agent-design-chapter9-appendix-relay.md).
-
-**Implementation trigger:** Implement the relay if, 6–12 months after Dispatch GA, any of the following remain true:
-- Dispatch does not support Windows.
-- Cowork sessions cannot access user-configured MCP servers.
-- Dispatch lacks a programmatic API and automation is required.
+Note that if this specification is ever migrated into another repository by a history-rewriting tool such as `git filter-repo`, the commit hash above will change, because such tools rewrite every retained commit. The appendix would remain recoverable — the commit message is "Deleted stateful-agent-design-chapter9-appendix-relay.md." and its date is 2026-05-03 — but the hash cited here would need to be updated to match the rewritten history.
 
 #### 9.5.3 Architecture B2 as Long-Term Solution
 
@@ -171,7 +151,7 @@ The B2 upgrade is deferred because it requires Cloudflare Tunnel setup and OAuth
 | Approach | Prerequisites | Latency | Tool access | Status |
 |----------|--------------|---------|-------------|--------|
 | **Dispatch** | Windows support, MCP in Cowork | ~seconds | Cowork tools only | Monitor (research preview) |
-| **GitHub Relay** | Relay repo, HMAC secret, bridge relay goroutine | 15 sec–5 min | Full bridge tools (via relay) | Spec complete, deferred |
+| **GitHub Relay** | Relay repo, HMAC secret, bridge relay goroutine | 15 sec–5 min | Full bridge tools (via relay) | **Withdrawn (2026-05-03)** — see [Section 9.5.2](#952-github-relay-withdrawn) |
 | **Architecture B2** | Cloudflare Tunnel, OAuth 2.1, Streamable HTTP | Sub-second | Full bridge tools (direct MCP) | Deferred (long-term) |
 
 
